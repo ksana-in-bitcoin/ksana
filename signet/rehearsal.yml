@@ -1,0 +1,66 @@
+# Rehearsal of the hosted public signet on one machine (signet/rehearse.sh, D-107), on top of docker-compose.yml:
+# bitcoind runs a private signet whose blocks anyone can mine (the challenge OP_TRUE) instead of joining Bitcoin's
+# public signet, btc-miner mines one of its blocks every $KSANA_REHEARSAL_BTC_INTERVAL seconds, and nothing is
+# published but the page, on 127.0.0.1:$KSANA_REHEARSAL_PORT over plain HTTP (KSANA_SIGNET_DOMAIN=:80).
+services:
+  bitcoind:
+    command:
+      - -signet=1
+      - -signetchallenge=51
+      - -server=1
+      - -printtoconsole=1
+      - -txindex=1
+      - -acceptnonstdtxn=0
+      # the rehearsal wallet funds the seed node and the probe before bitcoind has any fee estimate
+      - -fallbackfee=0.0001
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - "-rpcauth=${BTC_RPCAUTH}"
+      - -rpcservertimeout=600
+    ports: !reset []
+
+  btc-miner:
+    image: ksana-signet:ksana
+    entrypoint: [/bin/bash, -c]
+    command:
+      - |
+        set -eu
+        rpc() {
+          curl -sS --user "ksana:$$BTC_RPC_PASS" -H 'content-type: application/json' \
+            --data-binary "{\"jsonrpc\":\"1.0\",\"id\":\"miner\",\"method\":\"$$1\",\"params\":$$2}" http://bitcoind:38332
+        }
+        # The block rewards go to a BIP173 example address: the rehearsal wallet already holds the coins it needs.
+        # Signet's proof of work takes a few million hashes a block, more than generatetoaddress tries by default
+        while true; do
+          rpc generatetoaddress '[1, "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", 1000000000]' >/dev/null || true
+          sleep "$$INTERVAL"
+        done
+    environment:
+      BTC_RPC_PASS: "${BTC_RPC_PASS}"
+      INTERVAL: "${KSANA_REHEARSAL_BTC_INTERVAL:-15}"
+    depends_on:
+      - bitcoind
+    restart: unless-stopped
+
+  node1:
+    ports: !reset []
+
+  node2:
+    ports: !reset []
+
+  web:
+    ports: !override
+      - "127.0.0.1:${KSANA_REHEARSAL_PORT:-18080}:80"
+
+  # The points service and the keeper read a configuration that rehearse.sh writes, naming the rehearsal's faucet and
+  # operator and, once they are deployed, the official instances (signet/points.json of ksana-points names the public signet's)
+  points:
+    environment:
+      # X's oEmbed endpoint, which rehearse.sh stands in for in the btc-proxy container while a buyer links X (D-127)
+      KSANA_POINTS_X_OEMBED: http://btc-proxy:8099/oembed
+    volumes:
+      - ${KSANA_SIGNET_HOME}/points.json:/app/points.json:ro
+
+  keeper:
+    volumes:
+      - ${KSANA_SIGNET_HOME}/points.json:/app/points.json:ro

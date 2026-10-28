@@ -1,0 +1,16 @@
+# unwrap / expect / panic / indexing are allowed in test code; the consensus crates deny these lints for non-test code in lib.rs.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# SPEC §0: consensus logic must not depend on HashMap iteration order or on the system time.
+# Non-consensus crates that really need these types/methods (node, network, etc.) allow them explicitly at the crate level.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "consensus code must not depend on HashMap iteration order; use BTreeMap instead" },
+    { path = "std::collections::HashSet", reason = "consensus code must not depend on HashSet iteration order; use BTreeSet instead" },
+]
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "consensus code must not depend on the system time; the caller passes it in" },
+    { path = "std::time::Instant::now", reason = "consensus code must not depend on the system time; the caller passes it in" },
+]

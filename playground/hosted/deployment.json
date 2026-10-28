@@ -1,0 +1,8 @@
+{
+  "chain": "signet",
+  "rpc": "https://signet.ksana.network/rpc",
+  "faucet": "https://signet.ksana.network/faucet",
+  "compile": "https://signet.ksana.network/compile",
+  "explorer": "https://signet.ksana.network/",
+  "instances": {}
+}

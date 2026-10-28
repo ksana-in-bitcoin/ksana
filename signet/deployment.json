@@ -1,0 +1,7 @@
+{
+  "chain": "signet",
+  "rpc": "/rpc",
+  "indexer": "/indexer",
+  "btc": "/btc",
+  "faucet": "/faucet"
+}

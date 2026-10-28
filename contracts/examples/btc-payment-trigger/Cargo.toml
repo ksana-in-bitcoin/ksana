@@ -1,0 +1,18 @@
+[package]
+name = "btc-payment-trigger"
+description = "Ksana example contract: payout triggered by a BTC payment (btc_header + Merkle proof + asset_issue)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk.workspace = true
+
+[lints]
+workspace = true

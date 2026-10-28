@@ -1,0 +1,121 @@
+/* The NFT page: token cards in a grid that becomes one column on a phone. */
+
+/* three counts side by side even on a phone */
+.stats.nft-stats {
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: var(--sp-3);
+}
+
+.nft-hint {
+  margin-bottom: var(--sp-3);
+}
+
+.nft-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  gap: var(--sp-3);
+}
+
+.nft-card {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.nft-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.nft-badges {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* The token's ID on a tint of its own hue: the page never shows a token's image, so this tells cards apart */
+.nft-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid hsl(var(--nft-hue, 190) 55% 50% / 0.55);
+  border-radius: var(--r-ctl);
+  background: hsl(var(--nft-hue, 190) 70% 50% / 0.16);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lead);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.nft-uri {
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.nft-facts {
+  display: grid;
+  gap: 4px;
+}
+
+.nft-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px var(--sp-3);
+  font-size: var(--fs-small);
+  min-width: 0;
+}
+
+.nft-fact > :first-child {
+  color: var(--ink-3);
+}
+
+.nft-fact-value {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.nft-form {
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--line);
+}
+
+.nft-buy {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  min-width: 0;
+}
+
+.nft-find {
+  margin-bottom: var(--sp-3);
+  scroll-margin-top: calc(var(--topbar-h) + var(--sp-3));
+}
+
+.nft-found {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.nft-more {
+  margin-top: var(--sp-3);
+}
+
+.nft-event {
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}

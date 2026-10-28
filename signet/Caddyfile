@@ -1,0 +1,79 @@
+# Caddy of the hosted public signet (D-107): the web wallet and the public endpoints on one origin, with a certificate
+# from Let's Encrypt for $KSANA_SIGNET_DOMAIN (signet/docker-compose.yml). The services behind it see the client's
+# address in X-Forwarded-For, which Caddy sets itself (it trusts no incoming value).
+#
+# $KSANA_SIGNET_FORMER_DOMAIN, when set, is the name the signet had before (D-112): it gets a certificate too, the
+# endpoints still answer there, and the page moves to $KSANA_SIGNET_DOMAIN for good. The address list takes the names
+# when the file is read ({$...}); the host matcher reads its name per request ({env....}), as an empty name would leave
+# a matcher without a host.
+
+{$KSANA_SIGNET_DOMAIN} {$KSANA_SIGNET_FORMER_DOMAIN} {
+	encode zstd gzip
+
+	# node1's JSON-RPC, HTTP and WebSocket (ksana_subscribeBlocks); the node allows any origin (--rpc-cors '*')
+	handle_path /rpc* {
+		reverse_proxy node1:8545
+	}
+	# The indexer has no cross-origin setting (D-070): pages reach it here
+	handle_path /indexer* {
+		reverse_proxy indexer:8546
+	}
+	# Four bitcoind methods for the wallet's path C and top-ups, and two Esplora paths for listing an address's coins
+	# (signet/services/btc-proxy.mjs)
+	handle_path /btc* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy btc-proxy:8080
+	}
+	handle_path /faucet* {
+		request_body {
+			max_size 4KB
+		}
+		reverse_proxy faucet:8081
+	}
+	# The contract playground's compile service (D-119), which only this Caddy reaches (the compile network of
+	# signet/docker-compose.yml): a source of up to 128 KiB as JSON; a build may wait in the service's queue before it
+	# runs. The playground's page, at an origin of its own, calls it, the faucet and node1 across origins
+	handle_path /compile* {
+		request_body {
+			max_size 300KB
+		}
+		reverse_proxy compiler:8090
+	}
+	# The testnet points service (D-126), in the points profile: the API of the points page, which is a Cloudflare
+	# Worker at an origin of its own. Its requests are small JSON (the service takes 8 KiB at most)
+	handle_path /points* {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy points:8082
+	}
+	# The page (hash routes, so every path is a file); the hashed assets never change, the rest (index.html,
+	# deployment.json) is checked each time. At the former name the page moves (301, path and query kept) while the
+	# endpoints above stay: the CLI and WebSocket clients follow no redirect, fetch turns a POST into a GET on a 301,
+	# and a browser follows none from a preflight
+	handle {
+		@former host {env.KSANA_SIGNET_FORMER_DOMAIN}
+		redir @former https://{$KSANA_SIGNET_DOMAIN}{uri} permanent
+		root * /srv
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@pages not path /assets/*
+		header @pages Cache-Control "no-cache"
+		# No other site shows the page in a frame, where a page laid over it could take a visitor's clicks on its
+		# buttons (found by a review of the hosted signet; the project's site sends the same, build.mjs of ksana-site).
+		# Only the page: the endpoints above answer with data, which no frame shows
+		header {
+			Content-Security-Policy "frame-ancestors 'none'"
+			X-Frame-Options DENY
+		}
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

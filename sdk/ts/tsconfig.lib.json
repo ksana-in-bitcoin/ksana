@@ -1,0 +1,9 @@
+{
+  "//": "Checks only the library code: no Node types are loaded, so that src/ uses only Web standard APIs (fetch, crypto.getRandomValues, TextEncoder) and works in both browsers and Node.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["src"]
+}

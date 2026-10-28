@@ -1,0 +1,22 @@
+[package]
+name = "amm"
+description = "Ksana example contract: constant-product AMM with integer arithmetic (KS-20 tokens in one step with transfer_and_call, or pulled with transfer_from; built-in assets attached)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk = { workspace = true, features = ["standards"] }
+
+[dev-dependencies]
+# The native tests interact with the real token contract logic.
+token.workspace = true
+
+[lints]
+workspace = true

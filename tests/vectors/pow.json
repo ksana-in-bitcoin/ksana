@@ -1,0 +1,376 @@
+{
+  "algorithm": "argon2id",
+  "cases": [
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580",
+      "chain_id": 1001,
+      "effective_target": "0aaaaa9555555555555555555555555555555555555555555555555555555555",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "height": "0",
+        "nonce": "0",
+        "parents": [],
+        "producer": "0000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+        "timestamp": "1700000000",
+        "version": 2
+      },
+      "header_borsh": "0200000000000000000000000000000064000000ababababababababababababababababababababababababababababababababe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8555e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e000000000000000000000000000000000000000000000000000000000000000000f1536500000000ffff7f200000000000000000",
+      "meets": true,
+      "name": "devnet-genesis",
+      "note": "devnet genesis block header (no parents, empty block, weight 12, nonce 0, D-027)",
+      "pow_hash": "0080f110424ea3288b96cb3249716305e256af4a857eaac1c4358d1c65a1ca02",
+      "pow_limit_bits": 545259519,
+      "pow_value": "02caa1651c8d35c4c1aa7e854aaf56e20563714932cb968b28a34e4210f18000",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 12
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "3266d9e8ebcee084235f778d51db5f837ab15d9e35475caba95fb3cc96ec53b6",
+      "chain_id": 1001,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "0",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200000000000000000",
+      "meets": true,
+      "name": "devnet-nonempty-solved",
+      "note": "non-empty block after the genesis block, solved at devnet's minimum difficulty (0x207fffff) with weight 1",
+      "pow_hash": "4030786d7c4bf8c1185aefbcbdf99371fb1785f3614dda4c4bd84f7081dea05b",
+      "pow_limit_bits": 545259519,
+      "pow_value": "5ba0de81704fd84b4cda4d61f38517fb7193f9bdbcef5a18c1f84b7c6d783040",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "fcdf7a380ad7a93aba44ef82c3f0825dbab692f1eb8c635490bfac147d8a7855",
+      "chain_id": 1001,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "1",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200100000000000000",
+      "meets": false,
+      "name": "devnet-nonempty-next-nonce",
+      "note": "the same block header, nonce plus 1",
+      "pow_hash": "b090fc5fd035b41eb89509866716b9e6cc5b46f122e5f9a3ab5f92e7529673c2",
+      "pow_limit_bits": 545259519,
+      "pow_value": "c2739652e7925faba3f9e522f1465bcce6b91667860995b81eb435d05ffc90b0",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "5e6696dcb277a61f3205953c5ab8ebe8ee322f98d2ae27ff94bf3fa871cacd56",
+      "chain_id": 1001,
+      "effective_target": "0aaaaa9555555555555555555555555555555555555555555555555555555555",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "height": "1",
+        "nonce": "24",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000ababababababababababababababababababababababababababababababababe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8552222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f201800000000000000",
+      "meets": true,
+      "name": "devnet-empty-weight-12-solved",
+      "note": "empty block after the genesis block (streak 1, weight 12), solved against the effective target (target / 12)",
+      "pow_hash": "2f7cf5001883cb85c49a1563cc9fe876adee086e02cacf178daa9dd48d277f07",
+      "pow_limit_bits": 545259519,
+      "pow_value": "077f278dd49daa8d17cfca026e08eead76e89fcc63159ac485cb831800f57c2f",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 12
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "5e6696dcb277a61f3205953c5ab8ebe8ee322f98d2ae27ff94bf3fa871cacd56",
+      "chain_id": 1001,
+      "effective_target": "0555554aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "height": "1",
+        "nonce": "24",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000ababababababababababababababababababababababababababababababababe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8552222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f201800000000000000",
+      "meets": false,
+      "name": "devnet-empty-checked-with-weight-24",
+      "note": "the same empty block checked with weight 24 (streak 2): the effective target is halved",
+      "pow_hash": "2f7cf5001883cb85c49a1563cc9fe876adee086e02cacf178daa9dd48d277f07",
+      "pow_limit_bits": 545259519,
+      "pow_value": "077f278dd49daa8d17cfca026e08eead76e89fcc63159ac485cb831800f57c2f",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 24
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "d6c752d5cdbf332c0856d0df09a0b2bd23e16074a02b3d9c687fa8007be8c3b2",
+      "chain_id": 1001,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "18446744073709551615",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580",
+          "0101010101010101010101010101010101010101010101010101010101010101",
+          "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000003000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce545800101010101010101010101010101010101010101010101010101010101010101fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe64000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f20ffffffffffffffff",
+      "meets": false,
+      "name": "devnet-three-parents-max-nonce",
+      "note": "block header with three parents, nonce = 2^64 − 1, unsolved",
+      "pow_hash": "633ddf84d94edd97c7493e658c3d6e8a9aaad8cc064c49e78627290c48c94393",
+      "pow_limit_bits": 545259519,
+      "pow_value": "9343c9480c292786e7494c06ccd8aa9a8a6e3d8c653e49c797dd4ed984df3d63",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "33ab4bf712f3532ee7b8824b30193350a51de8932351dcf63458620964bccddf",
+      "chain_id": 1001,
+      "effective_target": "0000ffff00000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 520159231,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "0",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff001f0000000000000000",
+      "meets": false,
+      "name": "devnet-lower-target",
+      "note": "bits = 0x1f00ffff (target about 2^240, below the limit), the same non-empty block header",
+      "pow_hash": "3f727f7ebfaa6af523d34a8053d4ad100b5b7da259caf8405ada4ccb34a094c0",
+      "pow_limit_bits": 545259519,
+      "pow_value": "c094a034cb4cda5a40f8ca59a27d5b0b10add453804ad323f56aaabf7e7f723f",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 1,
+        "lanes": 1,
+        "memory_kib": 2048
+      },
+      "block_hash": "3266d9e8ebcee084235f778d51db5f837ab15d9e35475caba95fb3cc96ec53b6",
+      "chain_id": 1002,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "0",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200000000000000000",
+      "meets": true,
+      "name": "signet-salt",
+      "note": "the same non-empty block header on signet (chain ID 1002): different salt, different value",
+      "pow_hash": "cbd4b970705aa44242a3d4707bb4fedfcc40d75f8a2c9adffe540ea6baeab324",
+      "pow_limit_bits": 545259519,
+      "pow_value": "24b3eabaa60e54fedf9a2c8a5fd740ccdffeb47b70d4a34242a45a7070b9d4cb",
+      "salt": "6b73616e612d706f77ea030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 2,
+        "lanes": 2,
+        "memory_kib": 64
+      },
+      "block_hash": "3266d9e8ebcee084235f778d51db5f837ab15d9e35475caba95fb3cc96ec53b6",
+      "chain_id": 1001,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "0",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200000000000000000",
+      "meets": false,
+      "name": "argon2-64kib-2-passes-2-lanes",
+      "note": "the same non-empty block header, chain ID 1001, Argon2id parameters changed to 64 KiB, 2 passes, 2 lanes",
+      "pow_hash": "e4a231b40d5a57910e6e1dbfe67fb21a6fc44b317ba989a8ab0334dab59553f9",
+      "pow_limit_bits": 545259519,
+      "pow_value": "f95395b5da3403aba889a97b314bc46f1ab27fe6bf1d6e0e91575a0db431a2e4",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    },
+    {
+      "argon2": {
+        "iterations": 3,
+        "lanes": 1,
+        "memory_kib": 8
+      },
+      "block_hash": "3266d9e8ebcee084235f778d51db5f837ab15d9e35475caba95fb3cc96ec53b6",
+      "chain_id": 1001,
+      "effective_target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "bits": 545259519,
+        "btc_anchor": {
+          "hash": "abababababababababababababababababababababababababababababababab",
+          "height": 100
+        },
+        "entries_root": "1111111111111111111111111111111111111111111111111111111111111111",
+        "height": "1",
+        "nonce": "0",
+        "parents": [
+          "080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce54580"
+        ],
+        "producer": "3333333333333333333333333333333333333333333333333333333333333333",
+        "state_root": "2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp": "1700000005",
+        "version": 2
+      },
+      "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200000000000000000",
+      "meets": true,
+      "name": "argon2-8kib-3-passes-1-lane",
+      "note": "the same non-empty block header, chain ID 1001, Argon2id parameters changed to the minimum memory 8 KiB, 3 passes, 1 lane",
+      "pow_hash": "80d8cf5483c80464930bc9fba9a36eae5a3fc82cc36015541b0dca1b3295444b",
+      "pow_limit_bits": 545259519,
+      "pow_value": "4b4495321bca0d1b541560c32cc83f5aae6ea3a9fbc90b936404c88354cfd880",
+      "salt": "6b73616e612d706f77e9030000",
+      "weight": 1
+    }
+  ],
+  "description": "Ksana PoW test vectors (D-094): pow_hash = Argon2id(version 0x13, message = header_borsh, salt = salt_prefix ‖ chain_id as 4 little-endian bytes, memory memory_kib, passes iterations, parallelism lanes, output 32 bytes); pow_value = pow_hash interpreted as little-endian; meets = pow_value ≤ effective_target = target(bits) / weight",
+  "devnet": {
+    "argon2": {
+      "iterations": 1,
+      "lanes": 1,
+      "memory_kib": 2048
+    },
+    "chain_id": 1001
+  },
+  "salt_prefix": "6b73616e612d706f77",
+  "version": 19
+}

@@ -1,0 +1,36 @@
+[package]
+name = "ksana-execution"
+description = "Ksana block execution: entry processing, built-in Account / Asset, fees and arrears (shared by node and indexer)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-state.workspace = true
+ksana-vm.workspace = true
+ksana-consensus.workspace = true
+borsh = { workspace = true, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ksana-primitives = { workspace = true, features = ["proptest"] }
+wat.workspace = true
+ksana-test-contracts.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true
+
+# Two-process determinism test: main spawns the child process itself (re-running this test binary); see the comment at
+# the head of the file.
+[[test]]
+name = "determinism"
+harness = false

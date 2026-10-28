@@ -1,0 +1,85 @@
+[package]
+name = "ksana-fuzz"
+description = "Ksana fuzz tests (SPEC §15, cargo-fuzz): VmOp decoding, settlement payload decoding, BTC input parsing, host function params, BIP322 witness, and the differential test of the TypeScript SDK against the Rust implementation"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Separate workspace (like contracts/): cargo-fuzz needs nightly and libFuzzer, and stays out of the main workspace's
+# cargo test / clippy.
+# See fuzz/README.md for how to run (D-050).
+[workspace]
+members = ["."]
+
+# The differential test of the TypeScript SDK (src/differential/, D-133): the Rust side of each comparison, shared by the
+# libFuzzer target `ts_differential` and the stable sweep `examples/differential.rs`.
+[lib]
+name = "ksana_fuzz"
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+ksana-primitives = { path = "../crates/ksana-primitives" }
+ksana-crypto = { path = "../crates/ksana-crypto" }
+ksana-btc = { path = "../crates/ksana-btc" }
+ksana-vm = { path = "../crates/ksana-vm" }
+# The PoW targets and Argon2id, compared with the SDK's pow.ts (D-133)
+ksana-consensus = { path = "../crates/ksana-consensus" }
+# The token standards' events (KS-20, KS-721) and the Borsh decoding contracts use, compared with the SDK's standards.ts
+# and the contract playground's ABI codec (D-133)
+ksana-contract-sdk = { path = "../crates/ksana-contract-sdk", features = ["standards"] }
+bitcoin = "0.32.102"
+wat = "1.258.0"
+serde = "1.0.229"
+serde_json = "1.0.151"
+borsh = "1.8.1"
+hex = "0.4.3"
+
+[[bin]]
+name = "vmop_decode"
+path = "fuzz_targets/vmop_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_decode"
+path = "fuzz_targets/payload_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "btc_inputs"
+path = "fuzz_targets/btc_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "host_params"
+path = "fuzz_targets/host_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bip322_witness"
+path = "fuzz_targets/bip322_witness.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ts_differential"
+path = "fuzz_targets/ts_differential.rs"
+test = false
+doc = false
+bench = false

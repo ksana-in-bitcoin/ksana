@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+node_modules/
+/.claude/worktrees/
+
+# Backups of the public signet's keys (signet/deploy.sh backup): never commit them
+ksana-signet-*.tar.gz

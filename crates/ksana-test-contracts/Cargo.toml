@@ -1,0 +1,15 @@
+[package]
+name = "ksana-test-contracts"
+description = "Test only: compiles contracts/examples to wasm32 in build.rs and exports them as byte constants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dev-dependencies]
+wasmparser.workspace = true
+
+[lints]
+workspace = true

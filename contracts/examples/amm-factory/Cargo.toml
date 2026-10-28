@@ -1,0 +1,24 @@
+[package]
+name = "amm-factory"
+description = "Ksana example contract: AMM pair factory (creates AMMs with create_contract at an address determined by the pair)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk.workspace = true
+
+[dev-dependencies]
+# The native tests have the factory create a real AMM pair and trade on it. Cannot be a normal dependency: both contracts
+# export `ksana_call`.
+amm = { path = "../amm" }
+token.workspace = true
+
+[lints]
+workspace = true

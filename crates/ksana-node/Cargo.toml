@@ -1,0 +1,48 @@
+[package]
+name = "ksana-node"
+description = "Ksana fast-lane node: block storage, block production (PoW), BTC anchoring and settlement, state recovery, JSON-RPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ksana-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "ksana-keytool"
+path = "src/bin/keytool.rs"
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-state.workspace = true
+ksana-execution.workspace = true
+ksana-consensus.workspace = true
+ksana-mempool.workspace = true
+ksana-rpc.workspace = true
+ksana-btc.workspace = true
+ksana-p2p.workspace = true
+rocksdb.workspace = true
+borsh = { workspace = true, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+clap = { workspace = true, features = ["env"] }
+jsonrpsee.workspace = true
+bitcoin.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator.workspace = true
+
+[dev-dependencies]
+ksana-btc = { workspace = true, features = ["mock"] }
+tempfile.workspace = true
+ksana-test-contracts.workspace = true
+
+[lints]
+workspace = true

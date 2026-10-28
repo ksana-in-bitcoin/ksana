@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+    # soak/** branches only trigger the soak test (soak.yml, D-061)
+    branches-ignore: ['soak/**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Debug builds emit no debug info: the debug info of wasmtime, RocksDB and the test binaries pushes the target directory past the runner's disk
+  # (M2's first run hit a Bus error while linking a test binary on a full disk). No test result is affected; backtraces keep function names.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: fmt / clippy / test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      # The runner has only a dozen or so GB free: remove unused preinstalled SDKs and log the free space before and after
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # Install the toolchain pinned by rust-toolchain.toml (with rustfmt, clippy and the wasm32 target).
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            contracts -> target
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --locked
+      - run: df -h /
+        if: always()
+      # The example contracts are a separate workspace (contracts/): clippy and unit tests on the native target (the SDK's mock host),
+      # plus clippy on the wasm32 target (must run inside contracts/ so that .cargo/config.toml is read).
+      - run: cargo fmt --manifest-path contracts/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path contracts/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path contracts/Cargo.toml --workspace --locked
+      - run: cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+        working-directory: contracts
+
+  determinism-aarch64:
+    # SPEC §15: the determinism test runs once on x86_64 and once on aarch64. Both compare against the fixed state_root values in the test.
+    name: determinism (aarch64)
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustup if missing
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - run: rustup toolchain install
+      # librocksdb-sys's bindgen loads libclang at run time.
+      - name: Install libclang if missing
+        run: |
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y libclang-dev
+          fi
+      - uses: Swatinem/rust-cache@v2
+      - run: uname -m
+      # Every crate that computes consensus results (D-097): encodings and hashes, signatures, state roots, the VM, execution,
+      # PoW (the Argon2id values match the shared vectors, D-094) and GHOSTDAG with pruning, and the BTC side (payloads, tracker,
+      # finality; the mock chain feature for its tests)
+      - run: >-
+          cargo test --locked -p ksana-primitives -p ksana-crypto -p ksana-state -p ksana-vm -p ksana-execution
+          -p ksana-consensus -p ksana-btc --features ksana-btc/mock
+
+  integration:
+    name: regtest integration
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # M6's end-to-end tests use the TypeScript SDK and the mock wallet (run.sh builds sdk/ts first); the wallet demo page is checked in playwright-core's Chromium
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - name: Install Chromium for the wallet demo page check
+        working-directory: sdk/ts
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps --only-shell chromium
+      # Build the SDK and the demo page, docker compose up (the devnet's regtest bitcoind), run the integration tests, docker compose down -v
+      - run: tests/integration/run.sh
+
+  devnet:
+    # D-042: multi-stage build of the node image; start bitcoind, init, btc-miner, 3 fast-lane nodes and the indexer, wait until they connect, produce blocks and converge on one chain,
+    # submit operations with ksana-cli and check the indexer; then run a 3-minute soak test.
+    name: 3-node devnet
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - run: devnet/smoke.sh
+      # Short version of the SPEC §15 soak test: restart the devnet, submit random operations over the submission paths for 3 minutes, keep checking the indexer against the nodes (the full soak is soak.yml)
+      - run: devnet/soak.sh
+        env:
+          KSANA_SMOKE_SKIP_BUILD: "1"
+          KSANA_SOAK_SECONDS: "180"
+
+  fuzz:
+    # SPEC §15 fuzzing (cargo-fuzz, nightly + libFuzzer, D-050): generate the seed corpus, then run each target for 60 seconds.
+    # On a crash, upload the triggering input (fuzz/artifacts); reproduce locally with `cargo +nightly fuzz run <target> <file>`.
+    # The differential test of the TypeScript implementations (D-133: the target ts_differential and the sweep before it)
+    # runs the SDK built here and the playground's ABI codec through a Node.js oracle.
+    name: fuzz (60 s per target)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - run: rustup toolchain install
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: sdk/ts
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo run --manifest-path fuzz/Cargo.toml --locked --example seeds
+      - name: Differential sweep of the TypeScript implementations (the shared vectors and 20 000 generated inputs)
+        run: cargo run --manifest-path fuzz/Cargo.toml --locked --example differential
+      - name: Run each fuzz target for 60 s
+        working-directory: fuzz
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=60
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  ts-sdk:
+    # D-053: type check, build and test the TypeScript SDK (sdk/ts) (shared vectors in tests/vectors/ and the official BIP322 vectors).
+    name: ts sdk
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: sdk/ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      # Bundle the wallet demo page (examples/wallet-demo, D-055)
+      - run: npm run build:demo
+      # The public signet's KSA faucet and BTC proxy (signet/services, D-107), on the SDK built above
+      - run: node --test '../../signet/services/test/*.test.mjs'

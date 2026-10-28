@@ -1,0 +1,17 @@
+[package]
+name = "collection"
+description = "Ksana test contract: a KS-721 collection on the contract SDK's ks721 module for the execution-layer tests (not an example)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk = { workspace = true, features = ["standards"] }
+
+[lints]
+workspace = true

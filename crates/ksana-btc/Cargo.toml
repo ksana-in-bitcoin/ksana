@@ -1,0 +1,32 @@
+[package]
+name = "ksana-btc"
+description = "Ksana's BTC integration: KSN1 data carriers (OP_RETURN outputs and witness envelopes), native transaction recognition, settlement transaction (commit / reveal) construction and checking, bitcoind RPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# In-memory mock BTC chain (`mock::MockBtc`), for tests only.
+mock = []
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-execution.workspace = true
+ksana-consensus.workspace = true
+bitcoin.workspace = true
+corepc-client.workspace = true
+borsh = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ksana-primitives = { workspace = true, features = ["proptest"] }
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,679 @@
+{
+  "bip322": [
+    {
+      "account": "1ca22e67ce7b6dffdd3f1f2c9b10f70d5145a96907fe680700449eedb9701d83",
+      "address_type": "p2tr",
+      "aux_rand": "37c37e88c342e2df7b65232e1ba67bbf816ab4465e94df66dbceee875674ab5f",
+      "message": "1a59bcc9e9cbad020f8b2353e8f457dd1b3dc0998a237f51b6be8526ee090c0d",
+      "message_hash": "892456bd80d33d5f5df87a88ea5030e63d9f9217f72e41b1e1eff0cdbb267f25",
+      "name": "BIP322 simple: P2TR key-path (address is the account's Taproot address, SIGHASH_DEFAULT)",
+      "op": {
+        "account": "1ca22e67ce7b6dffdd3f1f2c9b10f70d5145a96907fe680700449eedb9701d83",
+        "action": {
+          "AssetTransfer": {
+            "amount": "123456789",
+            "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+            "to": "e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f4460"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "1000"
+          }
+        },
+        "max_gas": "50000",
+        "nonce": "7",
+        "sig": {
+          "Bip322Simple": "0140809b310103f6a553293d9cd5e80520cd6182575410d331751910343f32c3c0561c409226aeb893cce74a40bb782a99ca6cf09ae734e974a7802a7f74a373ffd9"
+        },
+        "version": 2
+      },
+      "op_borsh": "02e90300001ca22e67ce7b6dffdd3f1f2c9b10f70d5145a96907fe680700449eedb9701d83070000000000000000e803000000000000000000000000000050c3000000000000020000000000000000000000000000000000000000000000000000000000000000e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f446015cd5b0700000000000000000000000001420000000140809b310103f6a553293d9cd5e80520cd6182575410d331751910343f32c3c0561c409226aeb893cce74a40bb782a99ca6cf09ae734e974a7802a7f74a373ffd9",
+      "op_id": "551f61f493c331953b6cf6e05edef670c75d2bc67e96dbc8183c0d46fa460ccc",
+      "script_pubkey": "51201ca22e67ce7b6dffdd3f1f2c9b10f70d5145a96907fe680700449eedb9701d83",
+      "secret_key": "71bce69372c65b2ebbaa6122cd82652d0ee85f1cd87071a7dbe7ee14e2f6baf4",
+      "sighash": "1a59bcc9e9cbad020f8b2353e8f457dd1b3dc0998a237f51b6be8526ee090c0d",
+      "to_sign_txid": "7089b3a1840ef1d3b8247040f319bc4dde495edf68d080b706cc1006ffecd418",
+      "to_spend_txid": "09bf58d751d23c6b730f06666c47035e433c57998e5ad411f2b840bfbcfd5199",
+      "witness": "0140809b310103f6a553293d9cd5e80520cd6182575410d331751910343f32c3c0561c409226aeb893cce74a40bb782a99ca6cf09ae734e974a7802a7f74a373ffd9"
+    }
+  ],
+  "cases": [
+    {
+      "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+      "aux_rand": "0000000000000000000000000000000000000000000000000000000000000000",
+      "borsh": "02e9030000a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1000000000000000000c4090000000000000000000000000000400d03000000000001f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc0b000000c3bc62657277656973656e03000000010203020000000000000000000000000000000000000000000000000000000000000000000000d007000000000000000000000000000084503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599effffffffffffffffffffffffffffffff00994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec",
+      "name": "path B: sponsored, contract call (method name with non-ASCII)",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      },
+      "op_id": "40906ece55443bc15923a31ab8fed8a3bef8125336b6a3e01c218474641b1e6d",
+      "secret_key": "1e6b5353e65636ce1ec8339903f6edf39a684a2cc5d4a5b2afdbd6307cb63c61",
+      "sighash": "1ec1ef770f28964b256f9554fa0cd0dd3f827aebe9fa1e877bf402cbb6a176cb",
+      "unsigned_borsh": "02e9030000a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1000000000000000000c4090000000000000000000000000000400d03000000000001f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc0b000000c3bc62657277656973656e03000000010203020000000000000000000000000000000000000000000000000000000000000000000000d007000000000000000000000000000084503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599effffffffffffffffffffffffffffffff"
+    },
+    {
+      "account": "9a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90",
+      "aux_rand": "14ecb8d8b3275a17cd17e358df97e99f17ea936b5c445aa91bbb489bcb9fe0f5",
+      "borsh": "02e90300009a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90070000000000000000e803000000000000000000000000000050c3000000000000020000000000000000000000000000000000000000000000000000000000000000e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f446015cd5b0700000000000000000000000000617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49",
+      "name": "path B: sponsored, transfer of the project token",
+      "op": {
+        "account": "9a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90",
+        "action": {
+          "AssetTransfer": {
+            "amount": "123456789",
+            "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+            "to": "e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f4460"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "1000"
+          }
+        },
+        "max_gas": "50000",
+        "nonce": "7",
+        "sig": {
+          "Bip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49"
+        },
+        "version": 2
+      },
+      "op_id": "a5386ceca6536732a3bdb12dddd4f03c46b638a493cc0107f3e8fd40e5601363",
+      "secret_key": "b83ccb609e22f019362df4738958c48a9e8a7d086c747ad79202e6dbee06b690",
+      "sighash": "a5f7c0b51a54a88d5254be91f7753335c3db03406d871ecf4d56668c5a374947",
+      "unsigned_borsh": "02e90300009a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90070000000000000000e803000000000000000000000000000050c3000000000000020000000000000000000000000000000000000000000000000000000000000000e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f446015cd5b07000000000000000000000000"
+    },
+    {
+      "account": "29fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af7072",
+      "aux_rand": "cea5dbefa56a3489ae043017e1b04f35b90421680fd60c35d9069629885922c4",
+      "borsh": "02e903000029fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af707201000000000000000140420f000000000000080000000061736d01000000000000000000000000a9dac975ea4852777bdc892086a74e97188d1c82fd633d8373c0bbeb8d4d9805d05f4b0942846a0388688191a6871d38b3d01696d3a949f315ee17fca64b6d2b",
+      "first_input": {
+        "txid": "f985debc97f0dfcd01aa6a1af18957a9163dee4e93bf8132e2830940ac40ed52",
+        "vout": 1
+      },
+      "name": "path C: native transaction, contract deployment",
+      "op": {
+        "account": "29fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af7072",
+        "action": {
+          "Deploy": {
+            "code": "0061736d01000000",
+            "funds": [],
+            "init_args": ""
+          }
+        },
+        "chain_id": 1001,
+        "fee": "BtcNative",
+        "max_gas": "1000000",
+        "nonce": "1",
+        "sig": {
+          "Bip340": "a9dac975ea4852777bdc892086a74e97188d1c82fd633d8373c0bbeb8d4d9805d05f4b0942846a0388688191a6871d38b3d01696d3a949f315ee17fca64b6d2b"
+        },
+        "version": 2
+      },
+      "op_id": "9b113fb3d681fe3dec3b58bba1534b71e093804150a82075bfa0561943655c9a",
+      "secret_key": "1b5bb26250b94596a5ffbf622cf2cba0a9709c2d77c5e07378ebedd3816b8cb2",
+      "sighash": "4c9f25c958577653034180876d1354704dbeecf8bf655b42d0be9bbac3dea970",
+      "unsigned_borsh": "02e903000029fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af707201000000000000000140420f000000000000080000000061736d010000000000000000000000"
+    },
+    {
+      "account": "110b770e55991c94efca14509e87a5bfa3b3a485d9584e6586caeb2f867ba0fe",
+      "aux_rand": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "borsh": "02e9030000110b770e55991c94efca14509e87a5bfa3b3a485d9584e6586caeb2f867ba0feffffffffffffffff00ffffffffffffffffffffffffffffffffffffffffffffffff02ababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdffffffffffffffffffffffffffffffff00ff6e5d3781b121ea5aa2485149cb469b050687439638e150dcd0999ab8b55dfa65f91e43290c82d1c50736b9f66b8ac2b702b3c40557c453e61552288583625e",
+      "name": "extremes: u64 / u128 maximum values",
+      "op": {
+        "account": "110b770e55991c94efca14509e87a5bfa3b3a485d9584e6586caeb2f867ba0fe",
+        "action": {
+          "AssetTransfer": {
+            "amount": "340282366920938463463374607431768211455",
+            "asset": "abababababababababababababababababababababababababababababababab",
+            "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "340282366920938463463374607431768211455"
+          }
+        },
+        "max_gas": "18446744073709551615",
+        "nonce": "18446744073709551615",
+        "sig": {
+          "Bip340": "ff6e5d3781b121ea5aa2485149cb469b050687439638e150dcd0999ab8b55dfa65f91e43290c82d1c50736b9f66b8ac2b702b3c40557c453e61552288583625e"
+        },
+        "version": 2
+      },
+      "op_id": "0db627842e56cdd72e934676e341d8e1d70bf6bcac90a8c823221728ea861ed9",
+      "secret_key": "0edf90a4d6741cd76381af21b9250105e81fa4bd2eca22527280f397fd6d4c9a",
+      "sighash": "dd7f80b7bcc5cca641348bacf6cb669bb6ca7873f517c5db532f298ba5c47474",
+      "unsigned_borsh": "02e9030000110b770e55991c94efca14509e87a5bfa3b3a485d9584e6586caeb2f867ba0feffffffffffffffff00ffffffffffffffffffffffffffffffffffffffffffffffff02ababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "description": "VmOp signing vectors (SPEC §4.2). sighash = tagged_hash(\"Ksana/VmOp/v1\", unsigned_borsh), where unsigned_borsh is the Borsh encoding of the VmOp without sig; for path C (fee is BtcNative, D-086) the message is unsigned_borsh ‖ first_input.txid ‖ first_input.vout (little-endian u32), where first_input is the output spent by the first input of the carrying transaction, and verification with a different input must fail; the account is the x-only public key of secret_key tweaked per BIP86 (D-092: i.e. the output public key of that secret key's Taproot address), and the signature is BIP340(tweaked secret key, sighash, aux_rand). Every op in tampered must fail verification. bip322 (D-052, D-092): message is the lowercase hex of sighash, message_hash = tagged_hash(\"BIP0322-signed-message\", message), to_spend / to_sign are built per BIP322 (transaction IDs in Bitcoin internal byte order, D-001), the address is OP_1 <account> (script_pubkey), witness is the consensus encoding of the to_sign witness stack, i.e. the Bip322Simple signature bytes, a P2TR key-path signature made with the tweaked key per BIP340(aux_rand); only P2TR, P2WPKH no longer corresponds to an account.",
+  "tag": "Ksana/VmOp/v1",
+  "tagged_hash": [
+    {
+      "hash": "9a283d37c8d8c48783de8c1f23e529bfca082d61749ff2567656ef7601eb0625",
+      "msg": "",
+      "tag": "Ksana/VmOp/v1"
+    },
+    {
+      "hash": "512ba59e1192612305608d3ec891ca39e6d13480becdb967fc427b377dee1b38",
+      "msg": "616263",
+      "tag": "Ksana/VmOp/v1"
+    },
+    {
+      "hash": "a50885aadef94ee57e5537e27ef82d4db7c756193539d3d8d0bb6ee5f3a7ad46",
+      "msg": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tag": "BIP0340/challenge"
+    }
+  ],
+  "tampered": [
+    {
+      "name": "version",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 3
+      }
+    },
+    {
+      "name": "chain_id",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1002,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "account",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e0",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "nonce",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "1",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "fee variant",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": "BtcNative",
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "fee.amount",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2501"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "max_gas",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200001",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "action variant",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Deploy": {
+            "code": "",
+            "funds": [],
+            "init_args": ""
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "action.contract",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f5e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "action.method",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überwiesen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "action.args",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "01020304",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "action.funds",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2001",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "sig bytes",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aed"
+        },
+        "version": 2
+      }
+    },
+    {
+      "name": "sig scheme",
+      "op": {
+        "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+        "action": {
+          "Call": {
+            "args": "010203",
+            "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+            "funds": [
+              {
+                "amount": "2000",
+                "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "amount": "340282366920938463463374607431768211455",
+                "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+              }
+            ],
+            "method": "überweisen"
+          }
+        },
+        "chain_id": 1001,
+        "fee": {
+          "Token": {
+            "amount": "2500"
+          }
+        },
+        "max_gas": "200000",
+        "nonce": "0",
+        "sig": {
+          "Bip322Simple": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+        },
+        "version": 2
+      }
+    }
+  ]
+}

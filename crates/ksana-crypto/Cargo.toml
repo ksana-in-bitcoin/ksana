@@ -1,0 +1,27 @@
+[package]
+name = "ksana-crypto"
+description = "Ksana cryptography: BIP340 tagged hash, VmOp signing and verification (BIP340, BIP322 simple), Merkle tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ksana-primitives.workspace = true
+secp256k1.workspace = true
+bitcoin.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ksana-primitives = { workspace = true, features = ["proptest"] }
+borsh = { workspace = true, features = ["std"] }
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+base64.workspace = true
+
+[lints]
+workspace = true

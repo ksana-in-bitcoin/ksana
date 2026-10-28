@@ -1,0 +1,1055 @@
+{
+  "answers": [
+    {
+      "borsh": "03000000050000004b532d32300e0000004b532d32302d6275726e61626c650e0000004b532d32302d6d696e7461626c65",
+      "method": "standards",
+      "name": "the reference token",
+      "standard": "KS-20",
+      "value": [
+        "KS-20",
+        "KS-20-burnable",
+        "KS-20-mintable"
+      ]
+    },
+    {
+      "borsh": "01000000050000004b532d3230",
+      "method": "standards",
+      "name": "no extensions",
+      "standard": "KS-20",
+      "value": [
+        "KS-20"
+      ]
+    },
+    {
+      "borsh": "0f0000004b73616e6120c391616d6520e282bf040000004b53c39108",
+      "method": "metadata",
+      "name": "non-ASCII text",
+      "standard": "KS-20",
+      "value": {
+        "decimals": 8,
+        "name": "Ksana Ñame ₿",
+        "symbol": "KSÑ"
+      }
+    },
+    {
+      "borsh": "00000000",
+      "method": "capabilities",
+      "name": "none",
+      "standard": "KS-20",
+      "value": []
+    },
+    {
+      "borsh": "03000000040000006d696e7405000000706175736503000000666565",
+      "method": "capabilities",
+      "name": "in the standard's order",
+      "standard": "KS-20",
+      "value": [
+        "mint",
+        "pause",
+        "fee"
+      ]
+    },
+    {
+      "borsh": "100f0e0d0c0b0a090807060504030201",
+      "method": "total_supply",
+      "name": "every byte differs",
+      "standard": "KS-20",
+      "value": "1339673755198158349044581307228491536"
+    },
+    {
+      "borsh": "00000000000000000000000000000000",
+      "method": "balance_of",
+      "name": "nothing",
+      "standard": "KS-20",
+      "value": "0"
+    },
+    {
+      "borsh": "ffffffffffffffffffffffffffffffff",
+      "method": "allowance",
+      "name": "unlimited",
+      "standard": "KS-20",
+      "value": "340282366920938463463374607431768211455"
+    },
+    {
+      "borsh": "e80300000000000000000000000000000100b9556900000000",
+      "method": "allowance_info",
+      "name": "with an expiry",
+      "standard": "KS-20",
+      "value": {
+        "amount": "1000",
+        "expires_at": "1767225600"
+      }
+    },
+    {
+      "borsh": "0000000000000000000000000000000000",
+      "method": "allowance_info",
+      "name": "no expiry",
+      "standard": "KS-20",
+      "value": {
+        "amount": "0",
+        "expires_at": null
+      }
+    },
+    {
+      "borsh": "01101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "method": "minter",
+      "name": "a minter",
+      "standard": "KS-20",
+      "value": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+    },
+    {
+      "borsh": "00",
+      "method": "minter",
+      "name": "minting ended",
+      "standard": "KS-20",
+      "value": null
+    },
+    {
+      "borsh": "01406f4001000000000000000000000000",
+      "method": "cap",
+      "name": "a cap",
+      "standard": "KS-20",
+      "value": "21000000"
+    },
+    {
+      "borsh": "00",
+      "method": "cap",
+      "name": "no cap",
+      "standard": "KS-20",
+      "value": null
+    },
+    {
+      "borsh": "30000000c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedffa000000000000000000000000000000",
+      "method": "transfer_and_call",
+      "name": "the recipient's answer",
+      "standard": "KS-20",
+      "value": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedffa000000000000000000000000000000"
+    },
+    {
+      "borsh": "00000000",
+      "method": "transfer_and_call",
+      "name": "an empty answer",
+      "standard": "KS-20",
+      "value": ""
+    },
+    {
+      "borsh": "03000000060000004b532d3732310f0000004b532d3732312d6275726e61626c65110000004b532d3732312d656e756d657261626c65",
+      "method": "standards",
+      "name": "the test collection",
+      "standard": "KS-721",
+      "value": [
+        "KS-721",
+        "KS-721-burnable",
+        "KS-721-enumerable"
+      ]
+    },
+    {
+      "borsh": "0f0000004b73616e6120c384727420f09f8ea8050000004bc3845254",
+      "method": "metadata",
+      "name": "non-ASCII text",
+      "standard": "KS-721",
+      "value": {
+        "name": "Ksana Ärt 🎨",
+        "symbol": "KÄRT"
+      }
+    },
+    {
+      "borsh": "01000000040000006d696e74",
+      "method": "capabilities",
+      "name": "minting",
+      "standard": "KS-721",
+      "value": [
+        "mint"
+      ]
+    },
+    {
+      "borsh": "01101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "method": "owner_of",
+      "name": "an owner",
+      "standard": "KS-721",
+      "value": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+    },
+    {
+      "borsh": "00",
+      "method": "owner_of",
+      "name": "no token",
+      "standard": "KS-721",
+      "value": null
+    },
+    {
+      "borsh": "0300000000000000",
+      "method": "balance_of",
+      "name": "a count",
+      "standard": "KS-721",
+      "value": "3"
+    },
+    {
+      "borsh": "0122000000697066733a2f2f6261666b726569676832616b69736361696c64632f312e6a736f6e",
+      "method": "token_uri",
+      "name": "an IPFS URI",
+      "standard": "KS-721",
+      "value": "ipfs://bafkreigh2akiscaildc/1.json"
+    },
+    {
+      "borsh": "012f000000646174613a6170706c69636174696f6e2f6a736f6e2c7b226e616d65223a22e1b9866967687420e282bf20c3bc227d",
+      "method": "token_uri",
+      "name": "a data URI",
+      "standard": "KS-721",
+      "value": "data:application/json,{\"name\":\"Ṇight ₿ ü\"}"
+    },
+    {
+      "borsh": "00",
+      "method": "token_uri",
+      "name": "none",
+      "standard": "KS-721",
+      "value": null
+    },
+    {
+      "borsh": "01707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "approved",
+      "name": "a spender",
+      "standard": "KS-721",
+      "value": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+    },
+    {
+      "borsh": "00",
+      "method": "approved",
+      "name": "none",
+      "standard": "KS-721",
+      "value": null
+    },
+    {
+      "borsh": "01",
+      "method": "is_operator",
+      "name": "an operator",
+      "standard": "KS-721",
+      "value": true
+    },
+    {
+      "borsh": "00",
+      "method": "is_operator",
+      "name": "not an operator",
+      "standard": "KS-721",
+      "value": false
+    },
+    {
+      "borsh": "010100b9556900000000",
+      "method": "operator_info",
+      "name": "with an expiry",
+      "standard": "KS-721",
+      "value": {
+        "approved": true,
+        "expires_at": "1767225600"
+      }
+    },
+    {
+      "borsh": "0000",
+      "method": "operator_info",
+      "name": "revoked",
+      "standard": "KS-721",
+      "value": {
+        "approved": false,
+        "expires_at": null
+      }
+    },
+    {
+      "borsh": "ffffffffffffffff",
+      "method": "total_supply",
+      "name": "a count",
+      "standard": "KS-721",
+      "value": "18446744073709551615"
+    },
+    {
+      "borsh": "03000000000000000000000000000000000000000000000000000000000000000000000155565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737400000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      "method": "tokens",
+      "name": "a page",
+      "standard": "KS-721",
+      "value": [
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+        "00000000000000000000000000000000ffffffffffffffffffffffffffffffff"
+      ]
+    },
+    {
+      "borsh": "00000000",
+      "method": "tokens_of",
+      "name": "an empty page",
+      "standard": "KS-721",
+      "value": []
+    },
+    {
+      "borsh": "40000000c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf0000000000000000000000000000000000000000000000000000000000000003",
+      "method": "transfer_and_call",
+      "name": "the recipient's answer",
+      "standard": "KS-721",
+      "value": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf0000000000000000000000000000000000000000000000000000000000000003"
+    }
+  ],
+  "asset_refs": {
+    "invalid": [
+      {
+        "borsh": "02c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+        "name": "a tag of 2"
+      },
+      {
+        "borsh": "00c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcddde",
+        "name": "one byte short"
+      },
+      {
+        "borsh": "01000000000000000000000000000000000000000000000000000000000000000000",
+        "name": "a trailing byte"
+      },
+      {
+        "borsh": "",
+        "name": "empty"
+      }
+    ],
+    "valid": [
+      {
+        "borsh": "00c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+        "name": "a token",
+        "value": {
+          "Token": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+        }
+      },
+      {
+        "borsh": "010000000000000000000000000000000000000000000000000000000000000000",
+        "name": "KSA",
+        "value": {
+          "Asset": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "borsh": "01e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "name": "a built-in asset",
+        "value": {
+          "Asset": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        }
+      }
+    ]
+  },
+  "calls": [
+    {
+      "borsh": "",
+      "method": "standards",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "metadata",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "capabilities",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "total_supply",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "method": "balance_of",
+      "name": "an account",
+      "standard": "KS-20",
+      "value": {
+        "account": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "allowance",
+      "name": "owner and spender",
+      "standard": "KS-20",
+      "value": {
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "allowance_info",
+      "name": "owner and spender",
+      "standard": "KS-20",
+      "value": {
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "",
+      "method": "minter",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "cap",
+      "name": "no arguments",
+      "standard": "KS-20",
+      "value": {}
+    },
+    {
+      "borsh": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f05000000000000000000000000000000",
+      "method": "transfer",
+      "name": "a small amount",
+      "standard": "KS-20",
+      "value": {
+        "amount": "5",
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    },
+    {
+      "borsh": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f100f0e0d0c0b0a090807060504030201",
+      "method": "transfer",
+      "name": "every byte of the amount differs",
+      "standard": "KS-20",
+      "value": {
+        "amount": "1339673755198158349044581307228491536",
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fffffffffffffffffffffffffffffffff",
+      "method": "transfer_from",
+      "name": "the largest amount",
+      "standard": "KS-20",
+      "value": {
+        "amount": "340282366920938463463374607431768211455",
+        "from": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    },
+    {
+      "borsh": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8fe803000000000000000000000000000000",
+      "method": "approve",
+      "name": "no expiry",
+      "standard": "KS-20",
+      "value": {
+        "amount": "1000",
+        "expires_at": null,
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8fffffffffffffffffffffffffffffffff0100b9556900000000",
+      "method": "approve",
+      "name": "unlimited, with an expiry",
+      "standard": "KS-20",
+      "value": {
+        "amount": "340282366920938463463374607431768211455",
+        "expires_at": "1767225600",
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f0000000000000000000000000000000000",
+      "method": "approve",
+      "name": "a revocation",
+      "standard": "KS-20",
+      "value": {
+        "amount": "0",
+        "expires_at": null,
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebffa0000000000000000000000000000000c000000737761703a6d696e3d323430",
+      "method": "transfer_and_call",
+      "name": "with data",
+      "standard": "KS-20",
+      "value": {
+        "amount": "250",
+        "data": "737761703a6d696e3d323430",
+        "to": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      }
+    },
+    {
+      "borsh": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf0100000000000000000000000000000000000000",
+      "method": "transfer_and_call",
+      "name": "without data",
+      "standard": "KS-20",
+      "value": {
+        "amount": "1",
+        "data": "",
+        "to": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      }
+    },
+    {
+      "borsh": "07000000000000000000000000000000",
+      "method": "burn",
+      "name": "an amount",
+      "standard": "KS-20",
+      "value": {
+        "amount": "7"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f08000000000000000000000000000000",
+      "method": "burn_from",
+      "name": "from an account",
+      "standard": "KS-20",
+      "value": {
+        "amount": "8",
+        "from": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      }
+    },
+    {
+      "borsh": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f40420f00000000000000000000000000",
+      "method": "mint",
+      "name": "to an account",
+      "standard": "KS-20",
+      "value": {
+        "amount": "1000000",
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    },
+    {
+      "borsh": "01707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "set_minter",
+      "name": "a new minter",
+      "standard": "KS-20",
+      "value": {
+        "minter": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "00",
+      "method": "set_minter",
+      "name": "minting ended",
+      "standard": "KS-20",
+      "value": {
+        "minter": null
+      }
+    },
+    {
+      "borsh": "",
+      "method": "standards",
+      "name": "no arguments",
+      "standard": "KS-721",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "metadata",
+      "name": "no arguments",
+      "standard": "KS-721",
+      "value": {}
+    },
+    {
+      "borsh": "",
+      "method": "capabilities",
+      "name": "no arguments",
+      "standard": "KS-721",
+      "value": {}
+    },
+    {
+      "borsh": "0000000000000000000000000000000000000000000000000000000000000001",
+      "method": "owner_of",
+      "name": "a serial number",
+      "standard": "KS-721",
+      "value": {
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000001"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "method": "balance_of",
+      "name": "an owner",
+      "standard": "KS-721",
+      "value": {
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      }
+    },
+    {
+      "borsh": "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+      "method": "token_uri",
+      "name": "a hashed ID",
+      "standard": "KS-721",
+      "value": {
+        "token_id": "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374"
+      }
+    },
+    {
+      "borsh": "0000000000000000000000000000000000000000000000000000000000000002",
+      "method": "approved",
+      "name": "a serial number",
+      "standard": "KS-721",
+      "value": {
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000002"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "is_operator",
+      "name": "owner and operator",
+      "standard": "KS-721",
+      "value": {
+        "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "method": "operator_info",
+      "name": "owner and operator",
+      "standard": "KS-721",
+      "value": {
+        "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      }
+    },
+    {
+      "borsh": "",
+      "method": "total_supply",
+      "name": "no arguments",
+      "standard": "KS-721",
+      "value": {}
+    },
+    {
+      "borsh": "000000000000000064000000",
+      "method": "tokens",
+      "name": "the first page",
+      "standard": "KS-721",
+      "value": {
+        "limit": 100,
+        "start": "0"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f2c0100000000000019000000",
+      "method": "tokens_of",
+      "name": "a later page",
+      "standard": "KS-721",
+      "value": {
+        "limit": 25,
+        "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "start": "300"
+      }
+    },
+    {
+      "borsh": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0000000000000000000000000000000000000000000000000000000000000001",
+      "method": "transfer",
+      "name": "a serial number",
+      "standard": "KS-721",
+      "value": {
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000001"
+      }
+    },
+    {
+      "borsh": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+      "method": "transfer_from",
+      "name": "a hashed ID",
+      "standard": "KS-721",
+      "value": {
+        "from": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+        "token_id": "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374"
+      }
+    },
+    {
+      "borsh": "01707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f0000000000000000000000000000000000000000000000000000000000000002",
+      "method": "approve",
+      "name": "a spender",
+      "standard": "KS-721",
+      "value": {
+        "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000002"
+      }
+    },
+    {
+      "borsh": "000000000000000000000000000000000000000000000000000000000000000002",
+      "method": "approve",
+      "name": "cleared",
+      "standard": "KS-721",
+      "value": {
+        "spender": null,
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000002"
+      }
+    },
+    {
+      "borsh": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f010100b9556900000000",
+      "method": "set_operator",
+      "name": "with an expiry",
+      "standard": "KS-721",
+      "value": {
+        "approved": true,
+        "expires_at": "1767225600",
+        "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f0000",
+      "method": "set_operator",
+      "name": "revoked",
+      "standard": "KS-721",
+      "value": {
+        "approved": false,
+        "expires_at": null,
+        "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+      }
+    },
+    {
+      "borsh": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf00000000000000000000000000000000000000000000000000000000000000030e0000006c6973743a70726963653d313030",
+      "method": "transfer_and_call",
+      "name": "with data",
+      "standard": "KS-721",
+      "value": {
+        "data": "6c6973743a70726963653d313030",
+        "to": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000003"
+      }
+    },
+    {
+      "borsh": "0000000000000000000000000000000000000000000000000000000000000004",
+      "method": "burn",
+      "name": "a serial number",
+      "standard": "KS-721",
+      "value": {
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000004"
+      }
+    }
+  ],
+  "description": "The token standards KS-20 and KS-721 (docs/STANDARDS.md, D-120), as the contract SDK's reference implementation encodes them: `calls` are the Borsh arguments of each method (`value` names them as the standard does), `answers` the `Ok` bytes of each method's answer, `events` the events (externally tagged as D-007), `invalid_events` bytes that are no event of the standard, `token_ids` KS-721 IDs from serial numbers (big-endian in the last 16 bytes) and IDs without one, `asset_refs` the AssetRef of a KS-20 token or a built-in asset. Byte strings are hex, u64 / u128 decimal strings, u8 / u32 numbers (D-007).",
+  "events": [
+    {
+      "borsh": "090000007374616e646172647303000000050000004b532d32300e0000004b532d32302d6275726e61626c650e0000004b532d32302d6d696e7461626c65",
+      "name": "the declaration",
+      "standard": "KS-20",
+      "value": {
+        "Standards": [
+          "KS-20",
+          "KS-20-burnable",
+          "KS-20-mintable"
+        ]
+      }
+    },
+    {
+      "borsh": "080000006d657461646174610f0000004b73616e6120c391616d6520e282bf040000004b53c39112",
+      "name": "non-ASCII text",
+      "standard": "KS-20",
+      "value": {
+        "Metadata": {
+          "decimals": 18,
+          "name": "Ksana Ñame ₿",
+          "symbol": "KSÑ"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e736665720000000000000000000000000000000000000000000000000000000000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f100f0e0d0c0b0a090807060504030201",
+      "name": "a mint",
+      "standard": "KS-20",
+      "value": {
+        "Transfer": {
+          "amount": "1339673755198158349044581307228491536",
+          "from": "0000000000000000000000000000000000000000000000000000000000000000",
+          "to": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f05000000000000000000000000000000",
+      "name": "a transfer",
+      "standard": "KS-20",
+      "value": {
+        "Transfer": {
+          "amount": "5",
+          "from": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e73666572404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      "name": "a burn",
+      "standard": "KS-20",
+      "value": {
+        "Transfer": {
+          "amount": "340282366920938463463374607431768211455",
+          "from": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+          "to": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8fe803000000000000000000000000000000",
+      "name": "no expiry",
+      "standard": "KS-20",
+      "value": {
+        "Approve": {
+          "amount": "1000",
+          "expires_at": null,
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+        }
+      }
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8fffffffffffffffffffffffffffffffff0100b9556900000000",
+      "name": "unlimited, with an expiry",
+      "standard": "KS-20",
+      "value": {
+        "Approve": {
+          "amount": "340282366920938463463374607431768211455",
+          "expires_at": "1767225600",
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f"
+        }
+      }
+    },
+    {
+      "borsh": "060000006d696e7465720001101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "name": "the first minter",
+      "standard": "KS-20",
+      "value": {
+        "Minter": {
+          "minter": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "previous": null
+        }
+      }
+    },
+    {
+      "borsh": "060000006d696e74657201101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f00",
+      "name": "minting ended",
+      "standard": "KS-20",
+      "value": {
+        "Minter": {
+          "minter": null,
+          "previous": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+        }
+      }
+    },
+    {
+      "borsh": "090000007374616e646172647302000000060000004b532d3732310f0000004b532d3732312d6275726e61626c65",
+      "name": "the declaration",
+      "standard": "KS-721",
+      "value": {
+        "Standards": [
+          "KS-721",
+          "KS-721-burnable"
+        ]
+      }
+    },
+    {
+      "borsh": "080000006d657461646174610f0000004b73616e6120c384727420f09f8ea8050000004bc3845254",
+      "name": "non-ASCII text",
+      "standard": "KS-721",
+      "value": {
+        "Metadata": {
+          "name": "Ksana Ärt 🎨",
+          "symbol": "KÄRT"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e736665720000000000000000000000000000000000000000000000000000000000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f0000000000000000000000000000000000000000000000000000000000000001",
+      "name": "a mint",
+      "standard": "KS-721",
+      "value": {
+        "Transfer": {
+          "from": "0000000000000000000000000000000000000000000000000000000000000000",
+          "to": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "token_id": "0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+      "name": "a transfer of a hashed ID",
+      "standard": "KS-721",
+      "value": {
+        "Transfer": {
+          "from": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "to": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+          "token_id": "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374"
+        }
+      }
+    },
+    {
+      "borsh": "080000007472616e73666572404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      "name": "a burn",
+      "standard": "KS-721",
+      "value": {
+        "Transfer": {
+          "from": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+          "to": "0000000000000000000000000000000000000000000000000000000000000000",
+          "token_id": "00000000000000000000000000000000ffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f01707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f0000000000000000000000000000000000000000000000000000000000000002",
+      "name": "a spender",
+      "standard": "KS-721",
+      "value": {
+        "Approve": {
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "spender": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+          "token_id": "0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      }
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f000000000000000000000000000000000000000000000000000000000000000002",
+      "name": "cleared",
+      "standard": "KS-721",
+      "value": {
+        "Approve": {
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "spender": null,
+          "token_id": "0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      }
+    },
+    {
+      "borsh": "080000006f70657261746f72101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f010100b9556900000000",
+      "name": "an operator with an expiry",
+      "standard": "KS-721",
+      "value": {
+        "Operator": {
+          "approved": true,
+          "expires_at": "1767225600",
+          "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+        }
+      }
+    },
+    {
+      "borsh": "080000006f70657261746f72101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f0000",
+      "name": "an operator revoked",
+      "standard": "KS-721",
+      "value": {
+        "Operator": {
+          "approved": false,
+          "expires_at": null,
+          "operator": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+          "owner": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+        }
+      }
+    },
+    {
+      "borsh": "03000000757269010000000000000000000000000000000000000000000000000000000000000001",
+      "name": "one token's URI",
+      "standard": "KS-721",
+      "value": {
+        "Uri": "0000000000000000000000000000000000000000000000000000000000000001"
+      }
+    },
+    {
+      "borsh": "0300000075726900",
+      "name": "every token's URI",
+      "standard": "KS-721",
+      "value": {
+        "Uri": null
+      }
+    }
+  ],
+  "invalid_events": [
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0500000000000000000000000000000000",
+      "name": "a trailing byte",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f050000000000000000000000000000",
+      "name": "one byte short",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0000000000000000000000000000000000000000000000000000000000000001",
+      "name": "a KS-721 transfer",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0100000000000000000000000000000002",
+      "name": "an option tag of 2",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "0400000073776170101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f05000000000000000000000000000000",
+      "name": "another event",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "08000000ff72616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f05000000000000000000000000000000",
+      "name": "a name that is not UTF-8",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "",
+      "name": "empty",
+      "standard": "KS-20"
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000000000000000000000000000000000000000000000000000000000000000100",
+      "name": "a trailing byte",
+      "standard": "KS-721"
+    },
+    {
+      "borsh": "080000007472616e73666572101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f05000000000000000000000000000000",
+      "name": "a KS-20 transfer",
+      "standard": "KS-721"
+    },
+    {
+      "borsh": "080000006f70657261746f72101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0200",
+      "name": "a boolean of 2",
+      "standard": "KS-721"
+    },
+    {
+      "borsh": "07000000617070726f7665101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0100000000000000000000000000000000",
+      "name": "a KS-20 approve",
+      "standard": "KS-721"
+    },
+    {
+      "borsh": "090000007374616e64617264730100000006000000c3532d373231",
+      "name": "a declaration that is not UTF-8",
+      "standard": "KS-721"
+    }
+  ],
+  "token_ids": {
+    "serials": [
+      {
+        "serial": "0",
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "serial": "1",
+        "token_id": "0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      {
+        "serial": "255",
+        "token_id": "00000000000000000000000000000000000000000000000000000000000000ff"
+      },
+      {
+        "serial": "18446744073709551616",
+        "token_id": "0000000000000000000000000000000000000000000000010000000000000000"
+      },
+      {
+        "serial": "170141183460469231731687303715884105729",
+        "token_id": "0000000000000000000000000000000080000000000000000000000000000001"
+      },
+      {
+        "serial": "340282366920938463463374607431768211455",
+        "token_id": "00000000000000000000000000000000ffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "without_serial": [
+      "0000000000000000000000000000000100000000000000000000000000000000",
+      "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+      "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ]
+  }
+}

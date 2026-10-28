@@ -1,0 +1,42 @@
+{
+  "playground-counter": {
+    "source": "6c07705be7996557ede2956ea01b8cd9a80ff7208501c91e398af396cb8c1fe1",
+    "wasm": "0aa6d8333c78fe05d62f3fc2637a9830503f1bc65b3d91b0e1bb3b3385d8412f",
+    "bytes": 6027
+  },
+  "mintable-token": {
+    "source": "b0b826d704e9ee71f02a6d7fb669cbc510b5daaf7e5b5a983abf3c88243982dc",
+    "wasm": "743876ef284a782c6544384dd4835b5656529ee234f7b49b9970d1df39574e24",
+    "bytes": 17030
+  },
+  "token": {
+    "source": "fbe6c85b6e5d58fce1e39556642f1cb873fddca0f76517cb9a9dd7ea5fb42b30",
+    "wasm": "b1359a46064a8b10973627f0866174726ce2bd5397342a330c337630427303a6",
+    "bytes": 28720
+  },
+  "nft": {
+    "source": "1c8a7a3b738ce3ca88375733abe9d5eb338f75bb393084737dbef162d9f561d9",
+    "wasm": "fd4e32363849b6145820f2a1c9fb779882a17d96f3c03510254385b02a33ae5f",
+    "bytes": 50087
+  },
+  "amm": {
+    "source": "1e99f2bc2c4024cf463c071ca0e33ba9a7bfda0709abc223e964dfe42442fc1c",
+    "wasm": "037dfabf7850af7d76793ba86fd3fba1054f6f82b3adf2b3f4e36295ab663825",
+    "bytes": 25427
+  },
+  "lending": {
+    "source": "f462b3fc49e2e1718694730610051bc4009160fd5a672ea69e5877db7f96f77d",
+    "wasm": "a535dfdbea94e32d742b061ed368e362a778dbce13a782a9fb5722ab94038021",
+    "bytes": 35889
+  },
+  "multisig": {
+    "source": "9316f0ce4de3d51651adbd5452d980cf9b2655e4508c8b4c41d890a7603772fe",
+    "wasm": "f6467bbabc6c9ec9986f0a69a03e6658b8079114d12be6e8adfe842ca010747f",
+    "bytes": 30539
+  },
+  "vesting": {
+    "source": "13d69ba7e0debca7286fa126d56a01903378f5e142fc55064cceb1839f618c78",
+    "wasm": "729cbc0dd73186638ce9a682ccf91ccae69b8254c62d212cbc6a3456549efaf1",
+    "bytes": 20791
+  }
+}

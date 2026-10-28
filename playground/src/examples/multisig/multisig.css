@@ -1,0 +1,106 @@
+/* The multisig page's own pieces: proposal cards, accounts marked as yours, the asset rows and the pager. */
+
+.multisig-gap {
+  margin-top: var(--sp-3);
+}
+
+.multisig-proposals {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.multisig-proposal {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.multisig-proposal--you {
+  border-color: var(--warn);
+}
+
+.multisig-head,
+.multisig-line {
+  display: flex;
+  align-items: center;
+  gap: 6px var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.multisig-line {
+  font-size: var(--fs-small);
+}
+
+.multisig-id {
+  font-weight: 600;
+}
+
+.multisig-date {
+  margin-left: auto;
+  font-size: var(--fs-label);
+}
+
+.multisig-action {
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.multisig-who {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.multisig-args summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+}
+
+.multisig-args code {
+  display: block;
+  margin-top: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.multisig-meter {
+  display: grid;
+  gap: 4px;
+}
+
+.multisig-owners {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.multisig-asset {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.multisig-kinds {
+  flex-wrap: wrap;
+}
+
+.multisig-pager {
+  justify-content: space-between;
+  margin-top: var(--sp-3);
+}

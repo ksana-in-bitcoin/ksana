@@ -1,0 +1,322 @@
+{
+  "description": "entries_root uses the RFC 6962 Merkle Tree Hash (DECISIONS D-004): MTH({}) = sha256(\"\"), leaf sha256(0x00 ‖ d), internal node sha256(0x01 ‖ left ‖ right), the left subtree takes the largest power of 2 less than n leaves. The leaves d of entries_root are the Borsh encodings of the entries.",
+  "entries_root": [
+    {
+      "entries": [],
+      "entries_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "name": "empty block"
+    },
+    {
+      "entries": [
+        {
+          "Sponsored": {
+            "op": {
+              "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+              "action": {
+                "Call": {
+                  "args": "010203",
+                  "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+                  "funds": [
+                    {
+                      "amount": "2000",
+                      "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+                    },
+                    {
+                      "amount": "340282366920938463463374607431768211455",
+                      "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+                    }
+                  ],
+                  "method": "überweisen"
+                }
+              },
+              "chain_id": 1001,
+              "fee": {
+                "Token": {
+                  "amount": "2500"
+                }
+              },
+              "max_gas": "200000",
+              "nonce": "0",
+              "sig": {
+                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+              },
+              "version": 2
+            }
+          }
+        }
+      ],
+      "entries_root": "edb9f20d36f07f8bb9f5414efd2c6cd7e77de627e9d2eef4c4fa147c4684fcda",
+      "name": "single entry"
+    },
+    {
+      "entries": [
+        {
+          "Forced": {
+            "btc_txid": "7a665812bfbb5a0f225029366582fbdc6b8744f2308ef7ec354b39a00d1480ef",
+            "op": {
+              "account": "29fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af7072",
+              "action": {
+                "Deploy": {
+                  "code": "0061736d01000000",
+                  "funds": [],
+                  "init_args": ""
+                }
+              },
+              "chain_id": 1001,
+              "fee": "BtcNative",
+              "max_gas": "1000000",
+              "nonce": "1",
+              "sig": {
+                "Bip340": "a9dac975ea4852777bdc892086a74e97188d1c82fd633d8373c0bbeb8d4d9805d05f4b0942846a0388688191a6871d38b3d01696d3a949f315ee17fca64b6d2b"
+              },
+              "version": 2
+            }
+          }
+        },
+        {
+          "Sponsored": {
+            "op": {
+              "account": "9a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90",
+              "action": {
+                "AssetTransfer": {
+                  "amount": "123456789",
+                  "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "to": "e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f4460"
+                }
+              },
+              "chain_id": 1001,
+              "fee": {
+                "Token": {
+                  "amount": "1000"
+                }
+              },
+              "max_gas": "50000",
+              "nonce": "7",
+              "sig": {
+                "Bip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49"
+              },
+              "version": 2
+            }
+          }
+        },
+        {
+          "Sponsored": {
+            "op": {
+              "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+              "action": {
+                "Call": {
+                  "args": "010203",
+                  "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+                  "funds": [
+                    {
+                      "amount": "2000",
+                      "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+                    },
+                    {
+                      "amount": "340282366920938463463374607431768211455",
+                      "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+                    }
+                  ],
+                  "method": "überweisen"
+                }
+              },
+              "chain_id": 1001,
+              "fee": {
+                "Token": {
+                  "amount": "2500"
+                }
+              },
+              "max_gas": "200000",
+              "nonce": "0",
+              "sig": {
+                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+              },
+              "version": 2
+            }
+          }
+        }
+      ],
+      "entries_root": "3c066258146ca4fe05fc9d3c65b2e534cdc6c534effb09d4fc568d3e9d8fb18e",
+      "name": "three entries"
+    },
+    {
+      "entries": [
+        {
+          "Forced": {
+            "btc_txid": "7a665812bfbb5a0f225029366582fbdc6b8744f2308ef7ec354b39a00d1480ef",
+            "op": {
+              "account": "29fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af7072",
+              "action": {
+                "Deploy": {
+                  "code": "0061736d01000000",
+                  "funds": [],
+                  "init_args": ""
+                }
+              },
+              "chain_id": 1001,
+              "fee": "BtcNative",
+              "max_gas": "1000000",
+              "nonce": "1",
+              "sig": {
+                "Bip340": "a9dac975ea4852777bdc892086a74e97188d1c82fd633d8373c0bbeb8d4d9805d05f4b0942846a0388688191a6871d38b3d01696d3a949f315ee17fca64b6d2b"
+              },
+              "version": 2
+            }
+          }
+        },
+        {
+          "Sponsored": {
+            "op": {
+              "account": "9a6275da6e6a12dc3e5b49a9173f6a0b666337d0fde15ef761179fcad6b42e90",
+              "action": {
+                "AssetTransfer": {
+                  "amount": "123456789",
+                  "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "to": "e7dff7c972293410e4e0092a2afb07687c54b35ca4963bb8624c2dfea19f4460"
+                }
+              },
+              "chain_id": 1001,
+              "fee": {
+                "Token": {
+                  "amount": "1000"
+                }
+              },
+              "max_gas": "50000",
+              "nonce": "7",
+              "sig": {
+                "Bip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49"
+              },
+              "version": 2
+            }
+          }
+        },
+        {
+          "Sponsored": {
+            "op": {
+              "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
+              "action": {
+                "Call": {
+                  "args": "010203",
+                  "contract": "f4e80bad4f7a0a624c7b682c6f9bc9cbb28e0ed321755e5a6aebf470149f1adc",
+                  "funds": [
+                    {
+                      "amount": "2000",
+                      "asset": "0000000000000000000000000000000000000000000000000000000000000000"
+                    },
+                    {
+                      "amount": "340282366920938463463374607431768211455",
+                      "asset": "84503a382929a64d1e96d19ec66fe8710e6f1178e6acd270d27c96403b15599e"
+                    }
+                  ],
+                  "method": "überweisen"
+                }
+              },
+              "chain_id": 1001,
+              "fee": {
+                "Token": {
+                  "amount": "2500"
+                }
+              },
+              "max_gas": "200000",
+              "nonce": "0",
+              "sig": {
+                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+              },
+              "version": 2
+            }
+          }
+        },
+        {
+          "Unlock": {
+            "height": "1234567",
+            "index": 3
+          }
+        }
+      ],
+      "entries_root": "98041c82ec7bf625f982619e38b5d4841cd1a98d2c2baaf1b6825f960d88b1db",
+      "name": "all entries (three variants)"
+    }
+  ],
+  "rfc6962": [
+    {
+      "leaves": [],
+      "root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "leaves": [
+        ""
+      ],
+      "root": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+    },
+    {
+      "leaves": [
+        "",
+        "00"
+      ],
+      "root": "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10"
+      ],
+      "root": "aeb6bcfe274b70a14fb067a5e5578264db0fa9b51af5e0ba159158f329e06e77"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10",
+        "2021"
+      ],
+      "root": "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10",
+        "2021",
+        "3031"
+      ],
+      "root": "4e3bbb1f7b478dcfe71fb631631519a3bca12c9aefca1612bfce4c13a86264d4"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10",
+        "2021",
+        "3031",
+        "40414243"
+      ],
+      "root": "76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10",
+        "2021",
+        "3031",
+        "40414243",
+        "5051525354555657"
+      ],
+      "root": "ddb89be403809e325750d3d263cd78929c2942b7942a34b77e122c9594a74c8c"
+    },
+    {
+      "leaves": [
+        "",
+        "00",
+        "10",
+        "2021",
+        "3031",
+        "40414243",
+        "5051525354555657",
+        "606162636465666768696a6b6c6d6e6f"
+      ],
+      "root": "5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328"
+    }
+  ]
+}

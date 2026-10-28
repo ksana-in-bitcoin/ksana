@@ -1,0 +1,22 @@
+[package]
+name = "ksana-p2p"
+description = "Ksana fast-lane P2P network (libp2p): gossipsub broadcast of blocks and ops, block / entry pool sync, scoring and banning"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ksana-primitives.workspace = true
+libp2p.workspace = true
+borsh = { workspace = true, features = ["std"] }
+hex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

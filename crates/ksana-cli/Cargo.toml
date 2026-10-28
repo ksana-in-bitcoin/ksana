@@ -1,0 +1,33 @@
+[package]
+name = "ksana-cli"
+description = "Ksana command-line tool: keys, path B / C op submission and top-up, contract deployment and calls, state queries (SPEC §11.4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ksana-cli"
+path = "src/main.rs"
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-btc.workspace = true
+ksana-rpc.workspace = true
+bitcoin.workspace = true
+borsh = { workspace = true, features = ["std"] }
+corepc-client.workspace = true
+jsonrpsee.workspace = true
+tokio.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde_json.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

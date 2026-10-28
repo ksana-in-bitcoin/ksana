@@ -1,0 +1,18 @@
+[package]
+name = "nft"
+description = "Ksana example contract: a KS-721 collection of non-fungible tokens on the SDK's ks721 (burnable, enumerable) with a fixed-price market"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk = { workspace = true, features = ["standards"] }
+
+[lints]
+workspace = true

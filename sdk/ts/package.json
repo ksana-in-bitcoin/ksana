@@ -1,0 +1,44 @@
+{
+  "name": "@ksana/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ksana TypeScript SDK: consensus types and Borsh codec, VmOp signing (BIP340 / BIP322 simple), path B submission, path C native transactions, JSON-RPC client and wallet adapters",
+  "license": "(MIT OR Apache-2.0)",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./wallet/mock": {
+      "types": "./dist/src/wallet/mock.d.ts",
+      "default": "./dist/src/wallet/mock.js"
+    }
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:demo": "esbuild examples/wallet-demo/main.ts --bundle --format=esm --platform=browser --target=es2022 --sourcemap --outfile=examples/wallet-demo/dist/wallet-demo.js",
+    "lint": "tsc -p tsconfig.lib.json && tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@scure/base": "2.4.0",
+    "@scure/btc-signer": "2.4.1",
+    "borsh": "2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "esbuild": "0.28.2",
+    "playwright-core": "1.56.1",
+    "typescript": "5.9.3"
+  }
+}

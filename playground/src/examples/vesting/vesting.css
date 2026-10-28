@@ -1,0 +1,306 @@
+/* The vesting page: schedule cards, the bar of what was released and what has vested, the drawing of a schedule, the form's choices. */
+
+.vesting-stack {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* ---------- A schedule ---------- */
+
+.vesting-card {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.vesting-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.vesting-card-title {
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.vesting-due {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+/* Two steps of one hue on the track: released, then vested and not released, apart by a 2px gap */
+.vesting-bar {
+  position: relative;
+  height: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.vesting-bar-released,
+.vesting-bar-vested {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.vesting-bar-released {
+  left: 0;
+  background: var(--qing);
+}
+
+.vesting-bar-vested {
+  background: color-mix(in srgb, var(--qing) 60%, var(--surface));
+}
+
+.vesting-bar-vested--after {
+  border-left: 2px solid var(--bg);
+}
+
+.vesting-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--sp-4);
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+}
+
+.vesting-key > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.vesting-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.vesting-swatch--released {
+  border-color: var(--qing);
+  background: var(--qing);
+}
+
+.vesting-swatch--vested {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--qing) 60%, var(--surface));
+}
+
+/* ---------- The drawing ---------- */
+
+.vesting-chart {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vesting-readout {
+  min-height: 1.6em;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.vesting-plot {
+  min-width: 0;
+  border-radius: var(--r-ctl);
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+.vesting-plot svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.vesting-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.vesting-axis {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.vesting-area {
+  fill: var(--qing);
+  fill-opacity: 0.1;
+  stroke: none;
+}
+
+.vesting-line {
+  fill: none;
+  stroke: var(--qing);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.vesting-dot {
+  fill: var(--qing);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.vesting-mark-cliff {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.vesting-mark-now {
+  stroke: var(--ink-2);
+  stroke-width: 1;
+}
+
+.vesting-cross {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+}
+
+.vesting-tick {
+  fill: var(--ink-3);
+  font-family: var(--font-body);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.vesting-key-line,
+.vesting-key-cliff,
+.vesting-key-now {
+  display: inline-block;
+  flex: none;
+}
+
+.vesting-key-line {
+  width: 14px;
+  border-top: 2px solid var(--qing);
+}
+
+.vesting-key-cliff {
+  height: 12px;
+  border-left: 1px dashed var(--ink-3);
+}
+
+.vesting-key-now {
+  height: 12px;
+  border-left: 1px solid var(--ink-2);
+}
+
+/* ---------- The form ---------- */
+
+.vesting-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vesting-field > legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.vesting-choice {
+  justify-self: start;
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+.vesting-when {
+  max-width: 280px;
+}
+
+.vesting-check-hint {
+  display: block;
+}
+
+.vesting-preview {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-ctl);
+  min-width: 0;
+}
+
+.vesting-preview .sub-title {
+  margin: 0;
+}
+
+.vesting-points {
+  display: grid;
+  gap: 2px;
+  font-size: var(--fs-small);
+}
+
+.vesting-points li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px var(--sp-3);
+  flex-wrap: wrap;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.vesting-points li:last-child {
+  border-bottom: 0;
+}
+
+.vesting-point-value {
+  display: grid;
+  justify-items: end;
+  margin-left: auto;
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Lists and events ---------- */
+
+.vesting-time {
+  display: grid;
+}
+
+.vesting-amounts {
+  display: grid;
+  gap: 2px;
+}
+
+.vesting-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.vesting-sentence {
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}
+
+.vesting-sentence .id {
+  vertical-align: middle;
+}

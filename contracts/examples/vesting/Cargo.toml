@@ -1,0 +1,18 @@
+[package]
+name = "vesting"
+description = "Ksana example contract: token vesting schedules with a cliff and linear release, revocable by their creator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk.workspace = true
+
+[lints]
+workspace = true

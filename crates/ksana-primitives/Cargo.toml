@@ -1,0 +1,27 @@
+[package]
+name = "ksana-primitives"
+description = "Ksana consensus types, Borsh encoding, hashing and protocol parameters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Expose the proptest strategies (for the tests of other crates).
+proptest = ["dep:proptest"]
+
+[dependencies]
+borsh = { workspace = true, features = ["std"] }
+sha2.workspace = true
+serde.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

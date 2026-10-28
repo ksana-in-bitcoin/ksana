@@ -1,0 +1,19 @@
+{
+  "timestamp": "1792553063",
+  "btc_anchor": {
+    "height": 327273,
+    "hash": "41cb1fa60f4a0803b02024c7c0fd9cabb094f2935e7fcc4e7a63f03011000000"
+  },
+  "bits": 520523192,
+  "allocations": [
+    {
+      "account": "de6603f052fd5bfaae5678a2a20ae6ae4fe4ae00c89db70a2efea7429851afc0",
+      "amount": "10000000000000000"
+    },
+    {
+      "account": "6431409abb9b8434defe68b0e066cf76610ac7b1cf49f2d02bc807543877dc0e",
+      "amount": "1000000000000000"
+    }
+  ],
+  "block_share_account": "0073719af1ae0718ca4fde1055e6c5c34157eefd54302c9b19deb28927ce8d8c"
+}

@@ -1,0 +1,30 @@
+[package]
+name = "ksana-consensus"
+description = "Ksana consensus: Consensus trait, Argon2id PoW, ASERT difficulty adjustment, chain work, block header checks and GHOSTDAG"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ksana-primitives.workspace = true
+# entries_root of the empty entry list (D-004)
+ksana-crypto.workspace = true
+# Mining algorithm Argon2id (D-094)
+argon2.workspace = true
+thiserror.workspace = true
+# Local encoding of DAG checkpoints (D-097; not a consensus format)
+borsh = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+proptest.workspace = true
+hex.workspace = true
+# Reading and generating the shared test vectors `tests/vectors/pow.json` (D-094)
+serde.workspace = true
+serde_json.workspace = true
+# Independent implementation of compact encoding and work computation in tests
+bitcoin.workspace = true
+
+[lints]
+workspace = true

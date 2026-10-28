@@ -1,0 +1,66 @@
+name: playground
+
+# The contract playground (playground/, D-119): its page and its compile service. The page uses the TypeScript SDK via
+# file:../sdk/ts and reads the example contracts' sources from contracts/examples; the compile service's tests build the
+# counter with the pinned toolchain and compare it with the shipped module, so changes to any of these re-run the checks.
+on:
+  push:
+    paths:
+      - "playground/**"
+      - "sdk/ts/**"
+      - "contracts/**"
+      - "crates/ksana-contract-sdk/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/playground.yml"
+  pull_request:
+    paths:
+      - "playground/**"
+      - "sdk/ts/**"
+      - "contracts/**"
+      - "crates/ksana-contract-sdk/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/playground.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: playground
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            sdk/ts/package-lock.json
+            playground/package-lock.json
+      # The toolchain of rust-toolchain.toml with its wasm32 target, for the compile service's builds
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
+      - name: Build the TypeScript SDK
+        working-directory: sdk/ts
+        run: |
+          npm ci
+          npm run build
+      - name: Install
+        working-directory: playground
+        run: npm ci
+      - name: Typecheck
+        working-directory: playground
+        run: npm run typecheck
+      - name: Unit tests and the compile service's tests
+        working-directory: playground
+        run: npm test
+      - name: Build
+        working-directory: playground
+        run: npm run build
+      # The build of the Cloudflare Worker at playground.ksana.network (wrangler.jsonc), with its deployment.json and _headers
+      - name: Build the hosted copy
+        working-directory: playground
+        run: |
+          npm run build:hosted
+          test -f dist/deployment.json
+          test -f dist/_headers

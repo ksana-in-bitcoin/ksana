@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ksana wallet demo</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --text: #1d2330;
+        --muted: #5b6475;
+        --border: #d9dde5;
+        --accent: #2f5bd3;
+        --warn-bg: #fff3cd;
+        --warn-text: #6b4e00;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14171d;
+          --panel: #1c2028;
+          --text: #e6e9ef;
+          --muted: #9aa3b2;
+          --border: #343a46;
+          --accent: #7a9cff;
+          --warn-bg: #3d3210;
+          --warn-text: #f3d98b;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 8px 0 4px;
+      }
+      p.lead {
+        color: var(--muted);
+        margin: 0 0 16px;
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px 16px;
+        margin-bottom: 12px;
+      }
+      h2 {
+        font-size: 16px;
+        margin: 4px 0 10px;
+      }
+      label {
+        display: block;
+        font-size: 13px;
+        color: var(--muted);
+        margin: 8px 0 2px;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px var(--mono);
+      }
+      .row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 0 12px;
+      }
+      button {
+        margin: 10px 8px 0 0;
+        padding: 7px 14px;
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 4px 12px;
+        margin: 0;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        font-family: var(--mono);
+        overflow-wrap: anywhere;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 8px 0 0;
+      }
+      #mock-banner {
+        background: var(--warn-bg);
+        color: var(--warn-text);
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+      }
+      pre#log {
+        margin: 0;
+        max-height: 260px;
+        overflow: auto;
+        font: 12px/1.5 var(--mono);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Ksana wallet demo</h1>
+      <p class="lead">
+        Path B with Unisat or Xverse: the wallet signs the VmOp's sighash with BIP322, the fee is paid in KSA, and the producer
+        sponsors the BTC fee, includes the operation in a fast-lane block and puts it on chain with the settlement transaction.
+      </p>
+      <div id="mock-banner" hidden>Mock wallet: the private key comes from the page URL; for local regtest testing only.</div>
+
+      <section>
+        <h2>1. Node</h2>
+        <div class="row">
+          <div>
+            <label for="rpc">Node RPC</label>
+            <input id="rpc" value="http://127.0.0.1:8545" spellcheck="false" />
+          </div>
+          <div>
+            <label for="chain">Network (chain ID)</label>
+            <select id="chain">
+              <option value="signet">signet (1002)</option>
+              <option value="devnet">devnet / regtest (1001)</option>
+            </select>
+          </div>
+        </div>
+        <p class="note">The node must be started with <code>--rpc-cors</code> for the page to call it from the browser (D-055).</p>
+      </section>
+
+      <section>
+        <h2>2. Wallet</h2>
+        <button id="connect-unisat">Connect Unisat</button>
+        <button id="connect-xverse">Connect Xverse</button>
+        <button id="refresh" class="secondary" disabled>Refresh account</button>
+        <dl style="margin-top: 12px">
+          <dt>Wallet</dt>
+          <dd id="wallet-name">—</dd>
+          <dt>Taproot address (receives both BTC and KSA)</dt>
+          <dd id="wallet-address">—</dd>
+          <dt>Ksana account (the same address in hex)</dt>
+          <dd id="wallet-account">—</dd>
+          <dt>nonce</dt>
+          <dd id="nonce">—</dd>
+          <dt>KSA balance</dt>
+          <dd id="balance">—</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>3. Transfer (path B)</h2>
+        <div class="row">
+          <div>
+            <label for="to">Recipient account (the recipient's Taproot address, or 64 hex digits)</label>
+            <input id="to" spellcheck="false" />
+          </div>
+          <div>
+            <label for="amount">Amount (KSA base units)</label>
+            <input id="amount" value="1" />
+          </div>
+          <div>
+            <label for="max-gas">max_gas</label>
+            <input id="max-gas" value="100000" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="fee">Fee (KSA base units; leave empty to use the suggestion from <code>ksana_estimateFee</code> at submission)</label>
+            <input id="fee" />
+          </div>
+        </div>
+        <button id="estimate" class="secondary" disabled>Estimate fee</button>
+        <button id="submit" disabled>Sign and submit</button>
+        <p class="note" id="fee-info"></p>
+        <p class="note">
+          Both the transfer amount and the fee are paid from the account's KSA balance. Topping up KSA with BTC (the path C payment
+          and claim transaction, D-078) will be added in M13.2.
+        </p>
+      </section>
+
+      <section>
+        <h2>4. Status</h2>
+        <dl>
+          <dt>op_id</dt>
+          <dd id="op-id">—</dd>
+          <dt>Operation status</dt>
+          <dd id="op-status">—</dd>
+          <dt>Included in block</dt>
+          <dd id="op-block">—</dd>
+          <dt>Settlement transaction</dt>
+          <dd id="settlement">—</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="dist/wallet-demo.js"></script>
+  </body>
+</html>

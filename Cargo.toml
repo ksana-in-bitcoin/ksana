@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "tests/integration"]
+# `cargo test` / `cargo clippy` cover only crates/* by default; the integration tests need a regtest bitcoind,
+# run them with tests/integration/run.sh (see CONTRIBUTING.md).
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ksana-primitives = { path = "crates/ksana-primitives" }
+ksana-crypto = { path = "crates/ksana-crypto" }
+ksana-state = { path = "crates/ksana-state" }
+ksana-vm = { path = "crates/ksana-vm" }
+ksana-execution = { path = "crates/ksana-execution" }
+ksana-contract-sdk = { path = "crates/ksana-contract-sdk" }
+ksana-test-contracts = { path = "crates/ksana-test-contracts" }
+ksana-consensus = { path = "crates/ksana-consensus" }
+ksana-mempool = { path = "crates/ksana-mempool" }
+ksana-rpc = { path = "crates/ksana-rpc" }
+ksana-node = { path = "crates/ksana-node" }
+ksana-btc = { path = "crates/ksana-btc" }
+ksana-p2p = { path = "crates/ksana-p2p" }
+ksana-indexer = { path = "crates/ksana-indexer" }
+
+# std is not enabled: ksana-contract-sdk is no_std; crates that need std add features = ["std"] themselves.
+borsh = { version = "1.8.1", default-features = false, features = ["derive"] }
+sha2 = "0.10.9"
+# Mining algorithm Argon2id (D-094): RustCrypto's pure Rust implementation; only the raw `hash_password_into` is used
+# (password-hash / getrandom not enabled)
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
+secp256k1 = "0.29.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+hex = "0.4.3"
+# Tests only: decodes the base64 signatures in the official BIP322 vectors (D-052).
+base64 = "0.22.1"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+proptest = "1.11.0"
+bitcoin = "0.32.102"
+corepc-client = { version = "0.17.0", features = ["client-sync"] }
+jmt = { version = "0.12.0", default-features = false, features = ["std", "sha2"] }
+rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime"] }
+# Global allocator of the node and indexer binaries on Linux, RocksDB's allocations included (D-103): glibc's allocator
+# kept the memory freed by their many threads in its arenas. jemalloc is built from source (needs make) with a fixed page
+# size: 64 KiB for aarch64 Linux, so that one build runs with 4, 16 or 64 KiB pages, and the build machine's elsewhere
+# (4 KiB on x86_64); JEMALLOC_SYS_WITH_LG_PAGE overrides it.
+tikv-jemallocator = { version = "0.7.0", features = ["unprefixed_malloc_on_supported_platforms"] }
+wasmtime = { version = "49.0.1", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+wasmparser = { version = "0.258.0", default-features = false, features = ["std", "validate", "features"] }
+# Instrumentation for runtime stack metering (D-073): part of wasm-tools like wasmparser, same version, already in the
+# dependency tree (wasmtime / wat)
+wasm-encoder = { version = "0.258.0", default-features = false, features = ["std", "wasmparser"] }
+wat = "1.258.0"
+tempfile = "3.27.0"
+jsonrpsee = { version = "0.26.1", features = ["server", "macros", "http-client", "ws-client"] }
+# CORS for the RPC (D-055): HTTP middleware of the jsonrpsee server.
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["cors"] }
+http = "1.5.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+clap = { version = "4.6.7", features = ["derive"] }
+libp2p = { version = "0.57.0", default-features = false, features = [
+    "tokio", "tcp", "dns", "noise", "yamux", "gossipsub", "request-response", "identify", "ping", "macros", "ed25519",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# PoW (Argon2id, D-094) and block hashing are still compiled with optimizations in debug builds: the node tests produce
+# blocks and check block headers under a debug build, and the Argon2id time per block header directly affects the test
+# duration. No result is affected.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.ksana-consensus]
+opt-level = 3

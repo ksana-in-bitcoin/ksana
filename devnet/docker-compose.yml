@@ -1,0 +1,155 @@
+# Ksana devnet (SPEC §12: bitcoind regtest + 3 nodes + 1 indexer).
+#
+# Start only bitcoind (for the integration tests): docker compose -f devnet/docker-compose.yml up -d --wait
+# Together with the 3 fast-lane nodes and the indexer (D-042, D-048; the image is built on first use):
+#   docker compose -f devnet/docker-compose.yml --profile nodes up -d --build
+#   Node JSON-RPC: 127.0.0.1:18545 / 18546 / 18547; indexer JSON-RPC (indexer_status, indexer_stateRoot):
+#   127.0.0.1:18548.
+#   init writes the genesis config, each node's funding and producer secret keys, and the secret key of the test
+#   account alice (with pre-allocated KSA) into the volume devnet-config, e.g.:
+#   docker compose -f devnet/docker-compose.yml --profile nodes run --rm --entrypoint cat init /devnet/alice.key
+#   Submit an operation as alice with ksana-cli (D-051):
+#   docker compose -f devnet/docker-compose.yml --profile nodes run --rm --entrypoint ksana-cli init \
+#     --rpc http://node1:8545 transfer --key /devnet/alice.key --to <account> --amount 5 --fee-token 1 --wait
+# Stop and clear the chain data: docker compose -f devnet/docker-compose.yml --profile nodes down -v
+name: ksana-devnet
+
+services:
+  bitcoind:
+    # Bitcoin Core 28.4 (SPEC §12 requires ≥ 28.0: P2A outputs and 1P1C package relay), pinned by digest.
+    image: bitcoin/bitcoin:28.4@sha256:ebed04719a310a94e6446729298ff57170eab9ddd7c07911285d3fdbef85ab6d
+    command:
+      - -regtest=1
+      - -server=1
+      - -printtoconsole=1
+      # SPEC §7.1: the regtest bitcoind is started with -datacarriersize=100000 -txindex=1.
+      - -datacarriersize=100000
+      - -txindex=1
+      # Accept only standard transactions, as on mainnet (the regtest default as well; stated explicitly here).
+      - -acceptnonstdtxn=0
+      # The RPC is only for the local devnet; the port is mapped to 127.0.0.1 only.
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcuser=ksana
+      - -rpcpassword=ksana
+    ports:
+      - "127.0.0.1:18443:18443" # RPC
+      - "127.0.0.1:18444:18444" # P2P
+    volumes:
+      - bitcoind-data:/home/bitcoin/.bitcoin
+    healthcheck:
+      test:
+        - CMD
+        - bitcoin-cli
+        - -regtest
+        - -rpcuser=ksana
+        - -rpcpassword=ksana
+        - getblockchaininfo
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Initialization (runs once): genesis config, funding and producer secret keys, UTXOs sent to the funding addresses.
+  init:
+    profiles: [nodes]
+    build:
+      context: ..
+      dockerfile: devnet/Dockerfile
+    image: ksana-node:devnet
+    entrypoint: ["ksana-devnet", "init"]
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    volumes:
+      - devnet-config:/devnet
+
+  # regtest has no miners: mine BTC blocks periodically so that settlement and native transactions get confirmed.
+  btc-miner:
+    profiles: [nodes]
+    image: ksana-node:devnet
+    entrypoint: ["ksana-devnet", "miner"]
+    environment:
+      BTC_BLOCK_INTERVAL: "10"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  node1: &node
+    profiles: [nodes]
+    image: ksana-node:devnet
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    # Static bootstrap peers of each other (D-040); --min-block-interval-ms limits the block production rate during
+    # the low-difficulty start-up phase (local policy)
+    command:
+      - >-
+        exec ksana-node --data-dir /data --genesis /devnet/genesis.json --rpc-addr 0.0.0.0:8545
+        --btc-rpc-url http://bitcoind:18443 --btc-rpc-user ksana --btc-rpc-pass ksana
+        --producer "$$(cat /devnet/$$NODE/producer.pub)" --btc-funding-key-file /devnet/$$NODE/funding.key
+        --p2p-listen /ip4/0.0.0.0/tcp/9000 $$(for p in $$PEERS; do echo --peer /dns4/$$p/tcp/9000; done)
+        --min-block-interval-ms 5000
+    environment:
+      NODE: node1
+      PEERS: node2 node3
+    ports:
+      - "127.0.0.1:18545:8545"
+    volumes:
+      - devnet-config:/devnet:ro
+      - node1-data:/data
+    restart: unless-stopped
+
+  node2:
+    <<: *node
+    environment:
+      NODE: node2
+      PEERS: node1 node3
+    ports:
+      - "127.0.0.1:18546:8545"
+    volumes:
+      - devnet-config:/devnet:ro
+      - node2-data:/data
+
+  node3:
+    <<: *node
+    environment:
+      NODE: node3
+      PEERS: node1 node2
+    ports:
+      - "127.0.0.1:18547:8545"
+    volumes:
+      - devnet-config:/devnet:ro
+      - node3-data:/data
+
+  # Independent indexer (D-048): connects only to bitcoind, reads the same genesis config as the nodes, rebuilds the
+  # fast-lane chain and the whole state from the BTC data and checks the state_root block by block.
+  indexer:
+    profiles: [nodes]
+    image: ksana-node:devnet
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    entrypoint: ["ksana-indexer"]
+    command:
+      - --data-dir=/data
+      - --genesis=/devnet/genesis.json
+      - --btc-rpc-url=http://bitcoind:18443
+      - --btc-rpc-user=ksana
+      - --btc-rpc-pass=ksana
+      - --rpc-addr=0.0.0.0:8546
+    ports:
+      - "127.0.0.1:18548:8546"
+    volumes:
+      - devnet-config:/devnet:ro
+      - indexer-data:/data
+    restart: unless-stopped
+
+volumes:
+  bitcoind-data:
+  devnet-config:
+  node1-data:
+  node2-data:
+  node3-data:
+  indexer-data:

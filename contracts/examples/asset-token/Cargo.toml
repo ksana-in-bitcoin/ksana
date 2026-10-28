@@ -1,0 +1,22 @@
+[package]
+name = "asset-token"
+description = "Ksana example contract: a fixed-supply token created as a VM built-in asset without any issuer capability (asset_create at deployment)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk.workspace = true
+
+[dev-dependencies]
+# The native tests trade the issued asset on the AMM example.
+amm = { path = "../amm" }
+
+[lints]
+workspace = true

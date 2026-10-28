@@ -1,0 +1,31 @@
+name: soak
+
+# SPEC §15 soak test (devnet/soak.sh): a 3-node devnet and the indexer run continuously while random operations are submitted over the submission paths and the state is checked throughout.
+# The duration follows the limit of GitHub-hosted runners (D-061, decided by the project owner): the job may run 350 minutes at most, about 30 of them building the image, the soak itself up to 5 hours.
+# Triggers: manually (workflow_dispatch requires this file on the default branch), or a push to a `soak/**` branch (uses the workflow from the pushed commit with the default duration;
+# CI ignores those branches).
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Duration in seconds (at most 18000)
+        default: "18000"
+  push:
+    branches: ['soak/**']
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - run: devnet/soak.sh
+        env:
+          KSANA_SOAK_SECONDS: ${{ inputs.seconds || '18000' }}

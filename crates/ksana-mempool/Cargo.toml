@@ -1,0 +1,20 @@
+[package]
+name = "ksana-mempool"
+description = "Ksana entry pool: op admission checks, packing candidates ordered by account nonce and fee"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-execution.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+borsh = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

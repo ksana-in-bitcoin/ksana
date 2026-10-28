@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Ksana Playground</title>
+    <meta name="description" content="Edit, compile, deploy and use example smart contracts on the Ksana signet from your browser: a token, an NFT collection, an AMM, lending, a multisig wallet and vesting." />
+    <meta name="theme-color" content="#f1f4f3" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d1314" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <!-- The theme and the language chosen earlier (src/app/theme.ts, src/i18n/index.ts), before the first paint -->
+    <script>
+      (function () {
+        try {
+          var theme = JSON.parse(localStorage.getItem('ksana:playground:theme'));
+          if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+        } catch (e) {}
+        try {
+          var asked = new URLSearchParams(location.search).get('lang');
+          var saved = JSON.parse(localStorage.getItem('ksana:playground:locale'));
+          var zh = asked ? /^zh/i.test(asked) : saved === 'zh-CN';
+          document.documentElement.lang = zh ? 'zh-CN' : 'en';
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>The Ksana Playground needs JavaScript: it runs the wallet, the editor and the forms in your browser.</noscript>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>

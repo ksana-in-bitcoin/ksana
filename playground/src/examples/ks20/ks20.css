@@ -1,0 +1,10 @@
+/* The KS-20 token page: the event sentences. */
+
+.ks20-event {
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}
+
+.ks20-event .id {
+  vertical-align: middle;
+}

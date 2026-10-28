@@ -1,0 +1,45 @@
+[package]
+name = "ksana-indexer"
+description = "Ksana standalone indexer: connects only to bitcoind, rebuilds the fast-lane chain and all state from BTC data and verifies the state_root block by block"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ksana-indexer"
+path = "src/main.rs"
+
+[dependencies]
+ksana-primitives.workspace = true
+ksana-crypto.workspace = true
+ksana-state.workspace = true
+ksana-execution.workspace = true
+ksana-consensus.workspace = true
+ksana-btc.workspace = true
+ksana-rpc.workspace = true
+bitcoin.workspace = true
+borsh = { workspace = true, features = ["std"] }
+rocksdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+jsonrpsee.workspace = true
+tokio.workspace = true
+clap = { workspace = true, features = ["env"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator.workspace = true
+
+[dev-dependencies]
+ksana-node.workspace = true
+ksana-btc = { workspace = true, features = ["mock"] }
+ksana-mempool.workspace = true
+ksana-test-contracts.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "token"
+description = "Ksana example contract: the reference KS-20 fungible token (on the contract SDK's ks20 module)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the wasm contract; rlib: linked by the native unit tests and by other contracts' tests (amm).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ksana-contract-sdk = { workspace = true, features = ["standards"] }
+
+[lints]
+workspace = true

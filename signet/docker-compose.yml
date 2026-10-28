@@ -1,0 +1,296 @@
+# Hosted public signet of Ksana (D-107): bitcoind on Bitcoin's public signet, the seed nodes, the indexer, and the web
+# wallet with its BTC proxy and KSA faucet behind Caddy. signet/deploy.sh runs it on the server from the operator's
+# machine; signet/README.md is the operator guide, docs/SIGNET.md the guide for everyone joining.
+#
+#   https://<domain>/            the web wallet and block explorer, connected to node1 (signet/deployment.json)
+#   https://<domain>/rpc         node1's JSON-RPC (HTTP and WebSocket)
+#   https://<domain>/indexer     the indexer's JSON-RPC (indexer_status, indexer_stateRoot)
+#   https://<domain>/btc         the BTC proxy: four bitcoind methods the wallet uses, and two Esplora paths of
+#                                mempool.space for listing a signet address's coins (signet/services/btc-proxy.mjs)
+#   https://<domain>/faucet      the KSA faucet (signet/services/faucet.mjs)
+#   https://<domain>/compile     the contract playground's compile service (playground/compiler, D-119), in the
+#                                playground profile, which KSANA_PLAYGROUND_ORIGIN turns on
+#   https://<domain>/points      the testnet points service (ksana-points, D-126), in the points profile, which
+#                                KSANA_POINTS_ORIGIN turns on, with the top-up seller and the official lending
+#                                market's price keeper
+#   <domain>:9000                node1's P2P (node2's at 9001 with the node2 profile); bitcoind's P2P at 38333
+#
+# The contract playground's page is not served here: a Cloudflare Worker serves it at KSANA_PLAYGROUND_ORIGIN
+# (https://playground.ksana.network, playground/wrangler.jsonc, D-119), and it calls /rpc, /faucet and /compile across
+# origins, which node1 allows for any origin and the faucet and the compile service for that origin alone. The points
+# page is a Worker too (wrangler.jsonc of ksana-points), at KSANA_POINTS_ORIGIN, and /points allows that origin alone.
+#
+# The project's own deployment has signet.ksana.network as <domain>. Its former name (KSANA_SIGNET_FORMER_DOMAIN) still
+# answers the endpoints above, and the page there moves to <domain> (signet/Caddyfile, D-112).
+#
+# Settings come from .env next to this file (written by signet/deploy.sh setup, see signet/.env.example); the keys and
+# the genesis config live in $KSANA_SIGNET_HOME/config (signet/ksana-signet.sh). With KSANA_SIGNET_PRODUCERS=2 the
+# deploy script adds the node2 profile: a second producing seed node, for a server with 4 cores or more.
+name: ksana-signet
+
+x-ksana: &ksana
+  image: ksana-signet:ksana
+  build:
+    context: ..
+    dockerfile: signet/Dockerfile
+    target: ksana
+  environment:
+    BTC_RPC_URL: http://bitcoind:38332
+    BTC_RPC_USER: ksana
+    BTC_RPC_PASS: "${BTC_RPC_PASS:?BTC_RPC_PASS is not set, run signet/deploy.sh <host> setup}"
+    KSANA_SIGNET_PRODUCERS: ${KSANA_SIGNET_PRODUCERS:-1}
+  volumes:
+    - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config:/signet
+  depends_on:
+    - bitcoind
+  restart: unless-stopped
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 50m
+      max-file: "5"
+
+services:
+  bitcoind:
+    # Bitcoin Core 31.1, pinned by digest (SPEC §12 asks for 28.0 or later: P2A outputs and 1P1C package relay). Since
+    # 30.0 Bitcoin Core relays OP_RETURN outputs up to 100 000 bytes by default, so path C's data outputs need no
+    # -datacarriersize (SPEC §7.1); the signet miners run Bitcoin Inquisition, which does the same (signet/README.md).
+    image: bitcoin/bitcoin:31.1@sha256:da25cedc66b1daefff9f412ee196c901a899c3fa68a33b20849c3e08b5c40d63
+    command:
+      - -signet=1
+      - -server=1
+      - -printtoconsole=1
+      - -txindex=1
+      # Accept only standard transactions, as the miners do
+      - -acceptnonstdtxn=0
+      # The miners' own node, so that the transactions the seed nodes send reach them in one hop
+      - -addnode=inquisition.bitcoin-signet.net
+      - -maxmempool=100
+      - -maxconnections=40
+      # Keep the upload to peers under about 1 GB a day (blocks of the past week are still served): a server with a
+      # monthly traffic package must not spend it on other nodes' initial syncs
+      - -maxuploadtarget=1000
+      # The RPC port is published to no host interface: only the containers of this project reach it
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - "-rpcauth=${BTC_RPCAUTH:?BTC_RPCAUTH is not set, run signet/deploy.sh <host> setup}"
+      # A scantxoutset takes 30 to 50 seconds on signet's UTXO set: wait for it (the operator's; the seed nodes list
+      # their funding from wallets and the BTC proxy refuses scans, D-107, D-109)
+      - -rpcservertimeout=600
+    ports:
+      - "38333:38333"
+    volumes:
+      - bitcoind-data:/home/bitcoin/.bitcoin
+    healthcheck:
+      # the RPC cookie still works next to -rpcauth
+      test: ["CMD", "bitcoin-cli", "-signet", "-datadir=/home/bitcoin/.bitcoin", "getblockchaininfo"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 60s
+    stop_grace_period: 2m
+    restart: unless-stopped
+    logging: *logging
+
+  node1:
+    <<: *ksana
+    # The genesis config must exist (signet/deploy.sh launch); the script waits for bitcoind to finish its initial
+    # block download, then starts producing. The nodes and the indexer read the config directory and never write it
+    command: [node, node1]
+    ports:
+      - "9000:9000"
+    volumes:
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config:/signet:ro
+      - node1-data:/data
+    stop_grace_period: 1m
+
+  node2:
+    <<: *ksana
+    profiles: [node2]
+    command: [node, node2, --peer, /dns4/node1/tcp/9000]
+    ports:
+      - "9001:9000"
+    volumes:
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config:/signet:ro
+      - node2-data:/data
+    stop_grace_period: 1m
+
+  # One-off operator commands of signet/ksana-signet.sh (keys, genesis, probe, status), run by signet/deploy.sh
+  ops:
+    <<: *ksana
+    profiles: [ops]
+    restart: "no"
+
+  indexer:
+    <<: *ksana
+    command: [indexer]
+    volumes:
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config:/signet:ro
+      - indexer-data:/data
+    stop_grace_period: 1m
+
+  btc-proxy:
+    image: ksana-signet:services
+    build:
+      context: ..
+      dockerfile: signet/Dockerfile
+      target: services
+    command: [signet/services/btc-proxy.mjs]
+    environment:
+      BTC_RPC_URL: http://bitcoind:38332
+      BTC_RPC_USER: ksana
+      BTC_RPC_PASS: "${BTC_RPC_PASS}"
+      PORT: "8080"
+    depends_on:
+      - bitcoind
+    restart: unless-stopped
+    logging: *logging
+
+  faucet:
+    image: ksana-signet:services
+    command: [signet/services/faucet.mjs]
+    environment:
+      # node2 when there are two seed nodes (signet/deploy.sh setup --producers 2), so that a client holding the
+      # connections of node1, which serves the page's /rpc, does not cut the faucet off
+      KSANA_RPC_URL: http://${KSANA_FAUCET_NODE:-node1}:8545
+      KSANA_FAUCET_KEY_FILE: /run/faucet.key
+      KSANA_FAUCET_KSA: ${KSANA_FAUCET_KSA:-100}
+      KSANA_FAUCET_COOLDOWN_HOURS: ${KSANA_FAUCET_COOLDOWN_HOURS:-24}
+      # the contract playground's page, which asks it for test KSA from its own origin (D-119); empty for none
+      KSANA_FAUCET_CORS: "${KSANA_PLAYGROUND_ORIGIN:-}"
+      PORT: "8081"
+    volumes:
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config/keys/faucet.key:/run/faucet.key:ro
+    depends_on:
+      - btc-proxy
+      - node1
+    restart: unless-stopped
+    logging: *logging
+
+  web:
+    image: ksana-signet:web
+    build:
+      context: ..
+      dockerfile: signet/Dockerfile
+      target: web
+      args:
+        # the commit of ksana-web the page is built from, which its footer shows
+        KSANA_COMMIT: ${KSANA_WEB_COMMIT:-}
+    environment:
+      KSANA_SIGNET_DOMAIN: "${KSANA_SIGNET_DOMAIN:?KSANA_SIGNET_DOMAIN is not set, run signet/deploy.sh <host> setup}"
+      # The signet's former name (signet/Caddyfile, D-112); empty when it has none
+      KSANA_SIGNET_FORMER_DOMAIN: "${KSANA_SIGNET_FORMER_DOMAIN:-}"
+    # the compile network: Caddy alone reaches the compile service
+    networks:
+      - default
+      - compile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - node1
+      - indexer
+      - btc-proxy
+      - faucet
+    restart: unless-stopped
+    logging: *logging
+
+  # The playground's compile service (playground/compiler, D-119), in the playground profile. A build runs whatever a
+  # source asks of the compiler (include_bytes! reads files, const evaluation computes), so the container holds no
+  # secret, sits on a network of its own that only Caddy shares and that leads nowhere else, and is held to its share
+  # of the machine; the service itself takes one build at a time, a queue of 8 and 6 builds a minute per address
+  compiler:
+    image: ksana-signet:compiler
+    profiles: [playground]
+    build:
+      context: ..
+      dockerfile: signet/Dockerfile
+      target: compiler
+    environment:
+      KSANA_COMPILER_TRUST_PROXY: "1"
+      # the playground's page, which sends its sources from its own origin
+      KSANA_COMPILER_CORS: "${KSANA_PLAYGROUND_ORIGIN:-}"
+    networks:
+      - compile
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 2g
+    # A build is one rustc on one core (the contracts' release profile has one codegen unit and LTO), and each seed node
+    # mines on a core of its own: one core at most, and a low weight so that a busy server runs the nodes, bitcoind and
+    # the indexer first
+    cpus: 1
+    cpu_shares: 256
+    tmpfs:
+      - /tmp
+    stop_grace_period: 10s
+    restart: unless-stopped
+    logging: *logging
+
+  # The testnet points service (ksana-points, D-126), in the points profile, which KSANA_POINTS_ORIGIN turns on: it
+  # scans the node's blocks, credits the season's tasks at BTC-final and answers the points page at /points, and sells
+  # top-ups on the official exchange with keys/seller.key (server/seller.ts of ksana-points). Its database holds what
+  # the chain does not (the X links, the claims, the seller's requests), so its volume is backed up with the chain data
+  points:
+    image: ksana-signet:points
+    profiles: [points]
+    build:
+      context: ..
+      dockerfile: signet/Dockerfile
+      target: points
+    environment:
+      # the seed node the faucet uses: node2 when there are two, keeping the scan off the node behind the public /rpc
+      KSANA_POINTS_NODE: http://${KSANA_FAUCET_NODE:-node1}:8545
+      KSANA_POINTS_INDEXER: http://indexer:8546
+      KSANA_POINTS_LISTEN: 0.0.0.0:8082
+      # the points page, which calls it from its own origin and is the site its sign-in message names
+      KSANA_POINTS_CORS: "${KSANA_POINTS_ORIGIN:-}"
+      KSANA_POINTS_TURNSTILE_SECRET: "${KSANA_POINTS_TURNSTILE_SECRET:-}"
+      KSANA_POINTS_TURNSTILE_SITEKEY: "${KSANA_POINTS_TURNSTILE_SITEKEY:-}"
+      KSANA_POINTS_SELLER_KEY_FILE: /run/seller.key
+    volumes:
+      - points-data:/data
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config/keys/seller.key:/run/seller.key:ro
+    depends_on:
+      - node1
+      - indexer
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging: *logging
+
+  # The official lending market's price keeper (server/keeper.ts of ksana-points, D-126): the market's admin,
+  # following the official pool's price. Its key is keys/keeper.key, which keys writes; the official instances are
+  # deployed with signet/deploy.sh <host> instances
+  keeper:
+    image: ksana-signet:points
+    profiles: [points]
+    command: [keeper]
+    environment:
+      KSANA_POINTS_NODE: http://${KSANA_FAUCET_NODE:-node1}:8545
+      KSANA_KEEPER_KEY_FILE: /run/keeper.key
+    volumes:
+      - ${KSANA_SIGNET_HOME:-/opt/ksana-signet}/config/keys/keeper.key:/run/keeper.key:ro
+    depends_on:
+      - node1
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  # Caddy and the compile service only; internal: no way out of it
+  compile:
+    internal: true
+
+volumes:
+  bitcoind-data:
+  node1-data:
+  node2-data:
+  indexer-data:
+  caddy-data:
+  caddy-config:
+  points-data:

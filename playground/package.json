@@ -1,0 +1,45 @@
+{
+  "name": "@ksana/playground",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ksana contract playground: edit, compile, deploy and use example contracts on the signet from the browser",
+  "license": "(MIT OR Apache-2.0)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "build:hosted": "npm ci --prefix ../sdk/ts --no-audit --no-fund && npm run build --prefix ../sdk/ts && npm run typecheck && vite build --mode hosted",
+    "build:examples": "node scripts/build-examples.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run && node --test compiler/test/*.test.mjs"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.14",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@ksana/sdk": "file:../sdk/ts",
+    "@lezer/highlight": "^1.2.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3",
+    "wrangler": "4.149.0"
+  }
+}

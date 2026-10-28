@@ -1,0 +1,190 @@
+/*
+ * Ksana design tokens
+ *
+ * Layout concept: a dual-rail gauge. Two clocks (fast lane / Bitcoin) stay at the top,
+ * and the content unfolds in a 1240px grid from summary to detail.
+ *
+ * Color says one thing only: certainty.
+ *   qing (teal)       the Ksana instant: fast-lane confirmation, fresh and light
+ *   mo   (ink black)  ink laid down: data written to Bitcoin
+ *   zhu  (vermilion)  the seal: BTC-final, stamped and settled
+ * Everything else is layers of dai (blue-grey ink) on a moon-white ground; failures and warnings have dedicated colors of their own and never share zhu.
+ */
+
+:root {
+  /* Moon white: a cool white with a slight teal-green cast, not a warm beige */
+  --bg: #f1f4f3;
+  --surface: #fbfcfc;
+  --surface-2: #e8edeb;
+  --hover: #e4eae8;
+  --line: #d4dcda;
+  --line-strong: #b2bebb;
+
+  /* Dai: the ink scale with a blue-grey cast */
+  --ink: #16201f;
+  --ink-2: #47534f;
+  --ink-3: #5f6b67;
+  --ink-4: #a1aca8;
+  --on-ink: #f6f8f7;
+
+  /* The three semantic colors */
+  --qing: #12708c;
+  --qing-soft: #d9ebf0;
+  --qing-line: #8cc0cf;
+  --mo: #16201f;
+  --mo-soft: #dde3e1;
+  --zhu: #c03a22;
+  --zhu-soft: #f8e9e4;
+  --on-zhu: #fff8f5;
+
+  /* Warnings: gamboge and magenta, deliberately away from zhu (hues about 50° apart, so color-blind users can also tell failed from final) */
+  --warn: #93600a;
+  --warn-soft: #f7eedb;
+  --danger: #a3277a;
+  --danger-soft: #f5e0ec;
+
+  --focus: #12708c;
+  --shadow: 0 1px 0 rgb(22 32 31 / 0.04), 0 6px 24px -12px rgb(22 32 31 / 0.18);
+  --shadow-pop: 0 12px 40px -12px rgb(22 32 31 / 0.35);
+  --scrim: rgb(13 19 20 / 0.42);
+
+  /* Fonts: a Song typeface for headings (used sparingly, as a subset bundled with the app), the system sans-serif for body text, IBM Plex Mono for all data */
+  --font-display: "Ksana Serif", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Source Han Serif", "Songti SC", "STSong", "SimSun", serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Type scale */
+  --fs-micro: 11px;
+  --fs-label: 12px;
+  --fs-small: 13px;
+  --fs-body: 14px;
+  --fs-lead: 16px;
+  --fs-h3: 18px;
+  --fs-h2: 22px;
+  --fs-h1: 30px;
+  --fs-figure: 40px;
+
+  /* Spacing on a 4px grid */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  --r-seal: 2px;
+  --r-ctl: 4px;
+  --r-panel: 6px;
+
+  --page-max: 1240px;
+  /* A notched iPhone held sideways shows the page under its sensor housing and rounded corners too (viewport-fit=cover): the gutter
+     is at least the side it keeps clear */
+  --safe-x: max(env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --gutter: max(24px, var(--safe-x));
+  --topbar-h: 56px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 160ms;
+  --dur: 280ms;
+
+  color-scheme: light;
+}
+
+/* Raven-blue night: dark mode is not an inversion, the text becomes paper-colored; mo recedes to a mid grey so blocks on Bitcoin are not brighter than the vermilion seal, and the three colors still progress qing → mo → zhu */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1314;
+    --surface: #131b1c;
+    --surface-2: #0a1011;
+    --hover: #1a2526;
+    --line: #233133;
+    --line-strong: #375055;
+    --ink: #e2ebe8;
+    --ink-2: #a9b6b2;
+    --ink-3: #808e8a;
+    --ink-4: #4d5b59;
+    --on-ink: #0d1314;
+    --qing: #58bed7;
+    --qing-soft: #11313b;
+    --qing-line: #2b6d7e;
+    --mo: #9aa9a5;
+    --mo-soft: #263133;
+    --zhu: #ee6a4d;
+    --zhu-soft: #3b1b14;
+    --on-zhu: #1a0b07;
+    --warn: #e1a640;
+    --warn-soft: #34270d;
+    --danger: #e27bc8;
+    --danger-soft: #37162e;
+    --focus: #58bed7;
+    --shadow: 0 1px 0 rgb(0 0 0 / 0.3), 0 8px 28px -12px rgb(0 0 0 / 0.6);
+    --shadow-pop: 0 16px 48px -12px rgb(0 0 0 / 0.75);
+    --scrim: rgb(0 0 0 / 0.55);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d1314;
+  --surface: #131b1c;
+  --surface-2: #0a1011;
+  --hover: #1a2526;
+  --line: #233133;
+  --line-strong: #375055;
+  --ink: #e2ebe8;
+  --ink-2: #a9b6b2;
+  --ink-3: #808e8a;
+  --ink-4: #4d5b59;
+  --on-ink: #0d1314;
+  --qing: #58bed7;
+  --qing-soft: #11313b;
+  --qing-line: #2b6d7e;
+  --mo: #9aa9a5;
+  --mo-soft: #263133;
+  --zhu: #ee6a4d;
+  --zhu-soft: #3b1b14;
+  --on-zhu: #1a0b07;
+  --warn: #e1a640;
+  --warn-soft: #34270d;
+  --danger: #e27bc8;
+  --danger-soft: #37162e;
+  --focus: #58bed7;
+  --shadow: 0 1px 0 rgb(0 0 0 / 0.3), 0 8px 28px -12px rgb(0 0 0 / 0.6);
+  --shadow-pop: 0 16px 48px -12px rgb(0 0 0 / 0.75);
+  --scrim: rgb(0 0 0 / 0.55);
+  color-scheme: dark;
+}
+
+@media (max-width: 720px) {
+  :root {
+    --gutter: max(16px, var(--safe-x));
+    --fs-h1: 24px;
+    --fs-figure: 32px;
+  }
+}
+
+/*
+ * Fonts per language (D-071). Han characters have different glyph forms in Chinese, Japanese and Korean (same code point), so Traditional Chinese, Japanese and Korean do not borrow the Simplified Chinese Song subset;
+ * each uses its own language's Ming / Mincho / Myeongjo and sans-serif fonts; English and Spanish headings use the Latin letters of the same Song subset (bundled, includes Latin-1).
+ */
+html:lang(zh-TW) {
+  --font-display: "Noto Serif TC", "Noto Serif CJK TC", "Source Han Serif TC", "Songti TC", "PMingLiU", "MingLiU", serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", "Noto Sans CJK TC", sans-serif;
+}
+
+html:lang(ja) {
+  --font-display: "Noto Serif JP", "Noto Serif CJK JP", "Source Han Serif JP", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "BIZ UDPMincho", serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", "Noto Sans JP", "Noto Sans CJK JP", sans-serif;
+}
+
+html:lang(ko) {
+  --font-display: "Noto Serif KR", "Noto Serif CJK KR", "Source Han Serif K", "AppleMyungjo", "Batang", serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
+}
+
+html:lang(en),
+html:lang(es) {
+  --font-display: "Ksana Serif Latin", "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
+}

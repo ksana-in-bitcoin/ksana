@@ -1,0 +1,9 @@
+# The build context of devnet/Dockerfile is the repository root: only the sources and Cargo.lock are needed.
+target/
+contracts/target/
+fuzz/target/
+.git/
+.claude/
+.github/
+docs/
+**/node_modules/

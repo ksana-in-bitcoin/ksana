@@ -1,0 +1,4 @@
+# Only affects wasm32 builds. ABI §1 requires both the initial and the maximum number of linear-memory pages to stay
+# within 256 pages (16 MiB); wasm-ld declares no maximum by default, so it is declared explicitly here.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--max-memory=16777216"]
