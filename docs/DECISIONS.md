@@ -4722,13 +4722,17 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   - Each pin costs a pair at the bump's rate. The new pair pays the rate the bump aimed for, so it needs a bump of its own only when the rate rises (a fee spike, or D-117's doubling of a pair
     left waiting with room); an attacker who pins every new pair makes the node send one more pair for every `BUMP_AFTER` BTC blocks of rising rates, the rate bounded by the cap.
   - Other nodes judge the old pair by its own rate (D-102) and may still rescue in their turn; the new pair, at this node's rate, holds their rescues back as a claim does (D-098).
-  - The mock chain has no RBF and refuses any conflict, so the node tests cover a pinned pair and not a replacement by fee; this change was not tried against a real bitcoind.
+  - The mock chain has no RBF and refuses any conflict, so the node tests cover a pinned pair and not a replacement by fee. Only the pinned settlement was tried against a real bitcoind
+    afterwards (Bitcoin Core 28.4 on regtest, 2026-10-29, `tests/integration/tests/m48_regtest.rs`): `gettxout` with the mempool has nothing for the taken P2A output, `testmempoolaccept`
+    refuses a child of the producer's that pays less than the pinning child (`insufficient fee`, BIP125 rule 3), and the payload goes out again and lands; a pinned rescue and a pinned
+    republish are tried on the mock chain only.
 - **Impact**: local policy only, no new flags and no change to `ksana-btc`; `Rescuer::bump`, `Rescuer::send_again`, `Rescuer::anchor_taken`, `Rescuer::landed`, and `Rescuer::build_pair`, the
   rescue's assembly shared with the pairs sent again. Tests (node): a lone producer's settlement pinned by another party's child goes out again at the bump's rate after `BUMP_AFTER` BTC
   blocks, only once, and lands, nothing more is spent on the pinned pair, and its funding stays reserved after the block's record closed, until it leaves the mempool; a pinned rescue
   goes out again in its place, the pinned rescue's funding reserved while it waits; a pinned republish goes out again with the same headers; a producer's settlement whose data landed
-  through another party's transaction is not bumped. Documentation: SPEC's version history, §7.2, §7.3, §7.7, §14, §15; D-102 and D-117 (their limitations point here); CLAUDE.md;
-  PROGRESS M48; the status of A2-09 in the second audit's report; the site's mining page.
+  through another party's transaction is not bumped. Test (regtest, added later): the pinned settlement against Bitcoin Core's own mempool, as the limitations say. Documentation: SPEC's
+  version history, §7.2, §7.3, §7.7, §14, §15; D-102 and D-117 (their limitations point here); CLAUDE.md; PROGRESS M48; the status of A2-09 in the second
+  audit's report; the site's mining page.
 
 ## D-132 The P2P layer and the RPC servers bound what one source can make a node hold or do: connections by address, quotas that outlive connections, budgets for the gossip awaiting validation and for serving sync, op messages within `MAX_OP_BYTES`, RPC batches, bodies and subscriptions, and a `ksana_getAccount` linear in the window (the first internal audit's F-28 and F-29, 2026-10-28; revises D-040, D-059 and SPEC §11.1, §11.2, §14, §16; local policy, no consensus change, M49)
 
