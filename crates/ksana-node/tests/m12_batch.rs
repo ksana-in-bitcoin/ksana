@@ -391,7 +391,7 @@ fn a_parallel_carrier_landing_first_does_not_trigger_a_republish() {
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(snapshot.settlement_of(&c1.header.hash()).is_some());
     assert!(snapshot.settlement_of(&s.header.hash()).is_some());
-    assert!(snapshot.header_seen(&e1.header.hash()).is_none());
+    assert!(snapshot.counted_at(&e1.header.hash()).is_none());
 
     // The rescue thread does not republish
     let rescuer = Rescuer::new(
@@ -422,6 +422,6 @@ fn a_parallel_carrier_landing_first_does_not_trigger_a_republish() {
     rescuer.run_once().unwrap();
     assert!(republished(&mock).is_empty(), "should not republish");
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert!(snapshot.header_seen(&e1.header.hash()).is_some());
-    assert!(snapshot.header_seen(&e2.header.hash()).is_some());
+    assert!(snapshot.counted_at(&e1.header.hash()).is_some());
+    assert!(snapshot.counted_at(&e2.header.hash()).is_some());
 }

@@ -715,14 +715,12 @@ impl Backend for NodeRpc {
         let main = self.chain.main_chain().map_err(node_err)?;
         let carrier_account =
             carrier_of(self.chain.params(), &snapshot, &main, None, &hash).map_err(internal)?;
-        // The transaction that lands this block's data on BTC; for a block needing no body (an empty block carrying
-        // the batch's settlement transactions) it is the settlement transaction the block carries
-        let landed = if needs_body {
-            snapshot.settlement_of(&hash)
-        } else {
-            txid.map(|t| t.to_byte_array())
-                .and_then(|t| snapshot.ksn1_height(&t).map(|h| (t, h)))
-        };
+        // The transaction that landed this block's data on BTC: the first to land its body, or for a block needing no
+        // body (an empty block carrying the batch's settlement transactions) the first carrying its header where it
+        // counts; a settlement that confirmed while a header it needs had not counted landed nothing (D-135)
+        let landed = snapshot
+            .data_landing(&hash)
+            .map(|landing| (landing.txid, landing.height));
         let confirmed = landed.map(|(txid, height)| BtcConfirmationJson {
             txid,
             height,

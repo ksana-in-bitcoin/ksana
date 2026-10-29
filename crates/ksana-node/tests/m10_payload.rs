@@ -4,8 +4,9 @@
 //!   next block that carries a settlement transaction, no republish needed; empty blocks do not change the state root
 //!   (D-079) and take at most 18 bytes each;
 //! - when the carried headers exceed the producer's size budget (half of `MAX_BLOCK_DATA_BYTES`), the earliest ones
-//!   are dropped; after that block's settlement lands on BTC, the node republishes the dropped headers (the rescue
-//!   republish rules, D-047, D-075) and the settled prefix advances as usual.
+//!   are dropped; after that block's settlement confirms on BTC, where its headers cannot count before the dropped
+//!   ones (D-135), the node republishes the headers from the first one up to that block (the rescue republish rules,
+//!   D-047, D-075), sends the settlement payload again once they have counted, and the settled prefix advances.
 
 mod common;
 
@@ -142,15 +143,32 @@ fn headers_beyond_the_payload_budget_are_republished() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(republished(&n, &params).is_empty());
 
-    // After the settlement lands on BTC, the dropped headers are republished; once the republish lands, the settled
-    // prefix moves past them
+    // The settlement confirms on BTC, but its headers cannot count before the dropped ones (D-135): the headers from
+    // the first one up to the block are republished
     n.mock.mine(1);
-    n.wait_settlement(block.height, SettlementState::Confirmed);
-    let headers = wait("header republish transaction", || {
+    let republish = wait("header republish transaction", || {
         republished(&n, &params).pop()
     });
-    assert_eq!(headers.first().unwrap().height, 1);
-    assert_eq!(headers.last().unwrap().height, first - 1);
+    assert_eq!(republish.first().unwrap().height, 1);
+    assert!(republish.last().unwrap().height >= first);
+    assert_eq!(
+        republish.iter().map(|h| h.height).collect::<Vec<_>>(),
+        (1..=republish.last().unwrap().height).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        n.settlement(block.height).status,
+        SettlementState::Broadcast,
+        "confirmed without landing the block's data"
+    );
+    // Once they have counted, the settlement payload, which landed nothing, goes out again unchanged, and the settled
+    // prefix moves past the block when it confirms
+    n.mock.mine(1);
+    wait("the settlement payload sent again", || {
+        mempool_payloads(&n, &params)
+            .into_iter()
+            .any(|p| matches!(p, Payload::Settlement { headers: sent, .. } if sent == headers))
+            .then_some(())
+    });
     n.mock.mine(1);
     wait("prefix advances", || {
         n.settlement(block.height).settled.then_some(())

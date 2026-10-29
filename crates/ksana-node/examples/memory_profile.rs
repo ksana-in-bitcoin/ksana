@@ -16,9 +16,11 @@
 //! cargo run --release -p ksana-node --example memory_profile -- --blocks 100000 --shape active --prune
 //! ```
 //!
-//! The non-DAG structures (main-chain summaries, the BTC snapshot's landing maps, the finality state, the indexer's
-//! bodies) are built with the same Rust types and the entry counts of the chosen shape, without running the BTC
-//! tracker: their size depends only on the types and the counts.
+//! The non-DAG structures (main-chain summaries, the BTC snapshot's counted headers and landed bodies, the finality
+//! state, the indexer's published roots) are built with the same Rust types and the entry counts of the chosen shape,
+//! without running the BTC tracker: their size depends only on the types and the counts. The landed bodies are kept as
+//! the transactions that landed them, one shared copy per transaction (D-135); here one transaction per BTC block,
+//! holding the Borsh encoding of that block's bodies (more than the compact encoding a payload uses).
 //!
 //! With `--prune` the two DAGs are pruned while they grow, the way the node and the indexer prune (D-097): the pruning
 //! root is the main-chain block `--lag` blue score below the tip (by default how far the root trails the tip in this
@@ -38,7 +40,9 @@ use std::time::{Duration, Instant};
 use ksana_btc::finality::Decision;
 use ksana_btc::headers::{HeaderDag, Insert};
 use ksana_btc::prune::{PRUNE_BTC_MARGIN, PRUNE_STEP};
-use ksana_btc::tracker::{BlockSummary, BtcSnapshot, Landing, MainEntry, Sender};
+use ksana_btc::tracker::{
+    BlockSummary, BtcSnapshot, Counted, LandedBody, Landing, MainEntry, Sender,
+};
 use ksana_consensus::{
     empty_entries_root, genesis_header, BlockDag, Consensus, GhostdagParams, Hash, PowConsensus,
     Sha256d, U256,
@@ -338,6 +342,21 @@ fn transfer_entry(i: u64) -> Entry {
     }
 }
 
+/// A transaction holding `len` bytes of data in its witness, standing for the one that landed some bodies (D-135).
+fn body_tx(len: usize) -> bitcoin::Transaction {
+    bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::from_slice(&[vec![0u8; len]]),
+        }],
+        output: Vec::new(),
+    }
+}
+
 fn landing(i: u64, height: u32) -> Landing {
     Landing {
         txid: hash_of("txid", i),
@@ -535,59 +554,80 @@ fn build(
             Box::new(map)
         }
         "snapshot" => {
-            // the BTC snapshot's per-block maps: headers_seen, headers_by_height, settlements, ksn1_txs
+            // the BTC snapshot's per-block maps (D-135): counted, headers_by_height, bodies, ksn1_txs
             let per_btc = total.div_ceil(btc_blocks.max(1)).max(1);
-            let headers_seen: BTreeMap<[u8; 32], Landing> = (0..total)
+            let height_of = |i: u64| u32::try_from(i / per_btc).unwrap_or(u32::MAX);
+            let counted: BTreeMap<[u8; 32], Counted> = (0..total)
                 .map(|i| {
-                    let height = u32::try_from(i / per_btc).unwrap_or(u32::MAX);
-                    (hash_of("main", i), landing(i, height))
+                    let height = height_of(i);
+                    let counted = Counted {
+                        landing: landing(i, height),
+                        anchor: height.saturating_sub(1),
+                        parent_anchor: height.saturating_sub(1),
+                        settles: i < non_empty,
+                    };
+                    (hash_of("main", i), counted)
                 })
                 .collect();
             let mut headers_by_height: BTreeMap<u32, Vec<[u8; 32]>> = BTreeMap::new();
             for i in 0..total {
-                let height = u32::try_from(i / per_btc).unwrap_or(u32::MAX);
                 headers_by_height
-                    .entry(height)
+                    .entry(height_of(i))
                     .or_default()
                     .push(hash_of("main", i));
             }
-            let settlements: BTreeMap<[u8; 32], Vec<Landing>> = (0..non_empty)
-                .map(|i| {
-                    let height = u32::try_from(i / per_btc).unwrap_or(u32::MAX);
-                    (hash_of("main", i), vec![landing(i, height)])
-                })
-                .collect();
+            // one transaction per BTC block lands the bodies of that block's non-empty blocks
+            let mut bodies: BTreeMap<[u8; 32], LandedBody> = BTreeMap::new();
+            let mut i = 0;
+            while i < non_empty {
+                let height = height_of(i);
+                let end =
+                    non_empty.min(u64::from(height).saturating_add(1).saturating_mul(per_btc));
+                let len = (i..end)
+                    .map(|j| borsh::to_vec(&transfer_entry(j)).map_or(0, |b| b.len()))
+                    .sum();
+                let tx = Arc::new(body_tx(len));
+                for (slot, j) in (i..end).enumerate() {
+                    let body = LandedBody {
+                        landing: landing(j, height),
+                        tx: Arc::clone(&tx),
+                        slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                    };
+                    bodies.insert(hash_of("main", j), body);
+                }
+                i = end.max(i.saturating_add(1));
+            }
             let ksn1_txs: BTreeMap<[u8; 32], u32> = (0..btc_blocks)
                 .map(|i| (hash_of("txid", i), u32::try_from(i).unwrap_or(u32::MAX)))
                 .collect();
             let started = Instant::now();
             let copy = (
-                headers_seen.clone(),
+                counted.clone(),
                 headers_by_height.clone(),
-                settlements.clone(),
+                bodies.clone(),
                 ksn1_txs.clone(),
             );
             notes.push(format!(
-                "BTC snapshot: one deep copy (done on every BTC sync that changes it) takes {:?}",
+                "BTC snapshot: one copy (done on every BTC sync that changes it; the transactions are shared) takes {:?}",
                 started.elapsed()
             ));
             drop(copy);
-            // the settled-prefix style scan: every main-chain block looked up in the landing map, from height 1
+            // the settled-prefix style scan: every main-chain block looked up in the counted map, from height 1
             let entries = main_entries(blocks, shape);
             let started = Instant::now();
             let mut landed = 0u64;
             for entry in &entries {
                 for summary in entry.accepted() {
-                    if headers_seen.contains_key(&summary.hash) {
+                    if counted.contains_key(&summary.hash) {
                         landed += 1;
                     }
                 }
             }
             notes.push(format!(
-                "settled prefix: one scan of the main chain against the landings ({landed} found) takes {:?}",
+                "settled prefix: one scan of the main chain against the counted headers ({landed} found) takes {:?}",
                 started.elapsed()
             ));
-            Box::new((headers_seen, headers_by_height, settlements, ksn1_txs))
+            Box::new((counted, headers_by_height, bodies, ksn1_txs))
         }
         "finality" => {
             // the finality state: decisions, conn, closure_landed, evaluated
@@ -611,15 +651,13 @@ fn build(
                 .collect();
             Box::new((decisions, conn, closure_landed, evaluated))
         }
-        "indexer-bodies" => {
-            // the indexer keeps every body it has seen (one transfer per non-empty block here)
-            let bodies: BTreeMap<[u8; 32], Arc<Vec<Entry>>> = (0..non_empty)
-                .map(|i| (hash_of("main", i), Arc::new(vec![transfer_entry(i)])))
-                .collect();
+        "indexer-roots" => {
+            // the indexer's published roots; the bodies it executes are decoded from the snapshot's landed
+            // transactions when used (D-135)
             let published: Vec<([u8; 32], [u8; 32])> = (0..main)
                 .map(|i| (hash_of("main", i), hash_of("state", i)))
                 .collect();
-            Box::new((bodies, published))
+            Box::new(published)
         }
         "selected-tips" => {
             // the selected-chain tips a node keeps: every merged block stays one (scanned on every main-chain choice)
@@ -636,9 +674,12 @@ const STRUCTURES: [(&str, &str); 8] = [
     ("block-dag", "node block DAG (GHOSTDAG + BlockInfo)"),
     ("main-entries", "main-chain summaries (node; indexer)"),
     ("accepted", "node accepted map"),
-    ("snapshot", "BTC snapshot landing maps"),
+    (
+        "snapshot",
+        "BTC snapshot: counted headers and landed bodies",
+    ),
     ("finality", "finality state"),
-    ("indexer-bodies", "indexer bodies + published roots"),
+    ("indexer-roots", "indexer published roots"),
     ("selected-tips", "selected-chain tips (merged blocks)"),
 ];
 

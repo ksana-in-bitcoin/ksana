@@ -330,7 +330,7 @@ fn a_lighter_chain_on_btc_triggers_an_immediate_republish() {
         "no early republish without a competing chain"
     );
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&a1), None);
+    assert_eq!(snapshot.counted_at(&a1), None);
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), None);
 
     // B: block 1 transfers to carol, then two empty blocks so it reaches SETTLEMENT_DEPTH; the settlement lands on BTC:
@@ -348,8 +348,8 @@ fn a_lighter_chain_on_btc_triggers_an_immediate_republish() {
         assert!(matches!(a.accept(block).unwrap().outcome, Accepted::Side));
     }
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&b1), Some(landed));
-    assert_eq!(snapshot.header_seen(&b_blocks[1].header.hash()), None);
+    assert_eq!(snapshot.counted_at(&b1), Some(landed));
+    assert_eq!(snapshot.counted_at(&b_blocks[1].header.hash()), None);
     // Less than one BTC block of presence does not count: a parallel block landing first is normal, and this node's
     // next block with a settlement transaction usually carries its own headers right after
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), None);
@@ -393,7 +393,7 @@ fn a_lighter_chain_on_btc_triggers_an_immediate_republish() {
     mock.mine(1);
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&a_tip), Some(landed + 2));
+    assert_eq!(snapshot.counted_at(&a_tip), Some(landed + 2));
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), None);
     rescuer.run_once().unwrap();
     assert!(republished(&mock).is_empty());
@@ -426,9 +426,10 @@ fn a_lighter_chain_on_btc_triggers_an_immediate_republish() {
 
 /// D-104: a chain finality can never decide does not count as a competing chain. B's lighter chain lands on BTC and
 /// counts (D-091); then a BTC reorg takes its anchor off the best chain, and its settlement transactions confirm again
-/// on the new branch, putting the same headers onto BTC once more. A's own chain, anchored below the fork point, does
-/// not move, and B's chain no longer sets off a republish: it could never be final, and every node with funding would
-/// otherwise race to land a chain that keeps nothing.
+/// on the new branch, putting the same headers onto BTC once more, where they do not count: their anchor is off the
+/// best chain (D-135). A's own chain, anchored below the fork point, does not move, and B's chain no longer sets off a
+/// republish: it could never be final, and every node with funding would otherwise race to land a chain that keeps
+/// nothing.
 #[test]
 fn a_chain_anchored_off_the_btc_best_chain_is_no_competing_chain() {
     let (alice, carol) = (user("m15/alice8"), user("m15/carol8"));
@@ -462,8 +463,8 @@ fn a_chain_anchored_off_the_btc_best_chain_is_no_competing_chain() {
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), Some((b1, 1)));
 
-    // The BTC reorg: X goes, B's settlement transactions wait out the new branch's first block and land on its second,
-    // above X's height, where their payload counts again
+    // The BTC reorg: X goes, B's settlement transactions wait out the new branch's first block and confirm on its
+    // second, above X's height, where their payload counts again but B's header, anchored on X, does not (D-135)
     let pair =
         ksana_btc::settlement::SettlementPair::decode(b_blocks[0].settlement.as_ref().unwrap())
             .unwrap();
@@ -477,7 +478,8 @@ fn a_chain_anchored_off_the_btc_best_chain_is_no_competing_chain() {
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(!snapshot.contains(&b_blocks[0].header.btc_anchor));
-    assert_eq!(snapshot.header_seen(&b1), Some(fork + 2));
+    assert!(snapshot.ksn1_height(&pair.txid()).is_some());
+    assert_eq!(snapshot.counted_at(&b1), None);
     assert_eq!(
         a.chain.tip().unwrap().hash,
         a_tip,
@@ -528,8 +530,8 @@ fn the_blocks_below_one_anchored_off_the_btc_best_chain_still_compete() {
     mock.mine(1);
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&b1), Some(fork + 2));
-    assert_eq!(snapshot.header_seen(&b2), Some(fork + 2));
+    assert_eq!(snapshot.counted_at(&b1), Some(fork + 2));
+    assert_eq!(snapshot.counted_at(&b2), Some(fork + 2));
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), Some((b2, 2)));
 
     // The BTC reorg: X goes, and B's settlement transactions land on the new branch's second block
@@ -546,7 +548,7 @@ fn the_blocks_below_one_anchored_off_the_btc_best_chain_still_compete() {
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(!snapshot.contains(&b_blocks[1].header.btc_anchor));
-    assert_eq!(snapshot.header_seen(&b1), Some(fork + 2));
+    assert_eq!(snapshot.counted_at(&b1), Some(fork + 2));
     assert_eq!(a.chain.tip().unwrap().hash, a_tip);
     assert_eq!(a.chain.btc_competitor(&snapshot, 6).unwrap(), Some((b1, 1)));
     rescuer.run_once().unwrap();

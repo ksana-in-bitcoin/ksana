@@ -45,7 +45,7 @@ use bitcoin::{
 };
 use common::*;
 use ksana_btc::client::BtcClient;
-use ksana_btc::payload::funding_inputs;
+use ksana_btc::payload::{attached_payload, funding_inputs};
 use ksana_btc::settlement::SettlementPair;
 use ksana_execution::{keys, OpStatus, StateSource};
 use ksana_indexer::rpc::StatusJson;
@@ -53,9 +53,10 @@ use ksana_indexer::Indexer;
 use ksana_mempool::{Mempool, Policy};
 use ksana_node::chain::{Accepted, REMEMBERED};
 use ksana_node::producer::FeePolicy;
+use ksana_node::rescue::Rescuer;
 use ksana_node::rpc::NodeRpc;
 use ksana_node::NodeError;
-use ksana_primitives::{Block, BtcAnchor, Entry, Params, VmOp, KSA_ASSET_ID};
+use ksana_primitives::{Block, BlockHeader, BtcAnchor, Entry, Params, Payload, VmOp, KSA_ASSET_ID};
 use ksana_rpc::{Backend, OpState};
 use proptest::prelude::*;
 
@@ -342,25 +343,54 @@ fn run_timed(d: u32, k: u32, content: Content, timing: Timing) {
     mock.mine(1);
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert!(
+    // the next settlement lands the next block's data, unless the content block in its past has a settlement that
+    // waits and was still in flight when the next block was built (its anchor at most 2 BTC blocks behind the tip, as
+    // with d = k = 1): then the next payload did not carry its header, landed nothing (D-135), and goes out again below
+    // once the old pair has landed
+    let waits = content == Content::SettlementWaiting
+        && k <= d
+        && !payload_headers(&params, &next).contains(&content_block.header);
+    assert_eq!(
         a.chain
             .carried_on_chain(&next, &snapshot)
             .unwrap()
             .is_some(),
+        !waits,
         "{tag}"
     );
     if content == Content::SettlementWaiting {
-        // the old pair lands too: with k > d it puts a chain this node left onto BTC, which sets off no republishing
+        // the old pair lands too: with k ≤ d it lands the content block's body; with k > d its headers anchor off the
+        // BTC best chain and do not count (D-135), so it puts nothing of a chain this node left onto BTC and sets off no
+        // republishing
         let pair = old_pair.as_ref().unwrap();
         mock.release(&pair.commit_txid());
         mock.release(&pair.txid());
         mock.mine(1);
         a.sync();
         let snapshot = a.chain.btc().snapshot().unwrap();
-        assert!(
-            snapshot.header_seen(&content_block.header.hash()).is_some(),
-            "{tag}"
-        );
+        let hash = content_block.header.hash();
+        assert_eq!(snapshot.counted_at(&hash).is_some(), k <= d, "{tag}");
+        assert_eq!(snapshot.block_data_height(&hash).is_some(), k <= d, "{tag}");
+        if waits {
+            Rescuer::new(
+                Arc::clone(&a.chain),
+                a.funding.clone(),
+                Some(a.producer.producer),
+                None,
+            )
+            .run_once()
+            .unwrap();
+            mock.mine(1);
+            a.sync();
+            let snapshot = a.chain.btc().snapshot().unwrap();
+            assert!(
+                a.chain
+                    .carried_on_chain(&next, &snapshot)
+                    .unwrap()
+                    .is_some(),
+                "{tag}: sent again, the next payload lands"
+            );
+        }
         mock.mine(1);
         a.broadcast_settlements();
         let snapshot = a.chain.btc().snapshot().unwrap();
@@ -463,6 +493,15 @@ fn land(a: &Side) {
 /// The settlement transactions a block carries.
 fn pair_of(block: &Block) -> SettlementPair {
     SettlementPair::decode(block.settlement.as_ref().unwrap()).unwrap()
+}
+
+/// The headers of the payload of the settlement transactions a block carries.
+fn payload_headers(params: &Params, block: &Block) -> Vec<BlockHeader> {
+    let payload = attached_payload(params, &pair_of(block)).unwrap();
+    match Payload::decode(&payload, params).unwrap() {
+        Payload::Settlement { headers, .. } => headers,
+        other => panic!("not a settlement payload: {other:?}"),
+    }
 }
 
 fn in_mempool(mock: &ksana_btc::mock::MockBtc, txid: &[u8; 32]) -> bool {

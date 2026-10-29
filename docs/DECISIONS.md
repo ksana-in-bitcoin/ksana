@@ -4972,8 +4972,9 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      has not counted and its anchor is at most `IN_FLIGHT_BTC_BLOCKS` = 2 behind the BTC tip) or its header has counted. Otherwise its header is carried, not its body, and its past is
      searched for headers only. Bodies are carried as before.
   7. **Rescue and republishing** (local policy, SPEC §7.3, §7.6): a settlement transaction that confirmed and counted but landed nothing, because a header it needs from outside its payload
-     had not counted, is stuck; once those headers count, the payload goes out again unchanged in the order of §7.3. The republish that waited for the next settlement to land without carrying f
-     now waits for it to confirm and count, since that settlement's own data may be waiting for f's headers.
+     had not counted, is stuck; once those headers count, the payload goes out again unchanged in the order of §7.3 (also when a later payload has counted the block's header meanwhile:
+     the body lands only at or above that height), and the block's settlement record stays open until the data it carries has landed (a counted settlement no longer closes it). The
+     republish that waited for the next settlement to land without carrying f now waits for it to confirm and count, since that settlement's own data may be waiting for f's headers.
   8. **Checkpoint**: the node's and the indexer's `pruning.ckpt` is format 3, without pending headers, unresolved payloads or candidate bodies.
   9. **Restart**: a chain built under the old rules can hold landings, unlocks and carriers that the new rules place later, so devnet and signet restart from genesis (`signet/README.md`,
      "Restarting from genesis"); mainnet has not started. Signet's PoW limit is raised in the same restart (D-136).
@@ -4997,12 +4998,12 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   land junk bodies, about 4 MB of transaction bytes per full BTC block. D-136 raises signet's PoW limit against it; not counting side headers below the finalized tip beyond the merge depth (below
   the finalized tip alone would split nodes, since a block may still merge headers below it but above the merge-depth root) is a separate design, not adopted. The restart clears balances and
   contracts on signet.
-- **Impact**: `crates/ksana-btc` (`tracker.rs`: the scan by BTC block, `KnownBlocks`, `unresolved` and `resolve*` gone; `headers.rs`: `Pending` gone, the counting rule; `finality.rs`:
-  `connect`; `bodies.rs`: candidates and the anchor-invalid derivation gone, bodies checked at the scan and kept encoded; `prune.rs` and the checkpoint records); `crates/ksana-node`
-  (`chain.rs`: `KnownBlocks`, `payload_carry`, `CHECKPOINT_VERSION` 3; `rescue.rs`: the stuck settlement and the republish condition; `btc.rs`); `crates/ksana-indexer` (`known.rs`, the
-  checkpoint); tests (a property test of the tracker, adversarial payloads, regtest scenarios); SPEC (the preamble and its version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6, §10.2, §10.3,
-  §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07, A2-10, F-25, F-26, F-35); the site's pages on how it
-  works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
+- **Impact**: `crates/ksana-btc` (`tracker.rs`: the scan by BTC block, `KnownBlocks`, `unresolved` and `resolve*` gone; `headers.rs`: `Pending` gone, the counting rule; `finality.rs`: `connect`;
+  `bodies.rs`: candidates and the anchor-invalid derivation gone, bodies checked at the scan and kept encoded; `prune.rs` and the checkpoint records); `crates/ksana-node` (`chain.rs`: `KnownBlocks`,
+  `payload_carry`, `process_settlements`, `CHECKPOINT_VERSION` 3; `rescue.rs`: the stuck settlement and the republish condition; `btc.rs`; the memory profile's snapshot); `crates/ksana-indexer`
+  (`known.rs`, the checkpoint); tests (a property test of the tracker, adversarial payloads, regtest scenarios); SPEC (the preamble and its version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6,
+  §10.2, §10.3, §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07, A2-10, A2-15, A2-19, F-03, F-25, F-26, F-35); the site's
+  pages on how it works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
 
 ## D-136 Signet's PoW limit is raised to `0x1f0fffff`, about 4 096 Argon2id evaluations per block at the limit (the part of the second internal audit's A2-07 that D-135 leaves, 2026-10-29, chosen by the project owner with D-135; revises D-055 and SPEC §6.6, §13, §13.1, §16, §17.5; a consensus change for signet only, at the restart of D-135, M51)
 

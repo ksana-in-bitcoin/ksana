@@ -1858,7 +1858,7 @@ fn a_republish_whose_p2a_output_another_party_holds_goes_out_again() {
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
     for header in &headers {
-        let landing = snapshot.data_landing(&header.hash(), false).unwrap();
+        let landing = snapshot.data_landing(&header.hash()).unwrap();
         assert_eq!(landing.txid, again.txid(), "landed by the new pair");
     }
     rescuer.run_once().unwrap();

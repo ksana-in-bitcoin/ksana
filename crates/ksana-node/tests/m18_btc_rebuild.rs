@@ -211,7 +211,7 @@ fn a_node_rebuilds_republished_header_only_blocks_and_switches() {
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(
-        snapshot.header_seen(&a_tip).is_some(),
+        snapshot.counted_at(&a_tip).is_some(),
         "the republish has landed on BTC"
     );
 
@@ -317,7 +317,7 @@ fn a_header_only_block_whose_body_is_withheld_does_not_stall_finality() {
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(
-        snapshot.header_seen(&x2).is_some(),
+        snapshot.counted_at(&x2).is_some(),
         "M's headers have landed on BTC"
     );
     // Among the landed part M's chain is heavier and is the decision's candidate; its block 1 data has not landed, so

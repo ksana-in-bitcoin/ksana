@@ -1,78 +1,46 @@
-//! Determining the bodies of fast-lane blocks from BTC payloads (D-043, D-048, D-063, D-077, D-082, D-093): shared by
-//! node and indexer.
+//! The bodies of fast-lane blocks from BTC payloads (D-043, D-048, D-063, D-077, D-093, D-135): shared by node and
+//! indexer.
 //!
-//! - **Body**: the entries `forced(B)` that block B must include by force are derived from BTC per §7.4 (the window
-//!   starts at the highest anchor among all of B's parents, D-063; this needs the headers of B and its parents, and
-//!   B's anchor must be on the best chain of the BTC snapshot, so that the BTC blocks used for the derivation are
-//!   exactly the blocks of the anchor chain). When `entries_root(forced(B))` equals the header's `entries_root`, B
-//!   needs no body and the body is `forced(B)`; otherwise the body is taken from the payloads carrying B's body (the
-//!   entries of a settlement payload whose last header is B, or the item of a settlement / republish payload's
-//!   `bodies` pointing at B, D-077): the first candidate whose converted `entries_root` matches (`EntryData::Forced`
-//!   is replaced position by position with the entry of `forced(B)` with the same transaction ID). The body is
-//!   uniquely determined by `entries_root`; once determined it is cached and no longer changes with the BTC snapshot.
-//! - **Whether a body is needed**: `entries_root(forced(B)) ≠ B.entries_root` (D-043, D-077: empty blocks and blocks
-//!   containing only forced-inclusion entries need only the header); otherwise B's body is not needed.
+//! - **Body** of a block whose header counts on the BTC best chain ([`crate::tracker`]): the entries `forced(B)` that
+//!   block B must include by force are derived from BTC per §7.4 over its window (from above the highest anchor among
+//!   its parents up to its own anchor, D-063), which the tracker recorded when B's header counted. When
+//!   `entries_root(forced(B))` equals the header's `entries_root`, B needs no body (D-043, D-077: empty blocks and blocks
+//!   containing only forced-inclusion entries need only the header) and its body is `forced(B)`. Otherwise its body is
+//!   the first one that landed: the tracker checked it when its BTC block was scanned (`EntryData::Forced` replaced
+//!   position by position with the entry of `forced(B)` with the same transaction ID, the result matching
+//!   `entries_root`) and kept the transaction that carried it, which [`Bodies::body`] decodes again. The body is uniquely
+//!   determined by `entries_root`, so it does not depend on which payload landed it.
 //! - **Anchor-invalid blocks** (the anchor block has been reorged off BTC and its height does not exceed the snapshot
-//!   tip, D-056): `forced(B)` cannot be derived on the anchor chain. When `entries_root` is the root of the empty entry
-//!   list the body is empty; otherwise take the candidate whose converted `entries_root` matches (`EntryData::Forced`
-//!   is looked up by transaction ID as a native transaction of the current best chain over [`stale_range`]: from B's
-//!   window start up to the window end of a block anchored now, D-100); when there is none, derive the
-//!   forced-inclusion entries from the current best chain over B's window and adopt them if they match; when still
-//!   undetermined, wait. Whether the block carries a settlement transaction is judged by the body (whether
-//!   it contains entries other than forced inclusions). A node accepts a block in anchor-invalid mode only when its
-//!   body could be determined this way ([`check_stale_entries`], D-100), so a block the nodes accept never leaves the
-//!   indexer waiting for a body that cannot come.
-//! - **Use**: the indexer rebuilds all bodies from this and executes them; the node rebuilds from this the blocks the
-//!   finality decision is waiting for and the peers did not provide (D-093): the headers come from the header DAG on
-//!   BTC ([`HeaderDag`]), the body is determined by the rules above, and the rebuilt block is then checked by all the
-//!   rules for receiving blocks.
+//!   tip, D-056): such a block does not count (D-135), so no body of it is derived from BTC. A node still accepts one
+//!   from a peer when syncing history only when its entries could be determined on the current best chain
+//!   ([`check_stale_entries`], D-100).
+//! - **Use**: the indexer executes the bodies it gets from this; the node rebuilds from this the blocks the finality
+//!   decision is waiting for and the peers did not provide (D-093): the headers come from the header DAG on BTC
+//!   ([`HeaderDag`]), the body from this, and the rebuilt block is then checked by all the rules for receiving blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use bitcoin::hashes::Hash;
-use borsh::{BorshDeserialize, BorshSerialize};
-use ksana_crypto::entries_root;
 use ksana_primitives::{BlockHeader, BtcAnchor, Entry, EntryData, Params, Payload};
 
-use crate::finality::DataStatus;
+use crate::data::tx_payload;
 use crate::headers::HeaderDag;
 use crate::native::forced_heights;
-use crate::payload::{bodies_in, needs_body};
-use crate::tracker::{forced_entries, BtcSnapshot};
+use crate::payload::{bodies_at, needs_body};
+use crate::tracker::{forced_at, forced_entries, BtcSnapshot};
 
-/// Candidate bodies and determined bodies (held separately from the block DAG; the finality decision borrows both at
-/// the same time).
+/// Decodes the bodies of the blocks whose headers count from the BTC snapshot (see the module docs). It keeps only the
+/// payload it decoded last, so that the bodies one payload carries decode it once.
 pub struct Bodies {
     params: Params,
-    /// Log prefix (`[ksana-node]` / `[ksana-indexer]`).
-    tag: &'static str,
-    /// Candidate bodies: block hash → the entries in the payloads carrying its body (deduplicated, in order of
-    /// appearance). Removed once the body is determined.
-    candidates: BTreeMap<[u8; 32], Vec<Vec<EntryData>>>,
-    /// Determined bodies.
-    bodies: BTreeMap<[u8; 32], Arc<Vec<Entry>>>,
-    /// Whether the block needs a body (judged by the `entries_root` of the forced-inclusion entries).
-    carries: BTreeMap<[u8; 32], bool>,
-    /// Anchor-invalid blocks for which "body cannot be determined yet" has already been logged (logged once per block).
-    stale_waiting: BTreeSet<[u8; 32]>,
+    /// The genesis block's hash (its body is empty).
+    genesis: [u8; 32],
+    /// The payload decoded last and the transaction it came from.
+    last: Option<([u8; 32], Arc<Payload>)>,
 }
 
-/// [`Bodies`] in the local format of a pruning checkpoint (D-097).
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct BodiesRecord {
-    candidates: BTreeMap<[u8; 32], Vec<Vec<EntryData>>>,
-    bodies: BTreeMap<[u8; 32], Vec<Entry>>,
-    carries: BTreeMap<[u8; 32], bool>,
-    stale_waiting: BTreeSet<[u8; 32]>,
-}
-
-fn root_of(entries: &[Entry]) -> Result<[u8; 32], String> {
-    entries_root(entries).map_err(|e| format!("computing entries_root failed: {e}"))
-}
-
-/// Candidate entries other than forced inclusions map one to one to block entries; `Forced` returns `None`.
+/// Entries other than forced inclusions map one to one to block entries; `Forced` returns `None`.
 fn non_forced(data: &EntryData) -> Option<Entry> {
     match data {
         EntryData::Forced { .. } => None,
@@ -84,10 +52,10 @@ fn non_forced(data: &EntryData) -> Option<Entry> {
     }
 }
 
-/// Converts candidate entries into block entries: `Forced { btc_txid }` must have the same transaction ID as the entry
-/// at the same position in `forced` and is replaced by that entry; the other variants map one to one. Returns `None`
-/// on a mismatch.
-fn convert(candidate: &[EntryData], forced: &[Entry]) -> Option<Vec<Entry>> {
+/// Converts the entries of a body as a payload carries them into block entries: `Forced { btc_txid }` must have the
+/// same transaction ID as the entry at the same position in `forced` and is replaced by that entry; the other variants
+/// map one to one. Returns `None` on a mismatch.
+pub(crate) fn convert(candidate: &[EntryData], forced: &[Entry]) -> Option<Vec<Entry>> {
     candidate
         .iter()
         .enumerate()
@@ -101,41 +69,6 @@ fn convert(candidate: &[EntryData], forced: &[Entry]) -> Option<Vec<Entry>> {
             other => non_forced(other),
         })
         .collect()
-}
-
-/// Anchor-invalid blocks (D-056): `Forced { btc_txid }` looks up the native transaction by transaction ID among the
-/// native transactions of the current best chain (the snapshot) at heights in `range` ([`stale_range`], D-100); the
-/// other variants map one to one. Returns `None` when not found.
-fn convert_by_txid(
-    candidate: &[EntryData],
-    snapshot: &BtcSnapshot,
-    range: Option<&RangeInclusive<u32>>,
-) -> Option<Vec<Entry>> {
-    candidate
-        .iter()
-        .map(|data| match data {
-            EntryData::Forced { btc_txid } => range
-                .and_then(|range| snapshot.native_tx_in(btc_txid, range.clone()))
-                .map(|tx| Entry::Forced {
-                    btc_txid: tx.txid,
-                    op: tx.op.clone(),
-                }),
-            other => non_forced(other),
-        })
-        .collect()
-}
-
-/// The block's anchor relative to the snapshot: `Some(true)` on the best chain; `Some(false)` no longer on the best
-/// chain and its height does not exceed the snapshot tip (anchor invalid, D-056); `None` above the snapshot tip (wait
-/// for BTC sync).
-fn anchored(header: &BlockHeader, snapshot: &BtcSnapshot) -> Option<bool> {
-    if snapshot.contains(&header.btc_anchor) {
-        return Some(true);
-    }
-    snapshot
-        .tip()
-        .filter(|(tip, _)| header.btc_anchor.height <= *tip)
-        .map(|_| false)
 }
 
 /// Why [`check_stale_entries`] refuses a block.
@@ -272,262 +205,94 @@ pub fn forced(
 }
 
 impl Bodies {
-    /// Knows only the genesis block (whose body is empty). `tag` is the log prefix.
-    pub fn new(params: Params, genesis: [u8; 32], tag: &'static str) -> Self {
+    /// A decoder for the network `params` whose genesis block is `genesis`.
+    pub fn new(params: Params, genesis: [u8; 32]) -> Self {
         Bodies {
             params,
-            tag,
-            candidates: BTreeMap::new(),
-            bodies: BTreeMap::from([(genesis, Arc::new(Vec::new()))]),
-            carries: BTreeMap::from([(genesis, false)]),
-            stale_waiting: BTreeSet::new(),
+            genesis,
+            last: None,
         }
     }
 
-    /// A scanned settlement or republish payload: the bodies it carries (the entries of a settlement payload belong to
-    /// the block its last header points at, the items of `bodies` belong to the headers they point at, D-077) become
-    /// candidate bodies of those blocks; only those of blocks for which `wanted` is true are collected (the node
-    /// collects only blocks it does not have yet, D-093; the indexer collects all). Blocks whose body is already
-    /// determined and duplicate payloads (rescanned after a BTC reorg) are ignored.
-    pub fn observe(&mut self, payload: &Payload, wanted: &dyn Fn(&[u8; 32]) -> bool) {
-        for (hash, entries) in bodies_in(payload) {
-            if self.bodies.contains_key(&hash) || !wanted(&hash) {
-                continue;
-            }
-            let list = self.candidates.entry(hash).or_default();
-            if !list.iter().any(|c| c.as_slice() == entries) {
-                list.push(entries.to_vec());
-            }
-        }
-    }
-
-    /// The determined body.
-    pub fn known(&self, hash: &[u8; 32]) -> Option<&Arc<Vec<Entry>>> {
-        self.bodies.get(hash)
-    }
-
-    /// The candidates and conclusion for this block are no longer needed (the node obtained the block elsewhere,
-    /// D-093).
-    pub fn forget(&mut self, hash: &[u8; 32]) {
-        self.candidates.remove(hash);
-        self.bodies.remove(hash);
-        self.carries.remove(hash);
-        self.stale_waiting.remove(hash);
-    }
-
-    /// The number of blocks that have candidate bodies (for tests and statistics).
-    pub fn candidate_count(&self) -> usize {
-        self.candidates.len()
-    }
-
-    /// The number of blocks whose body or whether it needs one is held (for tests and statistics).
-    pub fn known_count(&self) -> usize {
-        self.bodies.len().max(self.carries.len())
-    }
-
-    /// Drops everything held for the blocks for which `keep` is false (D-097: the blocks no longer kept after
-    /// pruning). Returns the number of blocks dropped.
-    pub fn prune(&mut self, keep: &dyn Fn(&[u8; 32]) -> bool) -> usize {
-        let before = self.candidates.len().saturating_add(self.carries.len());
-        self.candidates.retain(|hash, _| keep(hash));
-        self.bodies.retain(|hash, _| keep(hash));
-        self.carries.retain(|hash, _| keep(hash));
-        self.stale_waiting.retain(|hash| keep(hash));
-        before.saturating_sub(self.candidates.len().saturating_add(self.carries.len()))
-    }
-
-    /// Drops everything held for the blocks whose headers `headers` no longer holds ([`HeaderDag::holds`]) after it was
-    /// pruned (D-097). A pending header keeps its candidates: they cannot be collected again once its payload has been
-    /// scanned, and the header can still join the DAG. Returns the number of blocks dropped.
-    pub fn prune_to(&mut self, headers: &HeaderDag) -> usize {
-        self.prune(&|hash| headers.holds(hash))
-    }
-
-    /// The state in the local format of a pruning checkpoint (D-097).
-    pub fn record(&self) -> BodiesRecord {
-        BodiesRecord {
-            candidates: self.candidates.clone(),
-            bodies: self
-                .bodies
-                .iter()
-                .map(|(hash, body)| (*hash, body.as_ref().clone()))
-                .collect(),
-            carries: self.carries.clone(),
-            stale_waiting: self.stale_waiting.clone(),
-        }
-    }
-
-    /// The state a [`Bodies::record`] was taken from.
-    pub fn from_record(params: Params, tag: &'static str, record: BodiesRecord) -> Self {
-        Bodies {
-            params,
-            tag,
-            candidates: record.candidates,
-            bodies: record
-                .bodies
-                .into_iter()
-                .map(|(hash, body)| (hash, Arc::new(body)))
-                .collect(),
-            carries: record.carries,
-            stale_waiting: record.stale_waiting,
-        }
-    }
-
-    /// Whether the block carries a settlement transaction (D-043): `entries_root(forced(B)) ≠ B.entries_root`;
-    /// anchor-invalid blocks are judged by the body (D-056). `None` when it cannot be determined yet.
-    pub fn carries(
-        &mut self,
-        tree: &HeaderDag,
-        hash: &[u8; 32],
-        snapshot: &BtcSnapshot,
-    ) -> Result<Option<bool>, String> {
-        if let Some(carries) = self.carries.get(hash) {
-            return Ok(Some(*carries));
-        }
-        let Some(header) = tree.header(hash) else {
-            return Ok(None);
-        };
-        if anchored(header, snapshot) == Some(false) {
-            return Ok(self
-                .body(tree, hash, snapshot)?
-                .map(|body| needs_body(&body)));
-        }
-        let Some(forced) = forced(&self.params, tree, header, snapshot) else {
-            return Ok(None);
-        };
-        let carries = root_of(&forced)? != header.entries_root;
-        self.carries.insert(*hash, carries);
-        Ok(Some(carries))
-    }
-
-    /// The block's body (see the module docs); `None` when it cannot be determined yet.
+    /// The body of block `hash` on the best chain of `snapshot` (see the module docs): the genesis block's is empty, a
+    /// block that needs no body has the entries it must force-include, a block that needs one has the body that landed
+    /// first. `Ok(None)` while its header does not count or its body has not landed; `Err` when a landed body cannot be
+    /// decoded again, or when its forced-inclusion window lies below a pruned snapshot (local faults: the body was
+    /// checked when its BTC block was scanned).
     pub fn body(
         &mut self,
-        tree: &HeaderDag,
-        hash: &[u8; 32],
         snapshot: &BtcSnapshot,
+        hash: &[u8; 32],
     ) -> Result<Option<Arc<Vec<Entry>>>, String> {
-        if let Some(body) = self.bodies.get(hash) {
-            return Ok(Some(Arc::clone(body)));
+        if *hash == self.genesis {
+            return Ok(Some(Arc::new(Vec::new())));
         }
-        let Some(header) = tree.header(hash) else {
+        let Some(counted) = snapshot.counted(hash) else {
             return Ok(None);
         };
-        if anchored(header, snapshot) == Some(false) {
-            let Some(body) = self.stale_body(tree, hash, header, snapshot)? else {
-                return Ok(None);
-            };
-            self.carries.insert(*hash, needs_body(&body));
-            let body = Arc::new(body);
-            self.bodies.insert(*hash, Arc::clone(&body));
-            self.candidates.remove(hash);
-            self.stale_waiting.remove(hash);
-            return Ok(Some(body));
+        let block = hex::encode(hash);
+        if forced_heights(&self.params, counted.parent_anchor, counted.anchor)
+            .is_some_and(|window| *window.start() < snapshot.base())
+        {
+            return Err(format!(
+                "the forced-inclusion window of block {block} starts below the pruned BTC snapshot (D-097)"
+            ));
         }
-        let Some(forced) = forced(&self.params, tree, header, snapshot) else {
+        let forced = forced_at(
+            &self.params,
+            snapshot,
+            counted.parent_anchor,
+            counted.anchor,
+        );
+        if !counted.settles {
+            return Ok(Some(Arc::new(forced)));
+        }
+        let Some(landed) = snapshot.landed_body(hash) else {
             return Ok(None);
         };
-        let target = header.entries_root;
-        let body = if root_of(&forced)? == target {
-            self.carries.insert(*hash, false);
-            forced
-        } else {
-            self.carries.insert(*hash, true);
-            let mut found = None;
-            for candidate in self.candidates.get(hash).into_iter().flatten() {
-                let Some(entries) = convert(candidate, &forced) else {
-                    continue;
-                };
-                if root_of(&entries)? == target {
-                    found = Some(entries);
-                    break;
-                }
-            }
-            match found {
-                Some(entries) => entries,
-                None => return Ok(None),
+        let txid = landed.landing.txid;
+        let payload = match &self.last {
+            Some((last, payload)) if *last == txid => Arc::clone(payload),
+            _ => {
+                let (_, payload) = tx_payload(&self.params, &landed.tx).ok_or_else(|| {
+                    format!(
+                        "the transaction {} that landed the body of block {block} no longer decodes",
+                        bitcoin::Txid::from_byte_array(txid)
+                    )
+                })?;
+                let payload = Arc::new(payload);
+                self.last = Some((txid, Arc::clone(&payload)));
+                payload
             }
         };
-        let body = Arc::new(body);
-        self.bodies.insert(*hash, Arc::clone(&body));
-        self.candidates.remove(hash);
-        Ok(Some(body))
-    }
-
-    /// The body of an anchor-invalid block (see the module docs, D-056); `None` when it cannot be determined yet (the
-    /// reason is logged once per block).
-    fn stale_body(
-        &mut self,
-        tree: &HeaderDag,
-        hash: &[u8; 32],
-        header: &BlockHeader,
-        snapshot: &BtcSnapshot,
-    ) -> Result<Option<Vec<Entry>>, String> {
-        let target = header.entries_root;
-        if root_of(&[])? == target {
-            return Ok(Some(Vec::new()));
-        }
-        let reason = match parent_anchor(tree, header) {
-            Some(parent_anchor) => {
-                let range = stale_range(&self.params, snapshot, &parent_anchor);
-                for candidate in self.candidates.get(hash).into_iter().flatten() {
-                    let Some(entries) = convert_by_txid(candidate, snapshot, range.as_ref()) else {
-                        continue;
-                    };
-                    if root_of(&entries)? == target {
-                        return Ok(Some(entries));
-                    }
-                }
-                let derived =
-                    forced_entries(&self.params, snapshot, &parent_anchor, &header.btc_anchor);
-                if root_of(&derived)? == target {
-                    return Ok(Some(derived));
-                }
-                "no settlement payload matches after conversion (the forced-inclusion native transactions must be \
-                 found on the current chain from the block's window start on, with the confirmations forced inclusion \
-                 asks for, D-100), and the forced-inclusion entries derived from the current chain do not match either"
-            }
-            None => {
-                "a parent's header is not known, so neither is the block's forced-inclusion window"
-            }
+        let headers = match &*payload {
+            Payload::Settlement { headers, .. } | Payload::Headers { headers, .. } => headers,
+            Payload::NativeOp { .. } => &Vec::new(),
         };
-        if self.stale_waiting.insert(*hash) {
-            eprintln!(
-                "{} the block at height {} with hash {} anchors a BTC block (height {}) that is no longer on the best chain; \
-                 its body cannot be determined yet: {reason}; waiting (D-056)",
-                self.tag,
-                header.height,
-                hex::encode(hash),
-                header.btc_anchor.height
-            );
-        }
-        Ok(None)
-    }
-
-    /// The landing status of the block's data (for the finality decision, D-082): the same rules as the settled
-    /// closure. Undetermined while it cannot be determined whether the block needs a body (anchor not on the snapshot,
-    /// parents unknown); when a body is needed and has not been determined yet, the payload carrying it has not landed
-    /// (landed payloads were converted into bodies when the tracker parsed the settlement), i.e. not landed yet.
-    pub fn data_status(
-        &mut self,
-        tree: &HeaderDag,
-        hash: &[u8; 32],
-        snapshot: &BtcSnapshot,
-    ) -> Result<DataStatus, String> {
-        let Some(settles) = self.carries(tree, hash, snapshot)? else {
-            return Ok(DataStatus::Undetermined);
-        };
-        Ok(match snapshot.block_data_height(hash, settles) {
-            Some(height) => DataStatus::Landed(height),
-            None => DataStatus::NotLanded,
-        })
+        let slot = usize::try_from(landed.slot).unwrap_or(usize::MAX);
+        let entries = bodies_at(&payload)
+            .get(slot)
+            .filter(|(index, _)| headers.get(*index).is_some_and(|h| h.hash() == *hash))
+            .map(|(_, entries)| *entries)
+            .ok_or_else(|| {
+                format!(
+                    "the body of block {block} is not at slot {slot} of transaction {}",
+                    bitcoin::Txid::from_byte_array(txid)
+                )
+            })?;
+        let body = convert(entries, &forced).ok_or_else(|| {
+            format!(
+                "the landed body of block {block} no longer matches its forced-inclusion entries"
+            )
+        })?;
+        Ok(Some(Arc::new(body)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ksana_primitives::{Action, Body, FeeMode, SigScheme, VmOp, BLOCK_VERSION, DEVNET};
+    use ksana_primitives::{Action, FeeMode, SigScheme, VmOp};
 
     fn op(nonce: u64, fee: FeeMode) -> VmOp {
         VmOp {
@@ -580,49 +345,7 @@ mod tests {
         assert_eq!(convert(&data[2..], &derived), Some(entries[2..].to_vec()));
     }
 
-    /// Pruning (D-097) drops everything held for the blocks not kept; the record restores the same state.
-    #[test]
-    fn pruning_drops_the_blocks_not_kept_and_the_record_round_trips() {
-        let header = |tag: u8| BlockHeader {
-            version: BLOCK_VERSION,
-            height: u64::from(tag),
-            parents: vec![[0; 32]],
-            btc_anchor: BtcAnchor {
-                height: 1,
-                hash: [0; 32],
-            },
-            entries_root: [tag; 32],
-            state_root: [tag; 32],
-            producer: [tag; 32],
-            timestamp: 0,
-            bits: 0,
-            nonce: 0,
-        };
-        let (h1, h2) = (header(1), header(2));
-        let entries = vec![EntryData::Unlock {
-            height: 7,
-            index: 1,
-        }];
-        let payload = Payload::Settlement {
-            headers: vec![h1.clone(), h2.clone()],
-            entries: entries.clone(),
-            bodies: vec![Body { header: 0, entries }],
-        };
-        let mut bodies = Bodies::new(DEVNET, [9; 32], "[test]");
-        bodies.observe(&payload, &|_| true);
-        assert_eq!(bodies.candidate_count(), 2);
-        let record = bodies.record();
-        let bytes = borsh::to_vec(&record).unwrap();
-        let restored = Bodies::from_record(DEVNET, "[test]", borsh::from_slice(&bytes).unwrap());
-        assert_eq!(restored.record(), record);
-        // h1's candidates and the genesis block's conclusion go
-        assert_eq!(bodies.prune(&|hash| *hash == h2.hash()), 2);
-        assert_eq!(bodies.candidate_count(), 1);
-        assert!(bodies.known(&[9; 32]).is_none());
-        assert_eq!(bodies.prune(&|hash| *hash == h2.hash()), 0);
-    }
-
-    /// D-100: a block accepted in anchor-invalid mode must have a body the indexer can determine on the current best
+    /// D-100: a block accepted in anchor-invalid mode must have entries that can be determined on the current best
     /// chain. Empty: always. Needing a body: each forced-inclusion entry names a native transaction carrying the same
     /// op over the stale range, from the block's window start up to the window end of a block anchored now (another
     /// op makes the block invalid; a transaction not found there only refuses this copy). Only forced-inclusion
@@ -731,12 +454,14 @@ mod tests {
         }
 
         // A pruning point the block descends from anchors at or below its parents' anchor (height 4), so the cut is
-        // at most height 3 (NATIVE_CONFIRMATIONS 1): the verdicts and the converted candidates stay the same
+        // at most height 3 (NATIVE_CONFIRMATIONS 1): the verdicts stay the same
         let mut pruned = snapshot.clone();
         pruned.prune(3, &|_| false);
         assert!(pruned.native_tx_in(&[5; 32], 0..=20).is_none());
-        let range = stale_range(&DEVNET, &snapshot, &parent_anchor);
-        assert_eq!(range, stale_range(&DEVNET, &pruned, &parent_anchor));
+        assert_eq!(
+            stale_range(&DEVNET, &snapshot, &parent_anchor),
+            stale_range(&DEVNET, &pruned, &parent_anchor)
+        );
         for entries in [
             vec![forced(3, 2), unlock.clone()],
             vec![forced(1, 9), unlock.clone()],
@@ -750,20 +475,6 @@ mod tests {
                 check_stale_entries(&DEVNET, &pruned, &parent_anchor, &header, &entries),
                 "{entries:?}"
             );
-            let data: Vec<EntryData> = entries.iter().map(EntryData::from).collect();
-            assert_eq!(
-                convert_by_txid(&data, &snapshot, range.as_ref()),
-                convert_by_txid(&data, &pruned, range.as_ref()),
-                "{entries:?}"
-            );
         }
-        assert_eq!(
-            convert_by_txid(
-                &[EntryData::Forced { btc_txid: [5; 32] }],
-                &snapshot,
-                range.as_ref()
-            ),
-            None
-        );
     }
 }
