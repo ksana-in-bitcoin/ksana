@@ -161,8 +161,9 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
 - `ksana_getSettlement`: the settlement transactions carried by the block (`txs`: `{ "commit", "reveal" }`, the commit and reveal transactions, Bitcoin network serialization, D-081). `txid` is
   the ID of the reveal transaction (the one whose witness carries the payload), `commit_txid` the ID of the commit transaction, both in Bitcoin internal byte order (D-001, consistent with the other hashes of this interface);
   `txid_rpc` / `commit_txid_rpc` are in the display byte order used by the bitcoind RPC and block explorers. `status`: `pending` (fewer than
-  `SETTLEMENT_DEPTH` fast-lane confirmations, not yet broadcast, D-037), `broadcast` (broadcast, not yet confirmed), `confirmed` (the block's data is confirmed on the BTC main chain: the earliest transaction that carried its
-  body, which may be the settlement transaction it carries itself, a rescue settlement or the batched settlement of a later block, D-077); `confirmed` gives that transaction's (the reveal transaction's)
+  `SETTLEMENT_DEPTH` fast-lane confirmations, not yet broadcast, D-037), `broadcast` (broadcast, not yet confirmed), `confirmed` (the block's data has landed on the BTC main chain: the earliest transaction that landed its
+  body, which may be the settlement transaction it carries itself, a rescue settlement or the batched settlement of a later block, D-077; a transaction that confirmed without landing it, because a
+  header it needs had not counted yet, leaves the status at `broadcast` until a rescue lands it, D-135); `confirmed` gives that transaction's (the reveal transaction's)
   `{ "txid", "height", "block", "confirmations" }`. `settled`: the main-chain block that accepted the block has entered the settled closure (D-038, D-063); `btc_final`: the main-chain block that accepted the block is BTC-final (D-082, D-114). The block identifier can be the hash of any block in the DAG; for a block not yet accepted by the main chain,
   `settled` and `btc_final` are false.
   - Settlement batching (D-077): a block's body can be carried by the settlement transactions of a later block, so the block need not carry settlement transactions itself. For such a block, `carrier` is

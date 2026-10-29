@@ -1,8 +1,8 @@
 # Joining the public signet (D-107)
 
-Ksana's public test network runs on **Bitcoin's public signet** (chain ID 1002, `ANCHOR_DEPTH` 1, D-056). Its genesis config
-is `signet/genesis.json` in this repository, and the project hosts a seed node, an indexer, the web wallet and a KSA faucet
-on one server (`signet/README.md` is the operator's guide) at `signet.ksana.network` (D-112). Its former name
+Ksana's public test network runs on **Bitcoin's public signet** (chain ID 1002, `ANCHOR_DEPTH` 1, D-056, and the PoW
+limit `0x1f0fffff`, D-136). Its genesis config is `signet/genesis.json` in this repository, and the project hosts a seed
+node, an indexer, the web wallet and a KSA faucet on one server (`signet/README.md` is the operator's guide) at `signet.ksana.network` (D-112). Its former name
 still answers `/rpc`, `/indexer`, `/btc` and `/faucet`, and its page moves to the new name. The
 contract playground at `playground.ksana.network` (D-119), example contracts to use, edit, compile and deploy from the
 browser, runs on the same signet: its page calls the same server, where its compile service runs.

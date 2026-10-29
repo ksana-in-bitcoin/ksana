@@ -117,10 +117,10 @@ open findings point at `5819b26`.
 | A2-04 | Medium | Re-execution in anchor-invalid mode can disqualify a valid block after a BTC reorg | Fixed (M27) |
 | A2-05 | Medium | GHOSTDAG work before the proof of work, merge-depth walks not memoized | Fixed (chain-base change) |
 | A2-06 | Medium | Refusals that are not invalidity are never remembered | Partly fixed (M27) |
-| A2-07 | Medium | Cheap dead tips keep honest producers rebuilding templates | Partly fixed (chain-base change) |
+| A2-07 | Medium | Cheap dead tips keep honest producers rebuilding templates | Partly fixed (chain-base change); signet's PoW limit raised after this report in M51 (D-136) |
 | A2-08 | Medium | Entry-pool churn keeps honest producers rebuilding templates | Open; fixed after this report in M47 (D-130) |
 | A2-09 | Medium | A block's own low-fee settlement holds its rescue back, and nothing raises a stuck fee | Open, fix before mainnet; fixed after this report in M28 (D-102), its P2A pinning residual in M48 (D-131) |
-| A2-10 | Medium | Headers with unknown parents from BTC payloads are held unchecked and without a size limit | Open |
+| A2-10 | Medium | Headers with unknown parents from BTC payloads are held unchecked and without a size limit | Open; fixed after this report in M51 (D-135) |
 | A2-11 | Medium | The CLI, SDK and web app default to devnet and never check the node's chain ID | Open, fix before mainnet; fixed after this report in M31 (D-106) |
 | A2-12 | Medium | A fresh indexer holds the whole history in memory before it first prunes | Fixed (chain-base change) |
 | A2-13 to A2-22 | Low | Ten bounded local costs and hardening items, in the [Low](#low) table | Open |
@@ -345,6 +345,12 @@ main-chain tip (the filter is the exact complement of GHOSTDAG's bound), and its
 dead tips cost a template almost nothing. Still open: such side blocks are still relayed to every node, and any DAG
 insertion still makes the running template stale.
 
+After this report, the same side blocks can also put their headers on BTC, where they count in the header DAG of every
+node and indexer until pruning even after M51 (D-135), since their parents have counted. M51 raises signet's PoW limit
+from devnet's `0x207fffff` to `0x1f0fffff` (D-136): a block at the limit takes about 4 096 Argon2id evaluations instead
+of about 2, whether it is relayed or landed on BTC, about 3.5 CPU-days for a full BTC block of such headers. Mainnet's
+limit, `0x1f00ffff`, already asks about 65 536.
+
 #### A2-08: entry-pool churn keeps honest producers rebuilding templates
 
 **Where.** `crates/ksana-mempool/src/lib.rs:414-419` (replacement needs only a higher fee) and `:475` (generation
@@ -453,6 +459,14 @@ the context-free checks before holding a header pending: parent count, distinct 
 limit, and the PoW against the header's own `bits` at weight 1, which every valid header passes (its effective target is
 the largest); cap the pending set by count and bytes; collect candidate bodies only for headers the DAG holds; cap the
 candidates per hash and in total.
+
+Fixed after this report in M51 (D-135), in the protocol rather than locally, since a full cap on the pending set has to
+drop headers, valid ones the finality determination may wait for included. A header in a payload that counts now
+counts only when its anchor is on the BTC best chain, it passes the header checks and its parents have counted, within
+one BTC block in any order; an appearance that does not count leaves no trace, so nothing is held pending and no
+payload waits to be resolved. A body lands only with its counted header, checked against `entries_root` when its BTC
+block is scanned, and landed bodies are kept as the bytes of their transactions, one copy per transaction. Devnet and
+signet restart from genesis.
 
 #### A2-11: the CLI, SDK and web app default to devnet and never check the node's chain ID
 
@@ -584,8 +598,8 @@ S-03. Its fixes landed in M26 (D-098) and M27 (D-100). Status as of `5819b26`:
 | F-22 | CLI top-up: fixed fee rate, no payment deadline shown | Open | See also A2-11 (fixed after this report in M31: the claim is signed for the node's network) |
 | F-23 | Indexer wipes its state on restart when bitcoind is behind | Fixed (M26) | It waits until bitcoind reaches its oldest kept version, then verifies by state root; since the chain-base change processing after a restart also waits for the scan to reach the BTC tip |
 | F-24 | Web mock wallet key in the query string | Open | |
-| F-25 | Unbounded sets (pending headers, invalid set, `best_candidate`, `headers_seen`) | Partly fixed | Invalid set capped; `best_candidate` uses a tip index; `headers_seen` pruned; since the chain-base change templates skip tips beyond the merge depth (A2-07). Open: pending headers (A2-10) |
-| F-26 | Header DAG time checks not repeated after a BTC reorg | Documented (D-098) | |
+| F-25 | Unbounded sets (pending headers, invalid set, `best_candidate`, `headers_seen`) | Partly fixed; fixed after this report in M51 (D-135) | Invalid set capped; `best_candidate` uses a tip index; `headers_seen` pruned; since the chain-base change templates skip tips beyond the merge depth (A2-07). Open at this report: pending headers (A2-10), which M51 removes |
+| F-26 | Header DAG time checks not repeated after a BTC reorg | Documented (D-098); settled after this report in M51 (D-135) | A header counts on the current BTC chain only with its anchor on that chain, so its time bound is the one already checked |
 | F-27 | Header DAG maps `GhostdagError::Corrupt` to invalid | Open | `headers.rs` `From<GhostdagError> for Reject`; the node maps the same error to a local fault |
 | F-28 | P2P: no connection limits, banned peers' queued gossip, sync server concurrency | Partly fixed (M26); fixed after this report in M49 (D-132) | Banned peers' gossip is dropped. Open at this report: connection limits, per-peer buckets, ops decoded with the 16 MiB limit, the shared queue, unbounded sync-serve tasks, `GetMempool` responses up to about 32 MiB; M49 bounds them all (connections by address, quotas by address that outlive connections, ops within `MAX_OP_BYTES`, budgets per topic and per source, serving 4 at a time within a byte budget, `GetMempool` responses within 4 MiB). The orphan pool's share per peer stays open (F-05) |
 | F-29 | RPC: unlimited batches and bodies, `getAccount` cost | Open; fixed after this report in M49 (D-132) | Batches of at most 64 calls, bodies of 1 MiB, 16 subscriptions per connection, for the node and the indexer; `getAccount` reads a balance per asset and finds carriers in an index of the window |
@@ -594,7 +608,7 @@ S-03. Its fixes landed in M26 (D-098) and M27 (D-100). Status as of `5819b26`:
 | F-32 | VM: event pricing, sticky `limit_hit`, bulk-memory tests | Open | |
 | F-33 | Super-linear compact header decoding | Open | Bounded by the 500-header cap; see A2-16 |
 | F-34 | TypeScript `decodePayload` defaults to devnet | Open; fixed after this report in M31 (D-106) | `params` is required; see A2-11 |
-| F-35 | Indexer candidate bodies and pending headers unbounded | Partly fixed | Dropped at each pruning step; no size bound (A2-10) |
+| F-35 | Indexer candidate bodies and pending headers unbounded | Partly fixed; fixed after this report in M51 (D-135) | Dropped at each pruning step; no size bound at this report (A2-10); M51 holds neither |
 | F-36 | Duplicate block messages trigger `update_virtual` | Open | Cheaper now (tips index) |
 | F-37 | Anchor-invalid heavier side chain retried forever | Open | By design (D-056): a state root mismatch or an invalid verdict on re-execution in anchor-invalid mode is a local fault after the block entered the DAG, so the switch is tried again on every update |
 | F-38 | A fake settlement claim in the BTC mempool stops every rescue | Fixed (M26) | Residuals: the patience window restarts per claim and on restart; a block's own pair (A2-09, fixed after this report in M28) |
