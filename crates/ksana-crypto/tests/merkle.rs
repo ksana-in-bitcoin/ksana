@@ -1,6 +1,6 @@
 //! Merkle tool tests (RFC 6962, DECISIONS D-004).
 
-use ksana_crypto::{entries_root, merkle_root};
+use ksana_crypto::{entries_root, entry_leaf, leaf_hash, merkle_root, root_of_leaf_hashes};
 use ksana_primitives::codec::encode;
 use ksana_primitives::strategies;
 use proptest::prelude::*;
@@ -45,6 +45,21 @@ proptest! {
     fn entries_root_uses_borsh_leaves(entries in proptest::collection::vec(strategies::entry(), 0..6)) {
         let leaves: Vec<Vec<u8>> = entries.iter().map(|e| encode(e).unwrap()).collect();
         prop_assert_eq!(entries_root(&entries).unwrap(), merkle_root(&leaves));
+    }
+
+    /// A root computed from the leaf hashes is the root of the leaf data (D-135), at every size up to a few levels.
+    #[test]
+    fn root_of_leaf_hashes_is_the_root_of_the_data(
+        leaves in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..8), 0..40),
+    ) {
+        let hashes: Vec<[u8; 32]> = leaves.iter().map(|data| leaf_hash(data)).collect();
+        prop_assert_eq!(root_of_leaf_hashes(&hashes), merkle_root(&leaves));
+    }
+
+    /// An entry's leaf hash is the leaf hash of its Borsh encoding.
+    #[test]
+    fn entry_leaf_hashes_the_borsh_encoding(entry in strategies::entry()) {
+        prop_assert_eq!(entry_leaf(&entry).unwrap(), leaf_hash(&encode(&entry).unwrap()));
     }
 
     /// Any change to the leaf data or order changes the root (domain separation keeps single-leaf trees and internal

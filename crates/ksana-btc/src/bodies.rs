@@ -8,8 +8,9 @@
 //!   containing only forced-inclusion entries need only the header) and its body is `forced(B)`. Otherwise its body is
 //!   the first one that landed: the tracker checked it when its BTC block was scanned (`EntryData::Forced` replaced
 //!   position by position with the entry of `forced(B)` with the same transaction ID, the result matching
-//!   `entries_root`) and kept the transaction that carried it, which [`Bodies::body`] decodes again. The body is uniquely
-//!   determined by `entries_root`, so it does not depend on which payload landed it.
+//!   `entries_root`, computed from leaf hashes by [`converted_root`]) and kept the transaction that carried it, which
+//!   [`Bodies::body`] decodes again. The body is uniquely determined by `entries_root`, so it does not depend on which
+//!   payload landed it.
 //! - **Anchor-invalid blocks** (the anchor block has been reorged off BTC and its height does not exceed the snapshot
 //!   tip, D-056): such a block does not count (D-135), so no body of it is derived from BTC. A node still accepts one
 //!   from a peer when syncing history only when its entries could be determined on the current best chain
@@ -22,7 +23,8 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use bitcoin::hashes::Hash;
-use ksana_primitives::{BlockHeader, BtcAnchor, Entry, EntryData, Params, Payload};
+use ksana_crypto::{entry_leaf, root_of_leaf_hashes};
+use ksana_primitives::{BlockHeader, BtcAnchor, CodecError, Entry, EntryData, Params, Payload};
 
 use crate::data::tx_payload;
 use crate::headers::HeaderDag;
@@ -69,6 +71,31 @@ pub(crate) fn convert(candidate: &[EntryData], forced: &[Entry]) -> Option<Vec<E
             other => non_forced(other),
         })
         .collect()
+}
+
+/// The `entries_root` of the entries [`convert`] makes of `candidate`, from leaf hashes, without making them (D-135):
+/// `forced` gives the transaction ID and the leaf hash ([`crate::native::forced_leaf`]) of each entry of `forced(B)`
+/// in order. A `Forced` entry at index `i` takes the `i`-th leaf hash when the transaction IDs agree, any other entry
+/// the leaf hash of its own encoding, so the work is that of the candidate's own entries, whatever the size of the ops
+/// `forced(B)` holds. `Ok(None)` where [`convert`] returns `None`; `Err` when an entry cannot be encoded.
+pub(crate) fn converted_root<'a>(
+    candidate: &[EntryData],
+    forced: impl Iterator<Item = (&'a [u8; 32], &'a [u8; 32])>,
+) -> Result<Option<[u8; 32]>, CodecError> {
+    let mut forced = forced.fuse();
+    let mut leaves = Vec::with_capacity(candidate.len());
+    for data in candidate {
+        let at = forced.next();
+        let leaf = match non_forced(data) {
+            Some(entry) => entry_leaf(&entry)?,
+            None => match (data, at) {
+                (EntryData::Forced { btc_txid }, Some((txid, leaf))) if txid == btc_txid => *leaf,
+                _ => return Ok(None),
+            },
+        };
+        leaves.push(leaf);
+    }
+    Ok(Some(root_of_leaf_hashes(&leaves)))
 }
 
 /// Why [`check_stale_entries`] refuses a block.
@@ -293,6 +320,7 @@ impl Bodies {
 mod tests {
     use super::*;
     use ksana_primitives::{Action, FeeMode, SigScheme, VmOp};
+    use proptest::prelude::*;
 
     fn op(nonce: u64, fee: FeeMode) -> VmOp {
         VmOp {
@@ -343,6 +371,69 @@ mod tests {
         // candidates without forced-inclusion entries are converted as usual (validity is judged by entries_root and
         // execution)
         assert_eq!(convert(&data[2..], &derived), Some(entries[2..].to_vec()));
+    }
+
+    /// The root [`converted_root`] computes from leaf hashes is the `entries_root` of what [`convert`] makes, and it
+    /// refuses exactly what [`convert`] refuses (D-135).
+    #[test]
+    fn the_root_of_a_converted_candidate_comes_from_leaf_hashes() {
+        let root = |candidate: &[EntryData], forced: &[Entry]| {
+            let leaves: Vec<([u8; 32], [u8; 32])> = forced
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Forced { btc_txid, .. } => (*btc_txid, entry_leaf(entry).unwrap()),
+                    _ => panic!("not a forced-inclusion entry"),
+                })
+                .collect();
+            let got =
+                converted_root(candidate, leaves.iter().map(|(txid, leaf)| (txid, leaf))).unwrap();
+            let want =
+                convert(candidate, forced).map(|body| ksana_crypto::entries_root(&body).unwrap());
+            assert_eq!(got, want, "{candidate:?} over {forced:?}");
+            got
+        };
+        let entries = [
+            forced(1, 0),
+            forced(2, 1),
+            Entry::Unlock {
+                height: 7,
+                index: 1,
+            },
+            Entry::Sponsored {
+                op: op(3, FeeMode::Token { amount: 2 }),
+            },
+        ];
+        let data: Vec<EntryData> = entries.iter().map(EntryData::from).collect();
+        let derived = [forced(1, 0), forced(2, 1)];
+        assert!(root(&data, &derived).is_some());
+        assert!(root(&data, &[forced(1, 0), forced(9, 1)]).is_none());
+        assert!(root(&data, &[forced(2, 1), forced(1, 0)]).is_none());
+        assert!(root(&data, &[forced(1, 0)]).is_none());
+        assert!(root(&data[1..], &derived).is_none());
+        assert!(root(&data[2..], &derived).is_some());
+        assert!(root(&[], &derived).is_some());
+        // a forced-inclusion entry anywhere takes the entry of `forced(B)` at its own position
+        let late = [data[2].clone(), EntryData::from(&forced(2, 1))];
+        assert!(root(&late, &derived).is_some());
+        assert!(root(&late, &derived[..1]).is_none());
+
+        proptest!(ProptestConfig::with_cases(256), |(
+            window in proptest::collection::vec((0u8..4, 0u64..3), 0..6),
+            picks in proptest::collection::vec((0u8..4, 0u8..4, 0u64..3), 0..8),
+        )| {
+            let window: Vec<Entry> = window.iter().map(|(txid, nonce)| forced(*txid, *nonce)).collect();
+            let candidate: Vec<EntryData> = picks
+                .iter()
+                .enumerate()
+                .map(|(i, (kind, txid, n))| match (kind, window.get(i)) {
+                    (0, Some(entry)) => EntryData::from(entry),
+                    (0 | 1, _) => EntryData::Forced { btc_txid: [*txid; 32] },
+                    (2, _) => EntryData::Unlock { height: *n, index: u32::from(*txid) },
+                    _ => EntryData::Sponsored { op: op(*n, FeeMode::Token { amount: 1 }) },
+                })
+                .collect();
+            root(&candidate, &window);
+        });
     }
 
     /// D-100: a block accepted in anchor-invalid mode must have entries that can be determined on the current best

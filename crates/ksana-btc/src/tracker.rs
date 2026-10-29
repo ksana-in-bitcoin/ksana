@@ -20,6 +20,11 @@
 //!   replaced; it is checked when its BTC block is scanned, and kept as the transaction that carried it, one copy per
 //!   transaction ([`LandedBody`], decoded when used by [`crate::bodies::Bodies`]). Nothing waits for the node or the
 //!   indexer to know a block.
+//! - **Cost** (D-135): the leaf hash a native transaction's forced-inclusion entry adds to `entries_root` is computed
+//!   once, when its BTC block is scanned, and kept with it; whether a counted block needs a body, and whether a carried
+//!   body matches, are computed from those leaf hashes. Scanning a BTC block thus costs about the bytes of its
+//!   payloads, plus one hash per native transaction of each distinct forced-inclusion window among the headers that
+//!   count there; no native op is copied or encoded again, however many payloads name it.
 //! - [`AnchoredView`]: the execution layer's [`BtcView`]; all answers are relative to some block's `btc_anchor`
 //!   (D-035).
 //! - [`prefix_height`]: the settled prefix (D-038); in the DAG it accumulates block by block along the main chain (the
@@ -37,15 +42,15 @@ use std::sync::{Arc, Mutex, RwLock};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
 use borsh::{BorshDeserialize, BorshSerialize};
-use ksana_crypto::entries_root;
+use ksana_crypto::root_of_leaf_hashes;
 use ksana_execution::keys::{self, UnlockCursor};
 use ksana_execution::{BtcView, StateSource, UnlockItem};
 use ksana_primitives::{BlockHeader, BtcAnchor, Entry, OutPoint, Params, Payload, VmOp};
 
-use crate::bodies::convert;
+use crate::bodies::converted_root;
 use crate::client::BtcClient;
 use crate::data::tx_payload;
-use crate::native::{native_txs, NativeTx};
+use crate::native::{forced_leaf, native_txs, NativeTx};
 use crate::payload::bodies_at;
 use crate::settlement::PrevoutSource;
 
@@ -454,6 +459,26 @@ pub fn payload_counts(headers: &[BlockHeader], height: u32) -> bool {
         .all(|header| header.btc_anchor.height < height)
 }
 
+/// A native transaction of the best chain with the leaf hash of its forced-inclusion entry
+/// ([`crate::native::forced_leaf`]), computed once when its BTC block is scanned (D-135).
+#[derive(Clone, Debug)]
+struct Native {
+    tx: NativeTx,
+    leaf: [u8; 32],
+}
+
+impl Native {
+    fn new(tx: NativeTx) -> Result<Self, String> {
+        let leaf = forced_leaf(&tx).map_err(|e| {
+            format!(
+                "encoding the forced-inclusion entry of native transaction {} failed: {e}",
+                bitcoin::Txid::from_byte_array(tx.txid)
+            )
+        })?;
+        Ok(Native { tx, leaf })
+    }
+}
+
 /// The BTC best chain as scanned at some moment.
 #[derive(Clone, Debug, Default)]
 pub struct BtcSnapshot {
@@ -461,8 +486,8 @@ pub struct BtcSnapshot {
     base: u32,
     /// The block hash and 80-byte header at each height from `base`.
     chain: Vec<([u8; 32], [u8; 80])>,
-    /// Heights containing native transactions → the native transactions (in block order).
-    native: BTreeMap<u32, Vec<NativeTx>>,
+    /// Heights containing native transactions → the native transactions (in block order), each with its leaf hash.
+    native: BTreeMap<u32, Vec<Native>>,
     /// Fast-lane block hash → where its header counts (D-135).
     counted: BTreeMap<[u8; 32], Counted>,
     /// The reverse index of `counted`: BTC height → the fast-lane headers that count at it, each after its parents, for
@@ -540,6 +565,7 @@ impl BtcSnapshot {
         self.native
             .range(heights)
             .flat_map(|(_, txs)| txs)
+            .map(|native| &native.tx)
             .find(|tx| tx.txid == *txid)
     }
 
@@ -549,6 +575,7 @@ impl BtcSnapshot {
         self.native
             .range(..=max_height)
             .flat_map(|(_, txs)| txs)
+            .map(|native| &native.tx)
             .find(|tx| tx.txid == *txid)
     }
 
@@ -562,11 +589,52 @@ impl BtcSnapshot {
         &self,
         heights: std::ops::RangeInclusive<u32>,
     ) -> impl Iterator<Item = &NativeTx> + '_ {
+        self.natives(heights).map(|native| &native.tx)
+    }
+
+    /// The native transactions in the height range with their leaf hashes, in order; none when the range is empty.
+    fn natives(
+        &self,
+        heights: std::ops::RangeInclusive<u32>,
+    ) -> impl Iterator<Item = &Native> + '_ {
         (heights.start() <= heights.end())
             .then(|| self.native.range(heights))
             .into_iter()
             .flatten()
             .flat_map(|(_, txs)| txs)
+    }
+
+    /// The native transactions in the forced-inclusion window of a block whose parents' highest anchor is at height
+    /// `parent_anchor` and whose own anchor is at height `anchor` ([`forced_at`]), with their leaf hashes.
+    fn window(
+        &self,
+        params: &Params,
+        parent_anchor: u32,
+        anchor: u32,
+    ) -> impl Iterator<Item = &Native> + '_ {
+        crate::native::forced_heights(params, parent_anchor, anchor)
+            .into_iter()
+            .flat_map(|heights| self.natives(heights))
+    }
+
+    /// The transaction ID and the leaf hash of each entry of [`forced_at`], in order (D-135).
+    fn forced_leaves(
+        &self,
+        params: &Params,
+        parent_anchor: u32,
+        anchor: u32,
+    ) -> impl Iterator<Item = (&[u8; 32], &[u8; 32])> + '_ {
+        self.window(params, parent_anchor, anchor)
+            .map(|native| (&native.tx.txid, &native.leaf))
+    }
+
+    /// `entries_root` of [`forced_at`], from the leaf hashes (D-135).
+    fn forced_root(&self, params: &Params, parent_anchor: u32, anchor: u32) -> [u8; 32] {
+        let leaves: Vec<[u8; 32]> = self
+            .window(params, parent_anchor, anchor)
+            .map(|native| native.leaf)
+            .collect();
+        root_of_leaf_hashes(&leaves)
     }
 
     /// Where the block's header counts on the best chain (D-135); `None` when it does not count.
@@ -697,7 +765,11 @@ impl BtcSnapshot {
         SnapshotRecord {
             base: self.base,
             chain: self.chain.clone(),
-            native: self.native.clone(),
+            native: self
+                .native
+                .iter()
+                .map(|(height, txs)| (*height, txs.iter().map(|n| n.tx.clone()).collect()))
+                .collect(),
             counted: self.counted.clone(),
             headers_by_height: self.headers_by_height.clone(),
             txs,
@@ -707,8 +779,16 @@ impl BtcSnapshot {
     }
 
     /// The snapshot a [`BtcSnapshot::record`] was taken from (the bodies one transaction landed sharing one copy of it
-    /// again).
+    /// again, the leaf hashes of the native transactions computed again).
     pub fn from_record(record: SnapshotRecord) -> Result<Self, String> {
+        let mut native = BTreeMap::new();
+        for (height, txs) in record.native {
+            let txs = txs
+                .into_iter()
+                .map(Native::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            native.insert(height, txs);
+        }
         let mut txs = Vec::with_capacity(record.txs.len());
         for bytes in &record.txs {
             let tx: bitcoin::Transaction =
@@ -735,7 +815,7 @@ impl BtcSnapshot {
         Ok(BtcSnapshot {
             base: record.base,
             chain: record.chain,
-            native: record.native,
+            native,
             counted: record.counted,
             headers_by_height: record.headers_by_height,
             bodies,
@@ -777,7 +857,8 @@ impl BtcSnapshot {
 
     /// For tests: a native transaction confirmed at height `height` (after those already there).
     pub(crate) fn push_native(&mut self, height: u32, tx: NativeTx) {
-        self.native.entry(height).or_default().push(tx);
+        let native = Native::new(tx).expect("the forced-inclusion entry encodes");
+        self.native.entry(height).or_default().push(native);
     }
 
     /// For tests: a fast-lane header counts at BTC height `height` (unless it already counts); the sender is a
@@ -1354,7 +1435,11 @@ impl BtcTracker {
             .try_into()
             .map_err(|_| TrackerError::Btc("the block header is not 80 bytes".into()))?;
         snap.chain.push((hash, header));
-        let natives = native_txs(&self.params, block);
+        let natives = native_txs(&self.params, block)
+            .into_iter()
+            .map(Native::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TrackerError::Internal)?;
         if !natives.is_empty() {
             snap.native.insert(height, natives);
         }
@@ -1450,12 +1535,20 @@ impl BtcTracker {
                 children.entry(*parent).or_default().push(*hash);
             }
         }
+        // the root of each forced-inclusion window met at this height: every header counting here anchors below it
+        // (`payload_counts`), so the native transactions of its window are all scanned and stay as they are
+        let mut roots = BTreeMap::new();
         while let Some((_, hash)) = ready.pop_first() {
             let Some(appearance) = waiting.get(&hash) else {
                 continue;
             };
-            let Some(counted) =
-                self.try_count(snap, appearance.header, appearance.landing, known)?
+            let Some(counted) = self.try_count(
+                snap,
+                appearance.header,
+                appearance.landing,
+                known,
+                &mut roots,
+            )?
             else {
                 continue;
             };
@@ -1478,14 +1571,16 @@ impl BtcTracker {
     }
 
     /// Whether `header`, whose parents have all counted, counts (D-135): its anchor is on the best chain and `known`
-    /// accepts it. When it does, also settles whether its block needs a body, from the entries it must force-include
-    /// (D-043, D-077).
+    /// accepts it. When it does, also settles whether its block needs a body, from the root of the entries it must
+    /// force-include (D-043, D-077), computed from the leaf hashes of their native transactions and kept in `roots` by
+    /// window for the other headers of the BTC block being scanned.
     fn try_count(
         &self,
         snap: &BtcSnapshot,
         header: &BlockHeader,
         landing: Landing,
         known: &dyn KnownBlocks,
+        roots: &mut BTreeMap<(u32, u32), [u8; 32]>,
     ) -> Result<Option<Counted>, TrackerError> {
         if !snap.contains(&header.btc_anchor) {
             return Ok(None);
@@ -1506,9 +1601,9 @@ impl BtcTracker {
             return Ok(None);
         }
         let anchor = header.btc_anchor.height;
-        let forced = forced_at(&self.params, snap, parent_anchor, anchor);
-        let root = entries_root(&forced)
-            .map_err(|e| TrackerError::Internal(format!("computing entries_root failed: {e}")))?;
+        let root = *roots
+            .entry((parent_anchor, anchor))
+            .or_insert_with(|| snap.forced_root(&self.params, parent_anchor, anchor));
         Ok(Some(Counted {
             landing,
             anchor,
@@ -1519,15 +1614,16 @@ impl BtcTracker {
 
     /// Lands the bodies carried by this BTC block's payloads (D-077, D-135): a body lands for a block whose header
     /// counts and that needs one, when its entries match the header's `entries_root` once the entries the block must
-    /// force-include replace its `Forced` entries. Only the first landing is kept, the earliest in the BTC block; the
-    /// bodies one transaction lands share one copy of it.
+    /// force-include replace its `Forced` entries. The root is computed from the leaf hashes of the native
+    /// transactions those entries name and of the body's own entries ([`converted_root`]), so a body costs its own
+    /// bytes. Only the first landing is kept, the earliest in the BTC block; the bodies one transaction lands share one
+    /// copy of it.
     fn land_bodies(
         &self,
         snap: &mut BtcSnapshot,
         height: u32,
         scanned: &[Scanned<'_>],
     ) -> Result<(), TrackerError> {
-        let mut forced: BTreeMap<[u8; 32], Vec<Entry>> = BTreeMap::new();
         for s in scanned {
             let mut copy: Option<Arc<bitcoin::Transaction>> = None;
             let mut refused = 0usize;
@@ -1542,18 +1638,12 @@ impl BtcTracker {
                 let Some(counted) = snap.counted.get(hash).filter(|c| c.settles) else {
                     continue;
                 };
-                let forced = forced.entry(*hash).or_insert_with(|| {
-                    forced_at(&self.params, snap, counted.parent_anchor, counted.anchor)
-                });
-                let matches = match convert(entries, forced) {
-                    Some(body) => {
-                        entries_root(&body).map_err(|e| {
-                            TrackerError::Internal(format!("computing entries_root failed: {e}"))
-                        })? == header.entries_root
-                    }
-                    None => false,
-                };
-                if !matches {
+                let forced =
+                    snap.forced_leaves(&self.params, counted.parent_anchor, counted.anchor);
+                let root = converted_root(entries, forced).map_err(|e| {
+                    TrackerError::Internal(format!("computing entries_root failed: {e}"))
+                })?;
+                if root != Some(header.entries_root) {
                     refused = refused.saturating_add(1);
                     continue;
                 }
@@ -2413,6 +2503,7 @@ mod counting_tests {
         absolute, transaction, Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash,
         Witness,
     };
+    use ksana_crypto::entries_root;
     use ksana_primitives::{compact, Body, EntryData, DEVNET};
     use proptest::prelude::*;
 
@@ -2881,13 +2972,224 @@ mod counting_tests {
         assert_eq!(known.asked(), vec![headers[0].hash(), headers[1].hash()]);
     }
 
+    /// A path C op calling a contract with `size` bytes of arguments.
+    fn native_op(nonce: u64, size: usize) -> VmOp {
+        use ksana_primitives::{Action, FeeMode, SigScheme, VMOP_VERSION};
+        VmOp {
+            version: VMOP_VERSION,
+            chain_id: DEVNET.chain_id,
+            account: [1; 32],
+            nonce,
+            fee: FeeMode::BtcNative,
+            max_gas: 100_000,
+            action: Action::Call {
+                contract: [3; 32],
+                method: "m".into(),
+                args: vec![u8::try_from(nonce % 251).unwrap(); size],
+                funds: Vec::new(),
+            },
+            sig: SigScheme::Bip340([0; 64]),
+        }
+    }
+
+    /// A native transaction carrying an op of `size` bytes of arguments, spending a coin of its own.
+    fn native_tx(btc: &mut Btc, nonce: u64, size: usize) -> Transaction {
+        let payload = Payload::NativeOp {
+            op: native_op(nonce, size),
+        }
+        .encode(&DEVNET)
+        .unwrap();
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: btc.coins.pop().unwrap(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[vec![1; 64]]),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: crate::data::data_script(&DEVNET.magic, &payload).unwrap(),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([9; 20])),
+                },
+            ],
+        }
+    }
+
+    /// Runs `f` and returns its result with the number of forced-inclusion entries built from native transactions
+    /// meanwhile, on this thread.
+    fn forced_built<R>(f: impl FnOnce() -> R) -> (R, u64) {
+        crate::native::probe::FORCED_ENTRIES.with(|built| built.set(0));
+        let result = f();
+        (
+            result,
+            crate::native::probe::FORCED_ENTRIES.with(std::cell::Cell::get),
+        )
+    }
+
+    /// The roots of the forced-inclusion entries computed from the leaf hashes kept with the native transactions are
+    /// `entries_root` of the entries themselves, for every window (D-135).
+    #[test]
+    fn forced_roots_from_leaf_hashes_are_the_entries_roots() {
+        let mut snapshot = BtcSnapshot::testing(0);
+        for height in 0..=12u8 {
+            snapshot.push_block([height; 32], 0);
+        }
+        let native = |txid: u8, size: usize| NativeTx {
+            txid: [txid; 32],
+            op: native_op(u64::from(txid), size),
+            first_input: OutPoint {
+                txid: [txid ^ 0xff; 32],
+                vout: 0,
+            },
+            outputs: Vec::new(),
+        };
+        for (height, txid, size) in [
+            (1, 1, 0),
+            (3, 2, 10),
+            (3, 3, 100),
+            (4, 4, 1),
+            (7, 5, 7),
+            (7, 6, 3),
+            (7, 7, 0),
+            (11, 8, 50),
+        ] {
+            snapshot.push_native(height, native(txid, size));
+        }
+        for parent_anchor in 0..=12 {
+            for anchor in parent_anchor..=12 {
+                let forced = forced_at(&DEVNET, &snapshot, parent_anchor, anchor);
+                assert_eq!(
+                    snapshot.forced_root(&DEVNET, parent_anchor, anchor),
+                    entries_root(&forced).unwrap(),
+                    "window above {parent_anchor} up to {anchor}"
+                );
+                let leaves: Vec<_> = snapshot
+                    .forced_leaves(&DEVNET, parent_anchor, anchor)
+                    .collect();
+                assert_eq!(leaves.len(), forced.len());
+                for ((txid, leaf), entry) in leaves.into_iter().zip(&forced) {
+                    assert!(matches!(entry, Entry::Forced { btc_txid, .. } if btc_txid == txid));
+                    assert_eq!(*leaf, ksana_crypto::entry_leaf(entry).unwrap());
+                }
+            }
+        }
+        // a checkpoint does not keep the leaf hashes: they are computed again
+        let restored = BtcSnapshot::from_record(snapshot.record()).unwrap();
+        assert_eq!(
+            restored.forced_root(&DEVNET, 0, 12),
+            snapshot.forced_root(&DEVNET, 0, 12)
+        );
+    }
+
+    /// The scan's work does not grow with the size of the native ops in the forced-inclusion windows (D-135): each
+    /// native transaction's forced-inclusion entry is built once, when its BTC block is scanned, for its leaf hash.
+    /// Counting many headers over a window of large ops, checking the bodies carried for them, junk naming every op of
+    /// the window or matching, and carrying the same again in a later BTC block build none of them again.
+    #[test]
+    fn the_scan_builds_each_forced_entry_once_whatever_the_payloads_carry() {
+        let natives = 8u64;
+        let k = 60u64;
+        let mut btc = Btc::new(32);
+        // BTC block 4: native transactions with 20 000 bytes of arguments each; block 5 the anchor
+        let txs: Vec<Transaction> = (0..natives)
+            .map(|i| native_tx(&mut btc, i, 20_000))
+            .collect();
+        btc.btc.mine_block(txs.clone()).unwrap();
+        btc.btc.mine(1);
+        let tracker = btc.tracker();
+        let known = Accepts::default();
+        let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+        assert!(synced);
+        assert_eq!(built, natives, "one leaf hash per native transaction");
+        // a block on the genesis block anchored at 5 must force-include all of them (devnet: heights 1 to 5)
+        let anchor = btc.anchor(5);
+        let g = btc.genesis.clone();
+        let forced = forced_at(&DEVNET, &tracker.snapshot().unwrap(), 0, 5);
+        assert_eq!(forced.len(), 8);
+        let named: Vec<EntryData> = txs
+            .iter()
+            .map(|tx| EntryData::Forced { btc_txid: txid(tx) })
+            .collect();
+        let real_body: Vec<EntryData> = named.iter().cloned().chain(unlock(k)).collect();
+        let mut real_entries = forced.clone();
+        real_entries.extend(entries(&unlock(k)));
+        let real = BlockHeader {
+            entries_root: entries_root(&real_entries).unwrap(),
+            ..header(&[&g], &anchor, k, None)
+        };
+        let bare = BlockHeader {
+            entries_root: entries_root(&forced).unwrap(),
+            ..header(&[&g], &anchor, k + 1, None)
+        };
+        let junk: Vec<BlockHeader> = (0..k)
+            .map(|i| {
+                let mut root = [0xee; 32];
+                root[..8].copy_from_slice(&i.to_le_bytes());
+                BlockHeader {
+                    entries_root: root,
+                    ..header(&[&g], &anchor, i, None)
+                }
+            })
+            .collect();
+        // BTC block 6: the headers count; the one with only the forced-inclusion entries needs no body
+        let mut all = junk.clone();
+        all.extend([real.clone(), bare.clone()]);
+        btc.mine(&[republish(&all[..30], &[]), republish(&all[30..], &[])]);
+        let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+        assert!(synced);
+        assert_eq!(built, 0);
+        let snap = tracker.snapshot().unwrap();
+        assert!(junk
+            .iter()
+            .all(|h| snap.counted(&h.hash()).is_some_and(|c| c.settles)));
+        assert!(snap.counted(&real.hash()).is_some_and(|c| c.settles));
+        assert!(snap.counted(&bare.hash()).is_some_and(|c| !c.settles));
+        // BTC block 7, then 8 again: every junk header with a body naming every op of the window, which does not
+        // match, in two payloads; and the real body once
+        let junk_body: Vec<EntryData> = named.iter().cloned().chain(unlock(9_999)).collect();
+        let carried = |headers: &[BlockHeader]| {
+            let bodies: Vec<(usize, Vec<EntryData>)> =
+                (0..headers.len()).map(|i| (i, junk_body.clone())).collect();
+            republish(headers, &bodies)
+        };
+        let payloads = [
+            carried(&junk[..30]),
+            carried(&junk[30..]),
+            republish(slice::from_ref(&real), &[(0, real_body)]),
+        ];
+        for height in [7, 8] {
+            btc.mine(&payloads);
+            let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+            assert!(synced);
+            assert_eq!(built, 0, "BTC block {height}");
+            let snap = tracker.snapshot().unwrap();
+            assert!(junk.iter().all(|h| snap.landed_body(&h.hash()).is_none()));
+            assert_eq!(snap.block_data_height(&real.hash()), Some(7));
+        }
+        // the landed body decodes to the block's entries (decoding builds them)
+        let mut bodies = Bodies::new(DEVNET, g.hash());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(
+            *bodies.body(&snap, &real.hash()).unwrap().unwrap(),
+            real_entries
+        );
+        assert_eq!(*bodies.body(&snap, &bare.hash()).unwrap().unwrap(), forced);
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(48))]
 
         /// Counting depends only on the current BTC chain (D-135): whatever the order in which the headers and bodies
         /// are carried, how they are split into transactions and how BTC reorgs on the way (also below an anchor, and
         /// confirming the orphaned transactions again higher), a tracker that followed every step holds exactly what
-        /// a fresh tracker scanning the final chain once holds. Every header counted has its parents counted at or
+        /// a fresh tracker scanning the final chain once holds. The header DAG here prunes nothing: with pruning, a
+        /// header whose parent has left it does not count (D-135's rationale). Every header counted has its parents counted at or
         /// below its height and was accepted; every body landed matches its header and lands at or above it.
         #[test]
         fn counting_depends_only_on_the_current_chain(

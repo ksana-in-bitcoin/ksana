@@ -27,7 +27,8 @@ state root the nodes committed to.
   `check_meta`, the issuer capability bits `CAP_*` and the status flags `STATUS_*` with their names, D-121).
 - `ksana-crypto`: BIP340 tagged hash, Schnorr signing / verification, accounts (`account_of` = the BIP86 output key, i.e. the witness program of the Taproot address, D-092; account ↔ address
   and text parsing in `account.rs`), VmOp signatures (BIP340 with the tweaked private key; BIP322 simple accepts only the P2TR key-path of the account's address, `bip322.rs`, D-052, D-092;
-  the path C signing message ends with the first input of the carrying transaction, the `*_native_*` interfaces, D-086), Merkle utilities (`entries_root`, RFC 6962).
+  the path C signing message ends with the first input of the carrying transaction, the `*_native_*` interfaces, D-086), Merkle utilities (`entries_root`, RFC 6962; a root from leaf hashes,
+  `root_of_leaf_hashes`, and an entry's leaf hash, `entry_leaf`, D-135).
 - `ksana-state`: JMT (jmt 0.12) + RocksDB, version = fast-lane height, commit / rollback / pruning / fixed-version read view / clear (`reset`, for rebuilding from genesis, D-093),
   `state_root` (D-024), the root of a block's writes on top of an older kept version without committing them (`preview_root_at`, for the finality verdict, D-101); the RocksDB memory bounds every
   store of the node and the indexer opens with (`rocks.rs`: `DbMemory::open`, write buffers of 4 MiB per column family and 16 MiB per database, one 32 MiB block cache per process holding the
@@ -69,7 +70,8 @@ state root the nodes committed to.
   a body must fit in a payload alone, measured by the upper bound `max_body_len`, `check_body_fits`, and an attached payload's headers anchor at or below its block, `settlement_belongs_to`, D-100); the BTC tracker, snapshots, the settled closure, the backlog limit and the execution-layer view
   (`tracker.rs`, shared by node and indexer, D-049; a payload counts only when its headers anchor below its BTC height, `payload_counts`, D-100; a header in it counts once its anchor is on
   the BTC best chain, its parents have counted and `KnownBlocks::count` takes it, in any order within one BTC block, `Counted` with its landing and whether its block settles, and a body lands only
-  with its counted header and only when it matches the header's `entries_root`, `LandedBody`, the transaction kept once for all the bodies it lands; nothing waits for a parent, D-135; a `Landing`
+  with its counted header and only when it matches the header's `entries_root`, `LandedBody`, the transaction kept once for all the bodies it lands; nothing waits for a parent; the roots
+  computed from the leaf hash kept with each native transaction, `forced_leaf`, a body's with `bodies::converted_root`, so no native op is copied again, D-135; a `Landing`
   for the time a block's data lands on chain (height, index within the block, payload sender `Sender`) and the carrier determination
   `carrier_of` / `BtcView::carrier` (`AnchoredView` needs the network params), D-095; the unlockable segment `unlock_segment` and the producer's unlock target `unlock_target`, D-079;
   `AnchoredView::history` for syncing historical blocks, answering from the current chain when the anchor block has been reorged away on BTC, D-056;

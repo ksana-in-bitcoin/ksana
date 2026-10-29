@@ -4979,10 +4979,12 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   9. **Restart**: a chain built under the old rules can hold landings, unlocks and carriers that the new rules place later, so devnet and signet restart from genesis (`signet/README.md`,
      "Restarting from genesis"); mainnet has not started. Signet's PoW limit is raised in the same restart (D-136).
 - **Rationale**: whether a header counts is now a function of the current BTC chain alone, not of the order in which a node learned the blocks nor of the BTC chains it saw before, so a running
-  node, a restarted one and a fresh indexer agree without any state to carry. Nothing waits, so nothing needs a bound: every header in memory paid a valid PoW, and what remains is that PoW's price
-  (below). Honest payloads are closed: a producer carries the headers its block needs that have not counted, and a republish run from the first block whose data has not landed holds every parent
-  it needs, so the data landing height is unchanged while settlements confirm in order, and can only come later otherwise. The fixpoint within a BTC block lets headers be split across
-  transactions of one block in any order, which miners decide.
+  node, a restarted one and a fresh indexer agree without any state to carry. Pruning is the one exception, and it decides nothing: a header whose parent has left the header DAG with pruning
+  (D-097) does not count, while it counts on a node that has not pruned that far; such a header can be neither on nor merged by a chain through the final blocks (the merge-depth root rule), so
+  no outcome depends on it. Nothing waits, so nothing needs a bound: every header in memory paid a valid PoW, and what remains is that PoW's price (below). Honest payloads are closed: a
+  producer carries the headers its block needs that have not counted, and a republish run from the first block whose data has not landed holds every parent it needs, so the data landing height
+  is unchanged while settlements confirm in order, and can only come later otherwise. The fixpoint within a BTC block lets headers be split across transactions of one block in any order, which
+  miners decide.
 - **Alternatives**: the audit's suggestion, checking a header before holding it pending (parent count, version, `bits`, PoW at weight 1) and capping the pending set by count and bytes: the check
   costs about 2 Argon2id evaluations per header on signet, and a full cap has to drop headers, valid ones included. Keeping the pending headers on disk instead of in memory (no protocol change):
   memory is bounded, but disk use and rescans still grow with what an attacker pays for, and the checkpoint and restart logic grows. Requiring a parent in an earlier transaction of the block:
@@ -4995,15 +4997,19 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   landing height, so they come later in those cases too. Not addressed (the second audit's A2-07): valid side-branch headers forked from an old block, whose difficulty falls to the PoW limit,
   still count and stay until pruning. With devnet's limit, which signet took until now, that was about 2 Argon2id evaluations per header of a non-empty block, about 85 000 such headers (about
   85 MB) per full BTC block, or about 250 000 headers of empty blocks (about 250 MB) at 12 to 120 times the work; on mainnet at least about 65 536 evaluations per header. The same headers can
-  land junk bodies, about 4 MB of transaction bytes per full BTC block. D-136 raises signet's PoW limit against it; not counting side headers below the finalized tip beyond the merge depth (below
-  the finalized tip alone would split nodes, since a block may still merge headers below it but above the merge-depth root) is a separate design, not adopted. The restart clears balances and
-  contracts on signet.
-- **Impact**: `crates/ksana-btc` (`tracker.rs`: the scan by BTC block, `KnownBlocks`, `unresolved` and `resolve*` gone; `headers.rs`: `Pending` gone, the counting rule; `finality.rs`: `connect`;
-  `bodies.rs`: candidates and the anchor-invalid derivation gone, bodies checked at the scan and kept encoded; `prune.rs` and the checkpoint records); `crates/ksana-node` (`chain.rs`: `KnownBlocks`,
-  `payload_carry`, `process_settlements`, `CHECKPOINT_VERSION` 3; `rescue.rs`: the stuck settlement and the republish condition; `btc.rs`; the memory profile's snapshot); `crates/ksana-indexer`
-  (`known.rs`, the checkpoint); tests (a property test of the tracker, adversarial payloads, regtest scenarios); SPEC (the preamble and its version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6,
-  §10.2, §10.3, §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07, A2-10, A2-15, A2-19, F-03, F-25, F-26, F-35); the site's
-  pages on how it works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
+  land junk bodies, about 4 MB of transaction bytes per full BTC block. D-136 raises signet's PoW limit against it; not counting side headers below the finalized tip beyond the merge depth
+  (below the finalized tip alone would split nodes, since a block may still merge headers below it but above the merge-depth root) is a separate design, not adopted. Scanning a BTC block costs
+  about the bytes of its payloads: the leaf hash each native transaction adds to `entries_root` as a forced-inclusion entry is computed once, when its BTC block is scanned, and kept with it
+  (32 bytes); whether a counted block needs a body is decided from the leaf hashes of its window, one hash per native transaction for each distinct window among the headers counting in that
+  BTC block; and a carried body is checked from its own entries and those leaf hashes. No native op is copied or encoded again, however many headers or bodies name it, so neither the time nor
+  the memory of a scan grows with the size of the ops a window holds. The restart clears balances and contracts on signet.
+- **Impact**: `crates/ksana-btc` (`tracker.rs`: the scan by BTC block, `KnownBlocks`, `unresolved` and `resolve*` gone, the native transactions kept with their leaf hashes; `headers.rs`:
+  `Pending` gone, the counting rule; `finality.rs`: `connect`; `bodies.rs`: candidates and the anchor-invalid derivation gone, bodies checked at the scan from leaf hashes (`converted_root`)
+  and kept encoded; `native.rs`: `forced_leaf`; `prune.rs` and the checkpoint records); `crates/ksana-crypto` (`merkle.rs`: `leaf_hash`, `entry_leaf`, `root_of_leaf_hashes`, the same roots);
+  `crates/ksana-node` (`chain.rs`: `KnownBlocks`, `payload_carry`, `process_settlements`, `CHECKPOINT_VERSION` 3; `rescue.rs`: the stuck settlement and the republish condition; `btc.rs`; the
+  memory profile's snapshot); `crates/ksana-indexer` (`known.rs`, the checkpoint); tests (a property test of the tracker, adversarial payloads, regtest scenarios); SPEC (the preamble and its
+  version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6, §10.2, §10.3, §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07,
+  A2-10, A2-15, A2-19, F-03, F-25, F-26, F-35); the site's pages on how it works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
 
 ## D-136 Signet's PoW limit is raised to `0x1f0fffff`, about 4 096 Argon2id evaluations per block at the limit (the part of the second internal audit's A2-07 that D-135 leaves, 2026-10-29, chosen by the project owner with D-135; revises D-055 and SPEC §6.6, §13, §13.1, §16, §17.5; a consensus change for signet only, at the restart of D-135, M51)
 

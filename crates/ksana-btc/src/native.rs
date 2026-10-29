@@ -16,7 +16,8 @@ use std::ops::RangeInclusive;
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Transaction, Txid};
-use ksana_primitives::{Entry, FeeMode, OutPoint, Params, Payload, VmOp};
+use ksana_crypto::entry_leaf;
+use ksana_primitives::{CodecError, Entry, FeeMode, OutPoint, Params, Payload, VmOp};
 
 use crate::data::{tx_data, tx_payload, Carrier, TxData};
 
@@ -146,12 +147,35 @@ pub fn forced_heights(
 /// Generates forced-inclusion entries `Entry::Forced { btc_txid, op }` in the given order (ascending BTC height,
 /// ascending index within the block).
 pub fn forced_entries<'a>(txs: impl IntoIterator<Item = &'a NativeTx>) -> Vec<Entry> {
-    txs.into_iter()
-        .map(|tx| Entry::Forced {
-            btc_txid: tx.txid,
-            op: tx.op.clone(),
-        })
-        .collect()
+    txs.into_iter().map(forced_entry).collect()
+}
+
+/// The leaf hash the forced-inclusion entry of `tx` adds to the `entries_root` of a block that includes it
+/// ([`ksana_crypto::entry_leaf`]): the BTC tracker computes it once, when it scans the transaction's BTC block, and
+/// computes from it every root over the entries a block must force-include (D-135).
+pub fn forced_leaf(tx: &NativeTx) -> Result<[u8; 32], CodecError> {
+    entry_leaf(&forced_entry(tx))
+}
+
+fn forced_entry(tx: &NativeTx) -> Entry {
+    #[cfg(test)]
+    probe::FORCED_ENTRIES.with(|built| built.set(built.get().saturating_add(1)));
+    Entry::Forced {
+        btc_txid: tx.txid,
+        op: tx.op.clone(),
+    }
+}
+
+/// Test hooks, per thread.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        /// The forced-inclusion entries built from native transactions ([`super::forced_entries`],
+        /// [`super::forced_leaf`]).
+        pub(crate) static FORCED_ENTRIES: Cell<u64> = const { Cell::new(0) };
+    }
 }
 
 /// Checks that the block's entries start with `expected` (the result of [`forced_entries`]), equal one by one (both
