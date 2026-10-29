@@ -15,7 +15,7 @@ settles the blocks; the native token is KSA. The public test network is the sign
 - Docs: https://ksana.network/docs/ (writing contracts: https://ksana.network/docs/contracts/, the SDK:
   https://ksana.network/docs/contract-sdk/, a first contract in the playground: https://ksana.network/docs/first-contract/)
 - This file: https://ksana.network/llms-contracts.txt
-- Source: https://github.com/ksana-in-bitcoin/Ksana (the SDK in `crates/ksana-contract-sdk`, the VM interface in
+- Source: https://github.com/ksana-in-bitcoin/ksana (the SDK in `crates/ksana-contract-sdk`, the VM interface in
   `docs/ABI.md`, the token standards in `docs/STANDARDS.md`, the example contracts in `contracts/examples`)
 
 ## Rules for the assistant
@@ -281,7 +281,7 @@ fn every_account_votes_once() {
 
 You need Rust 1.98.1 with the `wasm32-unknown-unknown` target, and a clone of the repository: the SDK is not on
 crates.io. Put the project next to the clone, not inside it, so that Cargo does not take it for a member of the
-repository's workspace (`work/Ksana/` and `work/poll/`):
+repository's workspace (`work/ksana/` and `work/poll/`):
 
 ```toml
 # Cargo.toml
@@ -296,7 +296,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ksana-contract-sdk = { path = "../Ksana/crates/ksana-contract-sdk" }
+ksana-contract-sdk = { path = "../ksana/crates/ksana-contract-sdk" }
 # a contract built on the token standards (ks20, ks721, standard) adds: features = ["standards"]
 
 [profile.release]
