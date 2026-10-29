@@ -1,0 +1,19 @@
+name: Ksana code scanning
+
+# Read by .github/workflows/codeql.yml. Code scanning covers the code that ships and leaves test code out: the tests use
+# fixed keys, nonces and seeds on purpose, and the queries for hard-coded credentials would report each one. paths-ignore
+# leaves out whole files; the Rust unit tests in #[cfg(test)] modules beside the code are left out by the workflow, which
+# turns cfg(test) off for the Rust extractor.
+paths-ignore:
+  # Rust: the integration tests of the crates and the example contracts, the workspace's integration tests in tests/,
+  # and ksana-state's src/tests/ (a #[cfg(test)] module)
+  - '**/tests/**'
+  # Rust: the crates that exist only for the tests (the example contracts built as constants for the tests, and the
+  # execution layer's test contracts) and the cargo-fuzz workspace
+  - crates/ksana-test-contracts/**
+  - contracts/testing/**
+  - fuzz/**
+  # TypeScript: the test suites of the SDK, the signet's services and the playground's compile service, and the
+  # playground's tests beside the code
+  - '**/test/**'
+  - '**/*.test.ts'

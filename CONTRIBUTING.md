@@ -50,6 +50,11 @@ cargo run --release --manifest-path fuzz/Cargo.toml --example differential
 (cd fuzz && cargo +nightly fuzz run host_params -- -max_total_time=60)
 ```
 
+CodeQL scans the Rust, TypeScript and workflow code that ships on every pull request and every push to main
+(`.github/workflows/codeql.yml`). Test code is left out (`.github/codeql/codeql-config.yml`, and `cfg(test)` is off for
+Rust), since the tests use fixed keys and nonces on purpose. CodeQL's default setup stays disabled in the repository's
+settings: GitHub refuses this workflow's results while it is enabled.
+
 Longer runs that CI does not start on every push:
 
 ```sh

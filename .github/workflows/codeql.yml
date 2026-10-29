@@ -1,0 +1,52 @@
+name: CodeQL
+
+# Code scanning of the code that ships. This workflow takes the place of CodeQL's default setup, which scans every file
+# and cannot leave test code out: the tests use fixed keys, nonces and seeds on purpose, and the queries for hard-coded
+# credentials report each of them as a critical alert, on main and again on every pull request that adds a test. What
+# is left out is in .github/codeql/codeql-config.yml. Default setup stays disabled in the repository's settings (Advanced
+# Security, CodeQL analysis): while it is enabled, GitHub refuses the results of this workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, as default setup did, so that new queries also reach the code that has not changed
+    - cron: '30 3 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # The languages default setup found, without Python: the only Python file is a reference script in
+        # ksana-consensus's test data.
+        language: [actions, javascript-typescript, rust]
+    env:
+      # The Rust extractor turns cfg(test) on, which brings in the unit tests in the #[cfg(test)] modules beside the
+      # code; paths-ignore can only leave out whole files, so cfg(test) is turned off instead. With build mode none the
+      # extractor runs in the analyze step, hence the job's environment.
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: -test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
