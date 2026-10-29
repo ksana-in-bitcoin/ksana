@@ -101,4 +101,6 @@ when the service starts otherwise, after a change to the contracts workspace or 
 slots when it is built, and checks there that every example's own source gives the module the playground ships,
 `KSANA_COMPILER_SHIPPED`). `npm test` in `playground/` runs
 `test/build.test.mjs`, which builds every example in a slot of its own and compares it with the shipped module (skipped with
-`KSANA_COMPILER_SKIP_CARGO=1`), and `test/service.test.mjs`, the HTTP side with a stand-in builder.
+`KSANA_COMPILER_SKIP_CARGO=1`), and `test/service.test.mjs`, the HTTP side with a stand-in builder. The builds are offline, as
+the service's are, so the contracts workspace's crates must be in the cargo home first:
+`cargo fetch --locked --manifest-path contracts/Cargo.toml` from the repository's root, as CI does.
