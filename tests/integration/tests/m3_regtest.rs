@@ -35,6 +35,7 @@ use bitcoin::{
 };
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use ksana_btc::client::RpcClient;
+use ksana_btc::payload::{attached_payload, envelope_payload};
 use ksana_btc::settlement::{self as btc_settlement, SettlementPair};
 use ksana_crypto::{account_of, keypair_from_secret, sign_native_vmop, sign_vmop};
 use ksana_execution::{BlockError, BtcView};
@@ -363,6 +364,22 @@ fn decode_pair(s: &SettlementJson) -> SettlementPair {
 
 fn txid_of(s: &SettlementJson) -> Txid {
     Txid::from_byte_array(s.txid.expect("the block carries settlement transactions"))
+}
+
+/// A transaction in bitcoind's mempool other than `except` whose envelope carries `payload` (a reveal transaction).
+fn payload_in_mempool(btc: &Btc, payload: &[u8], except: &Txid) -> Option<Transaction> {
+    let ids = btc.call("getrawmempool", &[]);
+    ids.as_array()
+        .unwrap()
+        .iter()
+        .filter(|id| id.as_str() != Some(except.to_string().as_str()))
+        .filter_map(|id| {
+            let hex = btc
+                .try_call("getrawtransaction", std::slice::from_ref(id))
+                .ok()?;
+            deserialize_hex::<Transaction>(hex.as_str()?).ok()
+        })
+        .find(|tx| envelope_payload(&DEVNET, tx).is_some_and(|carried| carried == payload))
 }
 
 /// The sum of the previous outputs' amounts (read from bitcoind).
@@ -899,7 +916,7 @@ fn unlock_requires_a_confirmed_settlement_inside_the_settled_prefix() {
     let (x2, fee2) = blocks[1].clone();
     assert!(x1.height < x2.height);
     let s1 = fast.wait_settlement(x1.height, SettlementState::Broadcast);
-    fast.wait_settlement(x2.height, SettlementState::Broadcast);
+    let s2 = fast.wait_settlement(x2.height, SettlementState::Broadcast);
     // The sponsored fee is recorded at the block's acceptance position when received; the RPC's locked balance adds
     // the block reward that will be paid at unlock (D-074, D-079)
     let reward = DEVNET.block_reward;
@@ -911,19 +928,26 @@ fn unlock_requires_a_confirmed_settlement_inside_the_settled_prefix() {
     let err = unlock_accepted(&fast, x1.hash).unwrap_err();
     assert!(!err.is_empty());
 
-    // Confirm only X2's settlement (X1's stays in the mempool with lowered priority): X2 is not in the settled
-    // prefix, still cannot unlock
+    // Confirm only X2's settlement (X1's stays in the mempool with lowered priority): its payload counts, but X2's
+    // header does not, since X1's has not (D-135): it lands nothing, X2 is not in the settled prefix, and it still
+    // cannot unlock
     btc.call(
         "prioritisetransaction",
         &[json!(txid_of(&s1).to_string()), json!(0), json!(-100_000)],
     );
     mine(&btc, 1);
-    fast.wait_settlement(x2.height, SettlementState::Confirmed);
-    assert_eq!(
-        fast.settlement(x1.height).status,
-        SettlementState::Broadcast
-    );
-    assert!(!fast.settlement(x2.height).settled);
+    let s2_txid = s2.txid.expect("the block carries settlement transactions");
+    wait("X2's settlement to count", Duration::from_secs(60), || {
+        let snapshot = fast.node().chain().btc().snapshot().ok()?;
+        snapshot.ksn1_height(&s2_txid).map(|_| ())
+    });
+    let snapshot = fast.node().chain().btc().snapshot().unwrap();
+    assert_eq!(snapshot.counted_at(&x2.hash), None);
+    for x in [&x1, &x2] {
+        let s = fast.settlement(x.height);
+        assert_eq!(s.status, SettlementState::Broadcast);
+        assert!(!s.settled);
+    }
     unlock_accepted(&fast, x2.hash).unwrap_err();
     let before = fast.tip_height();
     fast.wait_height(before + 3);
@@ -933,21 +957,41 @@ fn unlock_requires_a_confirmed_settlement_inside_the_settled_prefix() {
         "the producer does not write an invalid unlock entry"
     );
 
-    // After X1's settlement confirms too: both blocks enter the settled prefix, the producer writes an unlock entry,
-    // and the token fees become available balance
+    // After X1's settlement confirms, X1 lands, and the node sends X2's payload again, unchanged (D-135); once that
+    // confirms, both blocks are in the settled prefix, the producer writes unlock entries up to X2, and the token fees
+    // become available balance
     btc.call(
         "prioritisetransaction",
         &[json!(txid_of(&s1).to_string()), json!(0), json!(100_000)],
     );
     mine(&btc, 1);
     fast.wait_settlement(x1.height, SettlementState::Confirmed);
+    let payload = attached_payload(&DEVNET, &decode_pair(&s2)).unwrap();
+    let reveal = wait("X2's payload sent again", Duration::from_secs(60), || {
+        payload_in_mempool(&btc, &payload, &txid_of(&s2))
+    });
+    // Only that pair: the settlement of a block unlocking up to X1 meanwhile keeps waiting, so that nothing after X2
+    // lands
+    let commit = reveal.input[0].previous_output.txid;
+    btc.call(
+        "generateblock",
+        &[
+            json!(btc.new_address()),
+            json!([commit.to_string(), reveal.compute_txid().to_string()]),
+        ],
+    );
+    let s2 = fast.wait_settlement(x2.height, SettlementState::Confirmed);
+    assert_eq!(
+        s2.confirmed.map(|c| c.txid),
+        Some(reveal.compute_txid().to_byte_array())
+    );
     wait("the unlock", Duration::from_secs(60), || {
         (fast.locked(&fast.producer, &x1.hash).is_none()
             && fast.locked(&fast.producer, &x2.hash).is_none())
         .then_some(())
     });
-    // The headers of the empty blocks before X2 are carried by X1's and X2's settlement payloads: one entry unlocks
-    // up to X2, and the sponsored fees are unlocked together with the block rewards of blocks 1-X2; each block's
+    // The headers of the empty blocks before X2 are carried by X1's and X2's settlement payloads: the unlock entries
+    // reach X2, and the sponsored fees are unlocked together with the block rewards of blocks 1-X2; each block's
     // reward is weighted (an empty block counts 12, 24, ... shares by streak, D-084, D-090; on a single producer's
     // linear chain the streak carries over from the previous block)
     let mut streak = 0;
@@ -966,7 +1010,12 @@ fn unlock_requires_a_confirmed_settlement_inside_the_settled_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(unlocks, vec![position(&fast, &x2.hash)]);
+    // X1 lands a BTC block before X2: the producer may unlock up to X1 in between, then up to X2
+    let last = position(&fast, &x2.hash);
+    assert!(
+        unlocks == vec![last] || unlocks == vec![position(&fast, &x1.hash), last],
+        "{unlocks:?}"
+    );
     // The same block cannot be unlocked twice
     let again = unlock_accepted(&fast, x1.hash).unwrap_err();
     assert!(!again.is_empty());
