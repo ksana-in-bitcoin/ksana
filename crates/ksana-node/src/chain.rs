@@ -1116,8 +1116,15 @@ impl Chain {
                             .into(),
                     ));
                 }
-                let root = state.commit(0, &genesis_writes)?;
+                // The genesis block is built before the genesis state is written, as the indexer does: a config it
+                // cannot be built from (`bits` above the PoW limit, allocations above the supply) leaves nothing behind
+                let root = state.preview_root(&genesis_writes)?;
                 let header = genesis_file.header(&params, root)?;
+                if state.commit(0, &genesis_writes)? != root {
+                    return Err(NodeError::Storage(
+                        "the root of the genesis state does not match the precomputed one".into(),
+                    ));
+                }
                 let block = Block {
                     header,
                     entries: Vec::new(),
