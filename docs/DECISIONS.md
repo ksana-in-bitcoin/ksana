@@ -5025,5 +5025,6 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   the merge depth: a rule of its own, not adopted (D-135, costs).
 - **Costs**: tools that took signet's parameters to be devnet's but for the chain ID and the anchor depth must take the new limit; the TS SDK carries it, and the web wallet, which pins this
   repository, takes it with its submodule. A side-branch header at the limit costs anyone about 2 000 times more CPU, honest producers nothing.
-- **Impact**: `ksana-primitives` (`SIGNET` and its tests), the TS SDK (`SIGNET`, `params.test.ts`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5); SIGNET; the
-  site's pages on the parameters, the signet and mining; ksana-web's submodule.
+- **Impact**: `ksana-primitives` (`SIGNET` and its tests), the TS SDK (`SIGNET`, `params.test.ts`); the PoW vectors' signet case, whose header has devnet's `bits`, keeps its values
+  and is judged against devnet's limit (`gen_pow_vectors`, the case's note in `tests/vectors/pow.json`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5);
+  SIGNET; the site's pages on the parameters, the signet and mining; ksana-web's submodule.

@@ -199,6 +199,12 @@ test('the carrier reward is taken per slot from the producer portion and the spo
   assert.throws(() => carrierFeeAt(p, 0n, -1n), RangeError);
 });
 
+test('signet parameters: differ from devnet only in the chain ID (D-055) and the PoW limit (D-136)', () => {
+  assert.equal(SIGNET.chain_id, 1002);
+  assert.equal(SIGNET.pow_limit_bits, 0x1f0f_ffff);
+  assert.deepEqual({ ...SIGNET, chain_id: DEVNET.chain_id, pow_limit_bits: DEVNET.pow_limit_bits }, DEVNET);
+});
+
 test('mainnet parameters (D-096): chain ID 1000, differs from devnet only in the items §13 lists and the block share placeholders (D-134), total rewards exactly equal the max supply (D-089, D-105)', () => {
   assert.equal(MAINNET.chain_id, 1000);
   assert.equal(MAINNET.native_confirmations, 3);

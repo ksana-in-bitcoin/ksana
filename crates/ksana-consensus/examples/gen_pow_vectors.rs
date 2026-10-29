@@ -176,8 +176,13 @@ fn main() {
         },
         Case {
             name: "signet-salt",
-            note: "the same non-empty block header on signet (chain ID 1002): different salt, different value",
-            params: SIGNET,
+            note: "the same non-empty block header with signet's chain ID 1002: different salt, different value \
+                   (judged against devnet's PoW limit, since its bits are above signet's, D-136)",
+            // The header's bits are devnet's limit, above signet's own (D-136): the case is about the salt
+            params: Params {
+                pow_limit_bits: DEVNET.pow_limit_bits,
+                ..SIGNET
+            },
             header: nonempty.clone(),
             weight: 1,
         },

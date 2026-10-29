@@ -2,7 +2,7 @@
  * Protocol parameters (SPEC §13), one-to-one with `crates/ksana-primitives/src/params.rs`.
  *
  * - `DEVNET`: the devnet defaults (chain ID 1001).
- * - `SIGNET`: the network on BTC signet; differs from `DEVNET` only in the chain ID (1002, D-055).
+ * - `SIGNET`: the network on BTC signet; differs from `DEVNET` only in the chain ID (1002, D-055) and the PoW limit (0x1f0fffff, D-136).
  * - `MAINNET`: mainnet (chain ID 1000, D-096): 3 confirmations for path C, PoW limit 0x1f00ffff, KSA issuance per D-089 and D-105, placeholders for the
  *   block share, which is not published yet (D-134); everything else as `DEVNET`.
  *
@@ -216,8 +216,11 @@ export const DEVNET: Params = Object.freeze({
   upgrades: Object.freeze([]),
 });
 
-/** The signet parameters: differ from devnet only in the chain ID (D-055). */
-export const SIGNET: Params = Object.freeze({ ...DEVNET, chain_id: 1002 });
+/**
+ * The signet parameters: differ from devnet only in the chain ID (D-055) and the PoW limit 0x1f0fffff (a target of about 2^244, about 4 096 Argon2id evaluations
+ * per block at the limit, D-136); Rust's `SIGNET` also differs in `ANCHOR_DEPTH` (D-056), which the SDK does not carry.
+ */
+export const SIGNET: Params = Object.freeze({ ...DEVNET, chain_id: 1002, pow_limit_bits: 0x1f0f_ffff });
 
 /**
  * Mainnet parameters (the mainnet column of SPEC §13, D-096), identical to Rust's `MAINNET` in the fields the SDK carries. Differences from devnet: chain ID 1000; `NATIVE_CONFIRMATIONS` 3
