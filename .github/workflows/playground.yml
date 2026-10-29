@@ -40,6 +40,10 @@ jobs:
       # The toolchain of rust-toolchain.toml with its wasm32 target, for the compile service's builds
       - name: Install the Rust toolchain
         run: rustup toolchain install
+      # The compile service builds offline, as its image does after fetching the contracts workspace's crates
+      # (signet/Dockerfile): the same crates go into this runner's cargo home first
+      - name: Fetch the contracts workspace's crates
+        run: cargo fetch --locked --manifest-path contracts/Cargo.toml
       - name: Build the TypeScript SDK
         working-directory: sdk/ts
         run: |
