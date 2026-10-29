@@ -67,7 +67,7 @@ transaction's witness (D-081), which every version relays.
 Ubuntu 22.04 with the Rust toolchain of `rust-toolchain.toml` (on Linux the build also needs `make` and `clang`, D-103):
 
 ```sh
-git clone https://github.com/ksana-in-bitcoin/Ksana && cd Ksana
+git clone https://github.com/ksana-in-bitcoin/ksana && cd ksana
 cargo build --release -p ksana-node -p ksana-indexer -p ksana-cli --bins
 target/release/ksana-node --chain signet --data-dir ~/ksana-signet/node --genesis signet/genesis.json \
     --btc-rpc-url http://127.0.0.1:38332 --btc-rpc-user ksana --btc-rpc-pass <password> \

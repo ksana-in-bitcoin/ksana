@@ -22,7 +22,7 @@ import { addInstance, forgetInstance, selectInstance, useInstances, type Instanc
 import { TABS, navigate, shareLink, useRoute, type Tab } from './route';
 import { useStore } from './store';
 
-const REPO = 'https://github.com/ksana-in-bitcoin/Ksana';
+const REPO = 'https://github.com/ksana-in-bitcoin/ksana';
 
 function docsLink(locale: string): string {
   return locale === 'zh-CN' ? 'https://ksana.network/zh/docs/playground/' : 'https://ksana.network/docs/playground/';
