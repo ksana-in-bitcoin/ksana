@@ -5011,7 +5011,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6, §10.2, §10.3, §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07,
   A2-10, A2-15, A2-19, F-03, F-25, F-26, F-35); the site's pages on how it works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
 
-## D-136 Signet's PoW limit is raised to `0x1f0fffff`, about 4 096 Argon2id evaluations per block at the limit (the part of the second internal audit's A2-07 that D-135 leaves, 2026-10-29, chosen by the project owner with D-135; revises D-055 and SPEC §6.6, §13, §13.1, §16, §17.5; a consensus change for signet only, at the restart of D-135, M51)
+## D-136 Signet's PoW limit is raised to `0x1f0fffff`, about 4 096 Argon2id evaluations per block at the limit (the part of the second internal audit's A2-07 that D-135 leaves, 2026-10-29, chosen by the project owner with D-135; revises D-055, D-107's rehearsal and SPEC §6.6, §13, §13.1, §16, §17.5; a consensus change for signet only, at the restart of D-135, M51)
 
 - **Problem**: D-135 holds nothing for a header that does not count, but a valid header counts and stays until pruning (D-097). A side branch forked from an old block has its difficulty fall as
   its timestamps run ahead of its blocks (ASERT, SPEC §6.7), down to the PoW limit, and signet took devnet's limit `0x207fffff`, a target of about 2^255: a header there takes about 2 Argon2id
@@ -5030,7 +5030,12 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   A limit close to signet's current difficulty (about 16 000): too little room for ASERT to lower the difficulty when a producer stops. Not counting side headers below the finalized tip beyond
   the merge depth: a rule of its own, not adopted (D-135, costs).
 - **Costs**: tools that took signet's parameters to be devnet's but for the chain ID and the anchor depth must take the new limit; the TS SDK carries it, and the web wallet, which pins this
-  repository, takes it with its submodule. A side-branch header at the limit costs anyone about 2 000 times more CPU, honest producers nothing.
+  repository, takes it with its submodule. A side-branch header at the limit costs anyone about 2 000 times more CPU, honest producers nothing. The rehearsal (`signet/rehearse.sh`, D-107) can no
+  longer start its private signet below the limit: its genesis takes the limit itself, about 4 096 evaluations a block instead of 250, and its private signet mines every 30 seconds instead of
+  15, so that `SETTLEMENT_TIMEOUT` (6 BTC blocks) still covers the 2 blocks a settlement waits for, on an idle chain empty blocks of weights 12 and 24, about 2 minutes on one core; its timeout
+  grows from 45 to 60 minutes. The rehearsal's first run against the new limit also showed that a node refused a genesis `bits` above the limit only after writing the genesis state, leaving a
+  data directory it could not start from again; it now builds the genesis block before writing anything, as the indexer does.
 - **Impact**: `ksana-primitives` (`SIGNET` and its tests), the TS SDK (`SIGNET`, `params.test.ts`); the PoW vectors' signet case, whose header has devnet's `bits`, keeps its values
-  and is judged against devnet's limit (`gen_pow_vectors`, the case's note in `tests/vectors/pow.json`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5);
-  SIGNET; the site's pages on the parameters, the signet and mining; ksana-web's submodule.
+  and is judged against devnet's limit (`gen_pow_vectors`, the case's note in `tests/vectors/pow.json`); `ksana-node` (`Chain::open_with`: the genesis block built before the genesis state
+  is written, `m18_rebuild`); the rehearsal (`signet/rehearse.sh`, `rehearsal.yml`, `signet/README.md`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5); SIGNET;
+  the site's pages on the parameters, the signet and mining; ksana-web's submodule.
