@@ -123,10 +123,11 @@ fn carried_bodies(
         .collect()
 }
 
-/// Which blocks' bodies a payload carries (D-077): (block hash, entries). The block referred to by the last header of
-/// a settlement payload (this block) comes first, with its `entries`; then the blocks in `bodies`. Native transaction
-/// payloads carry no bodies.
-pub fn bodies_in(payload: &Payload) -> Vec<([u8; 32], &[EntryData])> {
+/// Where the bodies a payload carries are (D-077): for each, the index of its block's header in the payload and its
+/// entries. The block referred to by the last header of a settlement payload (this block) comes first, with its
+/// `entries`; then the items of `bodies`. Native transaction payloads carry no bodies. A body's position in this list
+/// is its slot ([`crate::tracker::LandedBody`]).
+pub fn bodies_at(payload: &Payload) -> Vec<(usize, &[EntryData])> {
     let (headers, own, bodies) = match payload {
         Payload::Settlement {
             headers,
@@ -138,12 +139,25 @@ pub fn bodies_in(payload: &Payload) -> Vec<([u8; 32], &[EntryData])> {
         } => (headers, None, bodies),
         Payload::NativeOp { .. } => return Vec::new(),
     };
-    let own = own.and_then(|entries| Some((headers.last()?.hash(), entries.as_slice())));
+    let own = own.and_then(|entries| Some((headers.len().checked_sub(1)?, entries.as_slice())));
     own.into_iter()
         .chain(bodies.iter().filter_map(|body| {
-            let header = headers.get(usize::try_from(body.header).ok()?)?;
-            Some((header.hash(), body.entries.as_slice()))
+            let index = usize::try_from(body.header).ok()?;
+            headers.get(index)?;
+            Some((index, body.entries.as_slice()))
         }))
+        .collect()
+}
+
+/// Which blocks' bodies a payload carries (D-077): (block hash, entries), in the order of [`bodies_at`].
+pub fn bodies_in(payload: &Payload) -> Vec<([u8; 32], &[EntryData])> {
+    let headers = match payload {
+        Payload::Settlement { headers, .. } | Payload::Headers { headers, .. } => headers,
+        Payload::NativeOp { .. } => return Vec::new(),
+    };
+    bodies_at(payload)
+        .into_iter()
+        .filter_map(|(index, entries)| Some((headers.get(index)?.hash(), entries)))
         .collect()
 }
 

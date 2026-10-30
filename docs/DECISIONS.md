@@ -4943,3 +4943,99 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
 - **Impact**: `ksana-primitives` (`MAINNET`, the devnet comment, the tests of the mainnet parameters, of mainnet's issuance and of the carrier); `ksana-execution`
   (`GenesisFile::check_network` and its tests); the TS SDK (`MAINNET`, `params.test.ts`); `mainnet/README.md`; SPEC (the preamble and its version history, §6.1, §8.6, §13, §13.1, §14, §17);
   DECISIONS (the header, D-089, D-095, D-096, D-105, this entry).
+
+## D-135 A header counts on BTC only once its parents have counted: no pending headers, bodies checked when they land, and payloads that carry every header their block needs (the second internal audit's A2-10, 2026-10-29, chosen by the project owner; revises D-077, D-082, D-093, D-095, D-097, D-098, D-100, D-101 and SPEC §6.4, §6.5, §7.1, §7.3, §7.5, §7.6, §10.2, §10.3, §15, §16, §17, `docs/RPC.md`; consensus change, devnet and signet restart from genesis, M51)
+
+- **Problem**: the second internal audit's A2-10. A header in a payload that counts joined the header DAG once its parents had appeared on BTC; until then it was held pending, with no PoW,
+  parent-count, version or `bits` check, until the pruning point's anchor passed the header's own anchor, which an attacker sets just below the payload's height. Back-referenced parents cost one
+  or two bytes in a payload and 32 bytes plus an index entry in memory, so anyone paying BTC fees could hold roughly 150 to 250 MB on every node and indexer per BTC block of such payloads for about a
+  day, for good with `--no-pruning`, written into every checkpoint (the residual of the first audit's F-25 and F-35). The tracker also kept the payloads whose bodies it could not resolve yet, and
+  the bodies kept candidates for every header hash without a cap. A body once determined was kept decoded, about 270 bytes for an unlock entry of 3 to 6 bytes in the payload, so one valid header
+  with a body of junk entries matching its own `entries_root` held about 7 MB. Bounding the pending set locally means dropping headers when it is full, and an attacker can always fill it: an
+  earlier fix that dropped the oldest pending headers was rejected, since those can be valid headers the finality determination waits for.
+- **Decision**:
+  1. **Counting** (SPEC §6.5 item 1): a header carried by a payload that counts at BTC height h (§7.1) counts at h when its anchor is on the BTC best chain, it passes the header checks (the
+     header rules, the anchor not below its parents', the timestamp's anchor bound) and each of its parents has counted at a height at most h, the genesis block always counting. Within one BTC
+     block the rule is applied until nothing more counts, so neither the order of the transactions in it nor that of the headers in a payload matters.
+  2. **No trace**: an appearance that does not count is ignored. No header is held, no payload is kept unresolved and no candidate body is collected; a header whose parents count later must be
+     carried again at or above that height.
+  3. **First appearance**: `seen(B)` is the height at which B counts, and its landing (the transaction, its index in the BTC block, the payload's sender) is its earliest appearance in that
+     block. Its parents count first, so `conn(B) = seen(B)`, and the finality determination's connection step no longer propagates to children.
+  4. **Bodies** (SPEC §6.4, §10.3 item 3): a body lands only with its own header, in a payload at or above the height at which that header counts, when it matches the header's `entries_root`
+     once `forced(B)` replaces its `Forced` entries. It is checked when its BTC block is scanned, where `forced(B)` can always be derived (the parents have counted and the anchor is on the
+     chain). A block that needs no body lands when its header counts. Landed bodies are kept as the bytes of the transaction that carried them, one shared copy per transaction, and decoded when
+     used. The bodies of anchor-invalid blocks (D-056, D-100) are no longer derived for landing: such a block does not count.
+  5. **BTC reorgs**: the counted headers and the landings are truncated at the fork and rescanned, as before. The header DAG keeps every header it accepted until pruning (D-097); a header
+     accepted while another BTC chain was the best counts on the current one only under item 1 there. Its anchor block being on the current chain, its timestamp bound is the same and is not
+     checked again, which settles F-26. §6.5 item 2's exclusion of a block anchored off the chain no longer occurs, since such a block does not count; the check stays.
+  6. **Producers** (local policy, SPEC §7.5): the search for headers to carry no longer stops at a block that carries settlement transactions, unless its settlement is in flight (its header
+     has not counted and its anchor is at most `IN_FLIGHT_BTC_BLOCKS` = 2 behind the BTC tip) or its header has counted. Otherwise its header is carried, not its body, and its past is
+     searched for headers only. Bodies are carried as before.
+  7. **Rescue and republishing** (local policy, SPEC §7.3, §7.6): a settlement transaction that confirmed and counted but landed nothing, because a header it needs from outside its payload
+     had not counted, is stuck; once those headers count, the payload goes out again unchanged in the order of §7.3 (also when a later payload has counted the block's header meanwhile:
+     the body lands only at or above that height), and the block's settlement record stays open until the data it carries has landed (a counted settlement no longer closes it). The
+     republish that waited for the next settlement to land without carrying f now waits for it to confirm and count, since that settlement's own data may be waiting for f's headers.
+  8. **Checkpoint**: the node's and the indexer's `pruning.ckpt` is format 3, without pending headers, unresolved payloads or candidate bodies.
+  9. **Restart**: a chain built under the old rules can hold landings, unlocks and carriers that the new rules place later, so devnet and signet restart from genesis (`signet/README.md`,
+     "Restarting from genesis"); mainnet has not started. Signet's PoW limit is raised in the same restart (D-136).
+- **Rationale**: whether a header counts is now a function of the current BTC chain alone, not of the order in which a node learned the blocks nor of the BTC chains it saw before, so a running
+  node, a restarted one and a fresh indexer agree without any state to carry. Pruning is the one exception, and it decides nothing: a header whose parent has left the header DAG with pruning
+  (D-097) does not count, while it counts on a node that has not pruned that far; such a header can be neither on nor merged by a chain through the final blocks (the merge-depth root rule), so
+  no outcome depends on it. Nothing waits, so nothing needs a bound: every header in memory paid a valid PoW, and what remains is that PoW's price (below). Honest payloads are closed: a
+  producer carries the headers its block needs that have not counted, and a republish run from the first block whose data has not landed holds every parent it needs, so the data landing height
+  is unchanged while settlements confirm in order, and can only come later otherwise. The fixpoint within a BTC block lets headers be split across transactions of one block in any order, which
+  miners decide.
+- **Alternatives**: the audit's suggestion, checking a header before holding it pending (parent count, version, `bits`, PoW at weight 1) and capping the pending set by count and bytes: the check
+  costs about 2 Argon2id evaluations per header on signet, and a full cap has to drop headers, valid ones included. Keeping the pending headers on disk instead of in memory (no protocol change):
+  memory is bounded, but disk use and rescans still grow with what an attacker pays for, and the checkpoint and restart logic grows. Requiring a parent in an earlier transaction of the block:
+  counting would depend on the miner's order. Counting a header whose parents are in the header DAG rather than counted on the current chain: a node that saw another BTC chain would count what a
+  fresh one does not.
+- **Costs and limitations**: when a header reaches BTC before its parents count, its data lands later, after a rescue: a child's settlement confirming before its parent's (with batching, only
+  once the backlog passes the threshold; without it, whenever two settlements confirm out of order; or after a BTC reorg), or a backlog larger than one payload; each costs one more transaction
+  pair and about 1 to 2 BTC blocks. A settlement still unconfirmed `IN_FLIGHT_BTC_BLOCKS` after its anchor has its headers carried again by the next payload (14 to about 150 bytes each). A
+  republish that leaves out some ancestors lands nothing for the headers depending on them, at its sender's cost. The settled prefix, unlocking, the carrier and BTC finality follow the data
+  landing height, so they come later in those cases too. Not addressed (the second audit's A2-07): valid side-branch headers forked from an old block, whose difficulty falls to the PoW limit,
+  still count and stay until pruning. With devnet's limit, which signet took until now, that was about 2 Argon2id evaluations per header of a non-empty block, about 85 000 such headers (about
+  85 MB) per full BTC block, or about 250 000 headers of empty blocks (about 250 MB) at 12 to 120 times the work; on mainnet at least about 65 536 evaluations per header. The same headers can
+  land junk bodies, about 4 MB of transaction bytes per full BTC block. D-136 raises signet's PoW limit against it; not counting side headers below the finalized tip beyond the merge depth
+  (below the finalized tip alone would split nodes, since a block may still merge headers below it but above the merge-depth root) is a separate design, not adopted. Scanning a BTC block costs
+  about the bytes of its payloads: the leaf hash each native transaction adds to `entries_root` as a forced-inclusion entry is computed once, when its BTC block is scanned, and kept with it
+  (32 bytes); whether a counted block needs a body is decided from the leaf hashes of its window, one hash per native transaction for each distinct window among the headers counting in that
+  BTC block; and a carried body is checked from its own entries and those leaf hashes. No native op is copied or encoded again, however many headers or bodies name it, so neither the time nor
+  the memory of a scan grows with the size of the ops a window holds. The restart clears balances and contracts on signet.
+- **Impact**: `crates/ksana-btc` (`tracker.rs`: the scan by BTC block, `KnownBlocks`, `unresolved` and `resolve*` gone, the native transactions kept with their leaf hashes; `headers.rs`:
+  `Pending` gone, the counting rule; `finality.rs`: `connect`; `bodies.rs`: candidates and the anchor-invalid derivation gone, bodies checked at the scan from leaf hashes (`converted_root`)
+  and kept encoded; `native.rs`: `forced_leaf`; `prune.rs` and the checkpoint records); `crates/ksana-crypto` (`merkle.rs`: `leaf_hash`, `entry_leaf`, `root_of_leaf_hashes`, the same roots);
+  `crates/ksana-node` (`chain.rs`: `KnownBlocks`, `payload_carry`, `process_settlements`, `CHECKPOINT_VERSION` 3; `rescue.rs`: the stuck settlement and the republish condition; `btc.rs`; the
+  memory profile's snapshot); `crates/ksana-indexer` (`known.rs`, the checkpoint); tests (a property test of the tracker, adversarial payloads, regtest scenarios); SPEC (the preamble and its
+  version history, §6.4, §6.5, §7.1, §7.3, §7.5, §7.6, §10.2, §10.3, §14, §15, §16, §17.5); ARCHITECTURE; RPC (`ksana_getSettlement`'s `confirmed`); SIGNET; the second audit's report (A2-07,
+  A2-10, A2-15, A2-19, F-03, F-25, F-26, F-35); the site's pages on how it works, security, the glossary, the RPC and confirmations; `signet/genesis.json` after the restart.
+
+## D-136 Signet's PoW limit is raised to `0x1f0fffff`, about 4 096 Argon2id evaluations per block at the limit (the part of the second internal audit's A2-07 that D-135 leaves, 2026-10-29, chosen by the project owner with D-135; revises D-055, D-107's rehearsal and SPEC §6.6, §13, §13.1, §16, §17.5; a consensus change for signet only, at the restart of D-135, M51)
+
+- **Problem**: D-135 holds nothing for a header that does not count, but a valid header counts and stays until pruning (D-097). A side branch forked from an old block has its difficulty fall as
+  its timestamps run ahead of its blocks (ASERT, SPEC §6.7), down to the PoW limit, and signet took devnet's limit `0x207fffff`, a target of about 2^255: a header there takes about 2 Argon2id
+  evaluations. A full BTC block of such headers, about 85 000 headers of non-empty blocks (46 bytes each in a payload) holding about 85 MB on every node and indexer, cost about 3 CPU-minutes;
+  about 250 000 headers of empty blocks (14 bytes each, about 250 MB) cost 12 to 120 times that work, about 1.5 to 14 CPU-hours.
+- **Decision**: `SIGNET.pow_limit_bits` is `0x1f0fffff` in `ksana-primitives` and in the TS SDK, a target of about 2^244: at the limit a block takes about 4 096 evaluations, about 3.5 seconds
+  of one core at D-094's 0.86 ms per solve attempt. A full BTC block of side-branch headers then costs about 3.5 CPU-days for headers of non-empty blocks and at least about 120 CPU-days for
+  headers of empty blocks. Signet's genesis `bits` stays as `signet/ksana-signet.sh` sets it, `0x1f0d1b71` for one seed node and `0x1f068db8` for two (about 5 000 and 10 000 evaluations),
+  both harder than the new limit. devnet keeps `0x207fffff`, which lets it produce blocks every 5 seconds on any CPU from genesis, and mainnet keeps `0x1f00ffff` (about 65 536 evaluations per
+  header, about 55 CPU-days per full BTC block).
+- **Rationale**: signet's difficulty has stayed between about 10 000 and 16 000 evaluations per block (about 14 300 on 2026-10-29, `bits` `0x1f04913a`), 2.4 to 3.9 times above the new limit,
+  so honest producers never mine at it; one seed node on one thread solves a block at the limit in about 3.5 seconds, under the 5-second block time, so a signet left with a single producer
+  still settles above the limit. The limit is the cheapest lever on A2-07: it raises the price of every side-branch header about 2 000 times, in the same restart as D-135, without a new rule, and the dead
+  tips relayed over P2P that A2-07 first described pay the same price.
+- **Alternatives**: mainnet's `0x1f00ffff`: about 65 536 evaluations, above signet's own difficulty, so its two seed nodes would mine at the limit, about one block per 28 seconds instead of 5.
+  A limit close to signet's current difficulty (about 16 000): too little room for ASERT to lower the difficulty when a producer stops. Not counting side headers below the finalized tip beyond
+  the merge depth: a rule of its own, not adopted (D-135, costs).
+- **Costs**: tools that took signet's parameters to be devnet's but for the chain ID and the anchor depth must take the new limit; the TS SDK carries it, and the web wallet, which pins this
+  repository, takes it with its submodule. A side-branch header at the limit costs anyone about 2 000 times more CPU, honest producers nothing. The rehearsal (`signet/rehearse.sh`, D-107) can no
+  longer start its private signet below the limit: its genesis takes the limit itself, about 4 096 evaluations a block instead of 250, and its private signet mines every 30 seconds instead of
+  15, so that `SETTLEMENT_TIMEOUT` (6 BTC blocks) still covers the 2 blocks a settlement waits for, on an idle chain empty blocks of weights 12 and 24, about 2 minutes on one core; its timeout
+  grows from 45 to 60 minutes. The rehearsal's first run against the new limit also showed that a node refused a genesis `bits` above the limit only after writing the genesis state, leaving a
+  data directory it could not start from again; it now builds the genesis block before writing anything, as the indexer does.
+- **Impact**: `ksana-primitives` (`SIGNET` and its tests), the TS SDK (`SIGNET`, `params.test.ts`); the PoW vectors' signet case, whose header has devnet's `bits`, keeps its values
+  and is judged against devnet's limit (`gen_pow_vectors`, the case's note in `tests/vectors/pow.json`); `ksana-node` (`Chain::open_with`: the genesis block built before the genesis state
+  is written, `m18_rebuild`); the rehearsal (`signet/rehearse.sh`, `rehearsal.yml`, `signet/README.md`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5); SIGNET;
+  the site's pages on the parameters, the signet and mining; ksana-web's submodule.

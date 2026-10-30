@@ -95,7 +95,7 @@ impl<'a> Carriers<'a> {
         let Some(block) = self.summary(block_hash)? else {
             return Ok(None);
         };
-        let Some(landing) = self.snapshot.data_landing(&block.hash, block.settles) else {
+        let Some(landing) = self.snapshot.data_landing(&block.hash) else {
             return Ok(None);
         };
         match landing.sender {

@@ -1,5 +1,6 @@
-//! The indexer proper (SPEC §10.3, §10.4; D-038, D-046, D-048, D-049, D-063, D-097): BTC scanning → block DAG and
-//! bodies → the main chain within the settled closure → block-by-block execution and verification → pruning.
+//! The indexer proper (SPEC §10.3, §10.4; D-038, D-046, D-048, D-049, D-063, D-097, D-135): BTC scanning → the block
+//! DAG of the counted headers and the landed bodies → the main chain within the settled closure → block-by-block
+//! execution and verification → pruning.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -7,19 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use ksana_btc::bodies::BodiesRecord;
 use ksana_btc::client::BtcClient;
 use ksana_btc::finality::{BtcFinal, Exclusion, Finality};
 use ksana_btc::headers::HeaderDagRecord;
 use ksana_btc::prune::{read_checkpoint, write_checkpoint, Pruning};
 use ksana_btc::tracker::{
-    settled_height, unlock_cursor, BlockData, BtcSnapshot, BtcTracker, KnownBlocks, MainChain,
-    MainEntry, SnapshotRecord, TrackerError,
+    settled_height, unlock_cursor, BtcSnapshot, BtcTracker, KnownBlocks, MainChain, MainEntry,
+    SnapshotRecord, TrackerError,
 };
 use ksana_btc::verdict::{self, Judge, Verdict};
 use ksana_consensus::{GhostdagError, PowAlgorithm, PowConsensus};
 use ksana_execution::{Executor, GenesisFile};
-use ksana_primitives::{BlockHeader, Params, Payload};
+use ksana_primitives::{BlockHeader, Params};
 use ksana_state::{DbMemory, StateDb};
 
 use crate::index::{Index, IndexHistory};
@@ -34,8 +34,9 @@ const INDEX_DIR: &str = "index";
 /// The pruning checkpoint in the data directory (D-097).
 const CHECKPOINT_FILE: &str = "pruning.ckpt";
 /// The version of the checkpoint's local format (2: the finality decision's exclusions and the basis of each mark of a
-/// block unable to land, D-101).
-const CHECKPOINT_VERSION: u32 = 2;
+/// block unable to land, D-101; 3: no pending headers, unresolved payloads or candidate bodies, the landed bodies kept
+/// as their transactions, D-135).
+const CHECKPOINT_VERSION: u32 = 3;
 
 /// The BTC tip (height and block hash) a snapshot ends at; `None` before any BTC block is scanned.
 type BtcTip = Option<(u32, [u8; 32])>;
@@ -60,8 +61,6 @@ struct Checkpoint {
     headers: HeaderDagRecord,
     /// The finality decision.
     finality: Finality,
-    /// The candidate and determined bodies.
-    bodies: BodiesRecord,
 }
 
 /// What a pruning checkpoint gives back at startup (D-097).
@@ -154,8 +153,6 @@ struct Inner {
     retry: bool,
     /// Reason processing halted (a BTC-final block is invalid or cannot land, D-082).
     halted: Option<String>,
-    /// The block whose data landing status the finality decision is waiting on (D-082; logged once when it changes).
-    waiting_on: Option<[u8; 32]>,
     /// The block the finality decision is waiting for a verdict on (D-101; logged once when it changes): judged once
     /// the final tip, its selected parent, is executed.
     validating: Option<[u8; 32]>,
@@ -310,7 +307,8 @@ fn restore(
         let known = Known::restore(
             params.clone(),
             consensus.clone(),
-            (c.headers, c.finality, c.bodies),
+            *genesis,
+            (c.headers, c.finality),
         )?;
         let snapshot = BtcSnapshot::from_record(c.snapshot)?;
         Ok(Some(Restored {
@@ -469,19 +467,14 @@ impl Indexer {
                     snapshot.base()
                 );
                 (
-                    BtcTracker::with_snapshot(
-                        btc,
-                        params.clone(),
-                        genesis.btc_anchor.clone(),
-                        snapshot,
-                    )?,
+                    BtcTracker::with_snapshot(btc, params.clone(), &genesis, snapshot)?,
                     known,
                     Some(root),
                     Some(window),
                 )
             }
             None => (
-                BtcTracker::new(btc, params.clone(), genesis.btc_anchor.clone())?,
+                BtcTracker::new(btc, params.clone(), &genesis)?,
                 Known::new(params.clone(), consensus.clone(), genesis.clone()).map_err(internal)?,
                 None,
                 None,
@@ -546,7 +539,6 @@ impl Indexer {
                 lagging: false,
                 retry: true,
                 halted: None,
-                waiting_on: None,
                 validating: None,
                 unjudged: None,
                 btc_final: None,
@@ -686,8 +678,7 @@ impl Indexer {
                     Err(e) => return Err(e.into()),
                 }
             }
-            let resolved = self.tracker.resolve_all(self)?;
-            let mut round = scanned || resolved;
+            let mut round = scanned;
             let snapshot = self.tracker.snapshot()?;
             let btc_height = snapshot.tip().map(|(height, _)| height);
             self.published.write().map_err(poisoned)?.status.btc_height = btc_height;
@@ -838,15 +829,6 @@ impl Indexer {
                 );
             }
             inner.validating = finalized.outcome.validating;
-        }
-        if finalized.outcome.waiting_on != inner.waiting_on {
-            if let Some(hash) = finalized.outcome.waiting_on {
-                eprintln!(
-                    "[ksana-indexer] the finality decision is waiting for the body and data landing of block {} (D-082)",
-                    hex::encode(hash)
-                );
-            }
-            inner.waiting_on = finalized.outcome.waiting_on;
         }
         if taken_back {
             eprintln!(
@@ -1027,7 +1009,7 @@ impl Indexer {
                     Round::Rescan => return Ok(Round::Rescan),
                 }
             }
-            let plan = known.plan(snapshot, inner.plan_from()).map_err(internal)?;
+            let plan = known.plan(snapshot, inner.plan_from());
             match self.align(known, inner, &plan)? {
                 Round::Go(aligned) => changed |= aligned,
                 Round::Rescan => return Ok(Round::Rescan),
@@ -1298,7 +1280,6 @@ impl Indexer {
         inner.root = None;
         inner.retain = None;
         inner.restored = None;
-        inner.waiting_on = None;
         inner.validating = None;
         inner.unjudged = None;
         inner.btc_final = None;
@@ -1579,7 +1560,7 @@ impl Indexer {
         }
         inner.root = Some((root, root_height));
         let kept = known.tree().dag().len();
-        let (headers, finality, bodies) = known.record().map_err(internal)?;
+        let (headers, finality) = known.record().map_err(internal)?;
         let checkpoint = Checkpoint {
             version: CHECKPOINT_VERSION,
             genesis: self.genesis.hash(),
@@ -1589,7 +1570,6 @@ impl Indexer {
             snapshot: self.tracker.snapshot()?.record(),
             headers,
             finality,
-            bodies,
         };
         let written = write_checkpoint(&self.data_dir.join(CHECKPOINT_FILE), &checkpoint);
         eprintln!(
@@ -1699,32 +1679,15 @@ impl Indexer {
 }
 
 impl KnownBlocks for Indexer {
-    fn block_data(&self, block_hash: &[u8; 32]) -> Result<BlockData, TrackerError> {
-        let snapshot = self.tracker.snapshot()?;
-        let mut known = self.known.lock().map_err(|_| {
-            TrackerError::Internal("the indexer's block tree lock is poisoned".into())
-        })?;
-        known
-            .block_data(block_hash, &snapshot)
-            .map_err(TrackerError::Known)
-    }
-
-    fn observe_payload(
-        &self,
-        snapshot: &BtcSnapshot,
-        _btc_height: u32,
-        _tx: &bitcoin::Transaction,
-        payload: &Payload,
-    ) -> Result<(), TrackerError> {
-        // The timestamp bound takes the time of the block at the anchor height on the BTC chain being scanned (D-083,
-        // same as the node's `Chain::anchor_time`: when the anchor block was reorged out, the block at the same height
-        // on the current chain, consistent with D-056; no check when the snapshot lacks that height)
+    fn count(&self, snapshot: &BtcSnapshot, header: &BlockHeader) -> Result<bool, TrackerError> {
+        // The timestamp bound takes the time of the anchor block on the BTC chain being scanned (D-083, the same as
+        // the node's `Chain::anchor_time`; a header is asked about only once its anchor is on that chain, D-135)
         self.known
             .lock()
             .map_err(|_| {
                 TrackerError::Internal("the indexer's block tree lock is poisoned".into())
             })?
-            .observe(payload, snapshot)
+            .count(header, snapshot)
             .map_err(TrackerError::Internal)
     }
 }

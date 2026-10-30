@@ -1,18 +1,30 @@
-//! BTC tracking (SPEC §6.3, §7, §8.5, §10.3, §10.4; D-034-D-038, D-049): shared by the fast-lane node and the
-//! standalone indexer.
+//! BTC tracking (SPEC §6.3, §6.5, §7, §8.5, §10.3, §10.4; D-034-D-038, D-049, D-135): shared by the fast-lane node
+//! and the standalone indexer.
 //!
 //! - [`BtcTracker`]: tracks bitcoind's best chain, scanning block by block from near the genesis anchor: native
-//!   transactions (§7.4), fast-lane block headers appearing in KSN1 payloads, and the transactions landing each
+//!   transactions (§7.4), the fast-lane block headers that count in KSN1 payloads, and the transactions landing each
 //!   fast-lane block's data on BTC (for a block that needs a body, a settlement or republish payload carrying the same
 //!   body, D-077). A settlement or republish payload counts only when every header it carries anchors below the BTC
 //!   height it is confirmed at ([`payload_counts`], D-100); one that does not is ignored as a whole. On a BTC reorg it
 //!   truncates to the fork point and rescans. The scan results are published as an immutable [`BtcSnapshot`]; block
 //!   production, checking and RPC each hold their own snapshot without blocking each other.
-//! - When a payload carrying a body is scanned, this node may not know the corresponding fast-lane block yet (joined
-//!   late, catching up after downtime, was isolated): it is first recorded as pending, and once the node has stored
-//!   the block (and before every block check) it is checked against the block contents and counted
-//!   ([`BtcTracker::resolve`]); otherwise a valid block containing that block's unlock entry would be misjudged
-//!   invalid.
+//! - **Counting** (§6.5 item 1, D-135): in a payload that counts at BTC height h, a header counts at h when its anchor
+//!   is on the best chain, the header DAG accepts it ([`KnownBlocks::count`]) and each of its parents has counted at a
+//!   height at most h; within one BTC block this is applied until nothing more counts, so neither the order of the
+//!   transactions nor that of the headers in a payload matters. An appearance that does not count leaves no trace:
+//!   nothing is held for a header waiting for its parents, which counts only when a payload at or above the height its
+//!   parents count at carries it again. Whether the block needs a body is settled when it counts, from the entries it
+//!   must force-include (§7.4), since its parents' anchors and its own are then known.
+//! - **Bodies** (§6.4, §10.3 item 3, D-135): a body lands only with its own header, in a payload at or above the height
+//!   at which that header counts, when its entries match the header's `entries_root` once the `Forced` entries are
+//!   replaced; it is checked when its BTC block is scanned, and kept as the transaction that carried it, one copy per
+//!   transaction ([`LandedBody`], decoded when used by [`crate::bodies::Bodies`]). Nothing waits for the node or the
+//!   indexer to know a block.
+//! - **Cost** (D-135): the leaf hash a native transaction's forced-inclusion entry adds to `entries_root` is computed
+//!   once, when its BTC block is scanned, and kept with it; whether a counted block needs a body, and whether a carried
+//!   body matches, are computed from those leaf hashes. Scanning a BTC block thus costs about the bytes of its
+//!   payloads, plus one hash per native transaction of each distinct forced-inclusion window among the headers that
+//!   count there; no native op is copied or encoded again, however many payloads name it.
 //! - [`AnchoredView`]: the execution layer's [`BtcView`]; all answers are relative to some block's `btc_anchor`
 //!   (D-035).
 //! - [`prefix_height`]: the settled prefix (D-038); in the DAG it accumulates block by block along the main chain (the
@@ -21,23 +33,25 @@
 //!   `BlockEnv::unlockable` from the main-chain summaries with this same function.
 //!
 //! A fault of the data source (bitcoind) is always returned as a local fault and never judges a block invalid. The node
-//! and the indexer each implement [`KnownBlocks`]: both give exactly the same answers for the same BTC chain, which is
-//! the premise of "the indexer and the fast-lane node agree on state" (D-049).
+//! and the indexer each implement [`KnownBlocks`] with the same header DAG rules: for the same BTC chain both count
+//! exactly the same headers, which is the premise of "the indexer and the fast-lane node agree on state" (D-049).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
 use borsh::{BorshDeserialize, BorshSerialize};
+use ksana_crypto::root_of_leaf_hashes;
 use ksana_execution::keys::{self, UnlockCursor};
 use ksana_execution::{BtcView, StateSource, UnlockItem};
-use ksana_primitives::{BlockHeader, BtcAnchor, Entry, EntryData, OutPoint, Params, Payload, VmOp};
+use ksana_primitives::{BlockHeader, BtcAnchor, Entry, OutPoint, Params, Payload, VmOp};
 
+use crate::bodies::converted_root;
 use crate::client::BtcClient;
 use crate::data::tx_payload;
-use crate::native::{native_txs, NativeTx};
-use crate::payload::bodies_in;
+use crate::native::{forced_leaf, native_txs, NativeTx};
+use crate::payload::bodies_at;
 use crate::settlement::PrevoutSource;
 
 /// The tracker's errors. All except [`TrackerError::Config`] are local faults: retry later, and never judge a block
@@ -336,30 +350,6 @@ impl MainChain {
     }
 }
 
-/// The information needed to judge whether a payload on BTC lands the data of a fast-lane block that needs a body
-/// (D-038, D-077): the header and the entries (in payload form). Any settlement or republish payload carrying the same
-/// body will do (the body proves itself through the `entries_root` in the header).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettlementContext {
-    /// The block header.
-    pub header: BlockHeader,
-    /// All entries of the block (in payload form).
-    pub entries: Vec<EntryData>,
-}
-
-/// The answer of [`KnownBlocks::block_data`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BlockData {
-    /// This side does not know the block yet, or cannot determine its body yet: the payload is kept and judged later
-    /// ([`BtcTracker::resolve`]).
-    Unknown,
-    /// The block needs no body (an empty block, or one with only forced-inclusion entries): the header landing on BTC
-    /// is enough.
-    NoBody,
-    /// The block needs a body.
-    Body(Box<SettlementContext>),
-}
-
 /// The sender of the payload landing a block's data on BTC (D-095): who the carrier reward goes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Sender {
@@ -393,33 +383,44 @@ pub struct Landing {
     pub sender: Sender,
 }
 
-impl Landing {
-    /// The order: lower height first, and within the same height, earlier in the BTC block first (D-095).
-    fn order(&self) -> (u32, u32) {
-        (self.height, self.index)
-    }
+/// A fast-lane header that counts on the BTC best chain (SPEC §6.5 item 1, D-135), with what was settled about its block
+/// when it counted. The Borsh encoding is a local storage format (D-097).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Counted {
+    /// Its earliest appearance in the BTC block at which it counts (`seen(B)` is its height, D-095).
+    pub landing: Landing,
+    /// The height of its anchor (on the best chain).
+    pub anchor: u32,
+    /// The highest anchor height among its parents: its forced-inclusion window starts above it (§7.4, D-063).
+    pub parent_anchor: u32,
+    /// Whether the block needs a body: `entries_root(forced(B)) ≠ B.entries_root` (D-043, D-077).
+    pub settles: bool,
 }
 
-/// Looks up fast-lane blocks known to this node by block hash (implemented by the chain).
-pub trait KnownBlocks {
-    /// The block's body information (D-077).
-    fn block_data(&self, block_hash: &[u8; 32]) -> Result<BlockData, TrackerError>;
+/// The body of a fast-lane block landed on BTC (D-077, D-135): its first landing, the transaction that carried it, one
+/// copy shared by every body that transaction lands, and the body's position among those its payload carries
+/// ([`crate::payload::bodies_at`]). It is decoded when used ([`crate::bodies::Bodies`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandedBody {
+    /// Where it landed.
+    pub landing: Landing,
+    /// The transaction that carried it.
+    pub tx: Arc<bitcoin::Transaction>,
+    /// The body's position in the payload.
+    pub slot: u32,
+}
 
-    /// Called when a settlement or republish payload is scanned in transaction `tx` at BTC height `btc_height` (in scan
-    /// order; blocks rescanned after a BTC reorg are called for again). `snapshot` is the snapshot under construction,
-    /// covering up to that BTC block (the header time of the anchor BTC block is taken from it, D-083). The indexer
-    /// uses this to collect headers and bodies, and the node uses it to maintain the header DAG for the finality
-    /// decision (D-082); by default it does nothing.
-    fn observe_payload(
-        &self,
-        snapshot: &BtcSnapshot,
-        btc_height: u32,
-        tx: &bitcoin::Transaction,
-        payload: &Payload,
-    ) -> Result<(), TrackerError> {
-        let _ = (snapshot, btc_height, tx, payload);
-        Ok(())
-    }
+/// Counts fast-lane headers on BTC (D-135): the node and the indexer implement it with the same header DAG, so that for
+/// the same BTC chain both count exactly the same headers.
+pub trait KnownBlocks {
+    /// Whether `header`, carried by a payload that counts, passes the header checks (SPEC §6.5 item 1: the header rules,
+    /// its anchor not below its parents', the timestamp's anchor bound against the BTC block at its anchor height in
+    /// `snapshot`, the snapshot under construction). The tracker asks only once the header's anchor is on the best
+    /// chain and each of its parents has counted, and a header that passes joins the caller's header DAG; a header
+    /// already in it passes again (its checks do not depend on the BTC chain beyond its anchor block). `Err` is a
+    /// local fault (a PoW that cannot be computed, D-094, or a storage fault): the round of the sync stops and is
+    /// retried, and the header is not judged.
+    fn count(&self, snapshot: &BtcSnapshot, header: &BlockHeader) -> Result<bool, TrackerError>;
 }
 
 /// The native transactions block B must force-include at its start (§7.4, D-036): all native transactions confirmed at
@@ -431,8 +432,18 @@ pub fn forced_entries(
     parent_anchor: &BtcAnchor,
     anchor: &BtcAnchor,
 ) -> Vec<Entry> {
-    match crate::native::forced_heights(params, parent_anchor.height, anchor.height) {
-        Some(range) => crate::native::forced_entries(snapshot.native_in(range).iter()),
+    forced_at(params, snapshot, parent_anchor.height, anchor.height)
+}
+
+/// [`forced_entries`] by anchor heights: `parent_anchor` the highest among B's parents, `anchor` B's own.
+pub fn forced_at(
+    params: &Params,
+    snapshot: &BtcSnapshot,
+    parent_anchor: u32,
+    anchor: u32,
+) -> Vec<Entry> {
+    match crate::native::forced_heights(params, parent_anchor, anchor) {
+        Some(range) => crate::native::forced_entries(snapshot.native_iter(range)),
         None => Vec::new(),
     }
 }
@@ -440,12 +451,32 @@ pub fn forced_entries(
 /// Whether a settlement or republish payload confirmed at BTC height `height` counts (D-100): every header it carries
 /// anchors below `height`. An honest producer anchors to a BTC block that exists before its block, so every payload
 /// carrying an honest header lands above that anchor; a payload that does not count is ignored as a whole (its headers
-/// do not appear, the bodies it carries do not land), so the BTC block a header anchors to has always been scanned
-/// when the header appears, and the timestamp bound of the header DAG is always checked (D-083).
+/// do not count, the bodies it carries do not land), so the BTC block a header anchors to has always been scanned when
+/// the header counts, and the timestamp bound of the header DAG is always checked (D-083).
 pub fn payload_counts(headers: &[BlockHeader], height: u32) -> bool {
     headers
         .iter()
         .all(|header| header.btc_anchor.height < height)
+}
+
+/// A native transaction of the best chain with the leaf hash of its forced-inclusion entry
+/// ([`crate::native::forced_leaf`]), computed once when its BTC block is scanned (D-135).
+#[derive(Clone, Debug)]
+struct Native {
+    tx: NativeTx,
+    leaf: [u8; 32],
+}
+
+impl Native {
+    fn new(tx: NativeTx) -> Result<Self, String> {
+        let leaf = forced_leaf(&tx).map_err(|e| {
+            format!(
+                "encoding the forced-inclusion entry of native transaction {} failed: {e}",
+                bitcoin::Txid::from_byte_array(tx.txid)
+            )
+        })?;
+        Ok(Native { tx, leaf })
+    }
 }
 
 /// The BTC best chain as scanned at some moment.
@@ -455,30 +486,18 @@ pub struct BtcSnapshot {
     base: u32,
     /// The block hash and 80-byte header at each height from `base`.
     chain: Vec<([u8; 32], [u8; 80])>,
-    /// Heights containing native transactions → the native transactions (in block order).
-    native: BTreeMap<u32, Vec<NativeTx>>,
-    /// Fast-lane block hash → the earliest appearance of its header in a KSN1 settlement or republish payload (BTC
-    /// height, index within the block and the payload's sender, D-095).
-    headers_seen: BTreeMap<[u8; 32], Landing>,
-    /// The reverse index of `headers_seen`: BTC height → the fast-lane headers that first appeared at this height (in
-    /// order of appearance), for the finality decision processing height by height (D-082).
+    /// Heights containing native transactions → the native transactions (in block order), each with its leaf hash.
+    native: BTreeMap<u32, Vec<Native>>,
+    /// Fast-lane block hash → where its header counts (D-135).
+    counted: BTreeMap<[u8; 32], Counted>,
+    /// The reverse index of `counted`: BTC height → the fast-lane headers that count at it, each after its parents, for
+    /// the finality decision processing height by height (D-082).
     headers_by_height: BTreeMap<u32, Vec<[u8; 32]>>,
-    /// Fast-lane blocks that need a body → the transactions confirmed on BTC that land their data (height, index
-    /// within the block and the payload's sender), in order of appearance (non-decreasing height): settlement or
-    /// republish payloads carrying the same body (D-077, D-095).
-    settlements: BTreeMap<[u8; 32], Vec<Landing>>,
+    /// Fast-lane blocks that need a body → the first landing of their body (D-077, D-095, D-135).
+    bodies: BTreeMap<[u8; 32], LandedBody>,
     /// KSN1 settlement transactions seen (valid or not): txid → confirmation height.
     ksn1_txs: BTreeMap<[u8; 32], u32>,
-    /// Fast-lane blocks this node did not know at scan time → the transactions carrying their body with their
-    /// confirmation height and index within the block (in order of appearance), to be checked once the block is known.
-    unresolved: BTreeMap<[u8; 32], Vec<Unresolved>>,
 }
-
-/// One pending payload of a fast-lane block this node did not know at scan time: the transaction carrying its body
-/// with its confirmation height and index within the block. The pending payloads of one scanned transaction share a
-/// single copy of it, however many unknown blocks' bodies its payload carries (a republish payload carries up to
-/// `MAX_SETTLEMENT_HEADERS` of them, 500).
-type Unresolved = (Arc<bitcoin::Transaction>, u32, u32);
 
 impl BtcSnapshot {
     fn new(base: u32) -> Self {
@@ -514,8 +533,7 @@ impl BtcSnapshot {
         header_time(&self.header_at(height)?)
     }
 
-    /// The fast-lane headers that first appeared at BTC height `height` (never seen at any lower height), in order of
-    /// appearance (D-082).
+    /// The fast-lane headers that count at BTC height `height`, each after its parents (D-082, D-135).
     pub fn headers_at(&self, height: u32) -> &[[u8; 32]] {
         self.headers_by_height
             .get(&height)
@@ -547,6 +565,7 @@ impl BtcSnapshot {
         self.native
             .range(heights)
             .flat_map(|(_, txs)| txs)
+            .map(|native| &native.tx)
             .find(|tx| tx.txid == *txid)
     }
 
@@ -556,15 +575,13 @@ impl BtcSnapshot {
         self.native
             .range(..=max_height)
             .flat_map(|(_, txs)| txs)
+            .map(|native| &native.tx)
             .find(|tx| tx.txid == *txid)
     }
 
     /// The native transactions in the height range, in ascending order of height and index within the block (§7.4).
     pub fn native_in(&self, heights: std::ops::RangeInclusive<u32>) -> Vec<NativeTx> {
-        self.native
-            .range(heights)
-            .flat_map(|(_, txs)| txs.iter().cloned())
-            .collect()
+        self.native_iter(heights).cloned().collect()
     }
 
     /// Same as [`BtcSnapshot::native_in`] by reference; none when the range is empty.
@@ -572,6 +589,14 @@ impl BtcSnapshot {
         &self,
         heights: std::ops::RangeInclusive<u32>,
     ) -> impl Iterator<Item = &NativeTx> + '_ {
+        self.natives(heights).map(|native| &native.tx)
+    }
+
+    /// The native transactions in the height range with their leaf hashes, in order; none when the range is empty.
+    fn natives(
+        &self,
+        heights: std::ops::RangeInclusive<u32>,
+    ) -> impl Iterator<Item = &Native> + '_ {
         (heights.start() <= heights.end())
             .then(|| self.native.range(heights))
             .into_iter()
@@ -579,53 +604,84 @@ impl BtcSnapshot {
             .flat_map(|(_, txs)| txs)
     }
 
-    /// The height at which the block's data landed on BTC (D-038, D-077): for a block that needs a body, the earliest
-    /// transaction landing its data; for other blocks, the height at which the header first appeared.
-    pub fn data_height(&self, block: &BlockSummary) -> Option<u32> {
-        self.block_data_height(&block.hash, block.settles)
+    /// The native transactions in the forced-inclusion window of a block whose parents' highest anchor is at height
+    /// `parent_anchor` and whose own anchor is at height `anchor` ([`forced_at`]), with their leaf hashes.
+    fn window(
+        &self,
+        params: &Params,
+        parent_anchor: u32,
+        anchor: u32,
+    ) -> impl Iterator<Item = &Native> + '_ {
+        crate::native::forced_heights(params, parent_anchor, anchor)
+            .into_iter()
+            .flat_map(|heights| self.natives(heights))
     }
 
-    /// Same as [`BtcSnapshot::data_height`], queried by block hash and whether the body must land on BTC (`settles`).
-    pub fn block_data_height(&self, block_hash: &[u8; 32], settles: bool) -> Option<u32> {
-        self.data_landing(block_hash, settles).map(|l| l.height)
+    /// The transaction ID and the leaf hash of each entry of [`forced_at`], in order (D-135).
+    fn forced_leaves(
+        &self,
+        params: &Params,
+        parent_anchor: u32,
+        anchor: u32,
+    ) -> impl Iterator<Item = (&[u8; 32], &[u8; 32])> + '_ {
+        self.window(params, parent_anchor, anchor)
+            .map(|native| (&native.tx.txid, &native.leaf))
+    }
+
+    /// `entries_root` of [`forced_at`], from the leaf hashes (D-135).
+    fn forced_root(&self, params: &Params, parent_anchor: u32, anchor: u32) -> [u8; 32] {
+        let leaves: Vec<[u8; 32]> = self
+            .window(params, parent_anchor, anchor)
+            .map(|native| native.leaf)
+            .collect();
+        root_of_leaf_hashes(&leaves)
+    }
+
+    /// Where the block's header counts on the best chain (D-135); `None` when it does not count.
+    pub fn counted(&self, block_hash: &[u8; 32]) -> Option<&Counted> {
+        self.counted.get(block_hash)
+    }
+
+    /// The BTC height at which the block's header counts (`seen(B)`, D-082, D-135).
+    pub fn counted_at(&self, block_hash: &[u8; 32]) -> Option<u32> {
+        self.counted.get(block_hash).map(|c| c.landing.height)
+    }
+
+    /// The first landing of the block's body (D-077, D-135); `None` for a block that needs none or whose body has not
+    /// landed.
+    pub fn landed_body(&self, block_hash: &[u8; 32]) -> Option<&LandedBody> {
+        self.bodies.get(block_hash)
+    }
+
+    /// The height at which the block's data landed on BTC (D-038, D-077): [`BtcSnapshot::block_data_height`].
+    pub fn data_height(&self, block: &BlockSummary) -> Option<u32> {
+        self.block_data_height(&block.hash)
+    }
+
+    /// The height at which the block's data landed on BTC (D-038, D-077, D-135): for a block that needs a body, the
+    /// first payload landing it; for other blocks, the height at which the header counts.
+    pub fn block_data_height(&self, block_hash: &[u8; 32]) -> Option<u32> {
+        self.data_landing(block_hash).map(|l| l.height)
     }
 
     /// The first landing of the block's data on BTC (D-095): for a block that needs a body, the first transaction
-    /// landing its data ([`BtcSnapshot::settlement_of`]); for other blocks, the first appearance of the header.
-    pub fn data_landing(&self, block_hash: &[u8; 32], settles: bool) -> Option<Landing> {
-        if settles {
-            self.first_settlement(block_hash)
+    /// landing it; for other blocks, the earliest appearance of the header at the height at which it counts. Whether a
+    /// block needs a body was settled when its header counted ([`Counted::settles`]).
+    pub fn data_landing(&self, block_hash: &[u8; 32]) -> Option<Landing> {
+        let counted = self.counted.get(block_hash)?;
+        if counted.settles {
+            self.bodies.get(block_hash).map(|body| body.landing)
         } else {
-            self.headers_seen.get(block_hash).copied()
+            Some(counted.landing)
         }
     }
 
-    /// The BTC height at which the header first appeared in a KSN1 settlement or republish payload (whether or not that
-    /// transaction is a valid settlement).
-    pub fn header_seen(&self, block_hash: &[u8; 32]) -> Option<u32> {
-        self.headers_seen.get(block_hash).map(|l| l.height)
-    }
-
-    /// Whether the block still has pending payloads: the block was unknown when they were scanned, so whether the
-    /// payloads carry its body cannot be determined ([`BtcTracker::resolve`] / [`BtcTracker::resolve_all`] resolve them
-    /// once it is known).
-    pub fn has_unresolved(&self, block_hash: &[u8; 32]) -> bool {
-        self.unresolved.contains_key(block_hash)
-    }
-
-    /// The earliest confirmed transaction (txid, height) landing the block's data on BTC (a payload carrying its body,
-    /// D-077); within the same height, the earliest in the BTC block (D-095).
+    /// The earliest confirmed transaction (txid, height) landing the block's body on BTC (D-077); within the same height,
+    /// the earliest in the BTC block (D-095).
     pub fn settlement_of(&self, block_hash: &[u8; 32]) -> Option<([u8; 32], u32)> {
-        self.first_settlement(block_hash)
-            .map(|l| (l.txid, l.height))
-    }
-
-    fn first_settlement(&self, block_hash: &[u8; 32]) -> Option<Landing> {
-        self.settlements
-            .get(block_hash)?
-            .iter()
-            .min_by_key(|l| l.order())
-            .copied()
+        self.bodies
+            .get(block_hash)
+            .map(|body| (body.landing.txid, body.landing.height))
     }
 
     /// The confirmation height of a KSN1 settlement transaction (valid or not).
@@ -650,31 +706,25 @@ impl BtcSnapshot {
             .values()
             .map(Vec::len)
             .sum();
-        self.headers_seen.retain(|_, l| l.height <= height);
+        self.counted.retain(|_, c| c.landing.height <= height);
         self.headers_by_height.split_off(&height.saturating_add(1));
-        for all in self.settlements.values_mut() {
-            all.retain(|l| l.height <= height);
-        }
-        self.settlements.retain(|_, all| !all.is_empty());
+        self.bodies.retain(|_, body| body.landing.height <= height);
         self.ksn1_txs.retain(|_, h| *h <= height);
-        for all in self.unresolved.values_mut() {
-            all.retain(|(_, h, _)| *h <= height);
-        }
-        self.unresolved.retain(|_, all| !all.is_empty());
         removed_native
     }
 
     /// Drops what a DAG pruned at a pruning point anchored at height `cut` or above can no longer ask about (D-097):
-    /// the BTC blocks below `cut` (their headers, native transactions, the fast-lane headers first seen there and the
-    /// KSN1 settlement transactions), and the landings and pending payloads of the fast-lane blocks for which `keep` is
-    /// false whose data first appeared below `cut`. The tip is always kept. Returns the number of fast-lane blocks
-    /// whose records were dropped.
+    /// the BTC blocks below `cut` (their headers, native transactions, the lists of the fast-lane headers that count
+    /// there and the KSN1 settlement transactions), and the counted headers and landed bodies below `cut` of the
+    /// fast-lane blocks for which `keep` is false. The tip is always kept. Returns the number of records of fast-lane
+    /// blocks dropped.
     ///
     /// Every block in the future of the pruning point has an anchor at or above the pruning point's (anchors never
     /// decrease along parent edges), its data lands above its anchor and its forced-inclusion entries name native
     /// transactions from its window start on (D-100), so nothing a kept block needs is below `cut` when `cut` is at most
     /// the pruning point's anchor height less NATIVE_CONFIRMATIONS; `keep` additionally protects the blocks the caller
-    /// still asks about (the main chain's window).
+    /// still asks about (the header DAG and the main chain's window). A header whose parent is no longer counted here
+    /// does not count, as its parent is no longer in the caller's header DAG either.
     pub fn prune(&mut self, cut: u32, keep: &dyn Fn(&[u8; 32]) -> bool) -> usize {
         let cut = match self.tip() {
             Some((tip, _)) => cut.min(tip),
@@ -689,107 +739,106 @@ impl BtcSnapshot {
         self.native = self.native.split_off(&cut);
         self.headers_by_height = self.headers_by_height.split_off(&cut);
         self.ksn1_txs.retain(|_, h| *h >= cut);
-        let before = self
-            .headers_seen
-            .len()
-            .saturating_add(self.settlements.len())
-            .saturating_add(self.unresolved.len());
-        self.headers_seen
-            .retain(|hash, l| l.height >= cut || keep(hash));
-        self.settlements
-            .retain(|hash, all| all.iter().all(|l| l.height >= cut) || keep(hash));
-        self.unresolved
-            .retain(|hash, all| all.iter().all(|(_, h, _)| *h >= cut) || keep(hash));
-        let after = self
-            .headers_seen
-            .len()
-            .saturating_add(self.settlements.len())
-            .saturating_add(self.unresolved.len());
+        let before = self.counted.len().saturating_add(self.bodies.len());
+        self.counted
+            .retain(|hash, c| c.landing.height >= cut || keep(hash));
+        self.bodies
+            .retain(|hash, body| body.landing.height >= cut || keep(hash));
+        let after = self.counted.len().saturating_add(self.bodies.len());
         before.saturating_sub(after)
     }
 
-    /// The snapshot in the local format of a pruning checkpoint (D-097). The pending payloads that share one copy of
-    /// their transaction in memory share it in the record too: each transaction is written once (D-098).
+    /// The snapshot in the local format of a pruning checkpoint (D-097). The landed bodies that share one copy of their
+    /// transaction in memory share it in the record too: each transaction is written once (D-135).
     pub fn record(&self) -> SnapshotRecord {
-        let mut pending_txs = Vec::new();
+        let mut txs = Vec::new();
         let mut written: BTreeMap<*const bitcoin::Transaction, u32> = BTreeMap::new();
-        let mut unresolved = BTreeMap::new();
-        for (hash, all) in &self.unresolved {
-            let mut items = Vec::with_capacity(all.len());
-            for (tx, height, index) in all {
-                let at = *written.entry(Arc::as_ptr(tx)).or_insert_with(|| {
-                    let at = u32::try_from(pending_txs.len()).unwrap_or(u32::MAX);
-                    pending_txs.push(serialize(&**tx));
-                    at
-                });
-                items.push((at, *height, *index));
-            }
-            unresolved.insert(*hash, items);
+        let mut bodies = BTreeMap::new();
+        for (hash, body) in &self.bodies {
+            let at = *written.entry(Arc::as_ptr(&body.tx)).or_insert_with(|| {
+                let at = u32::try_from(txs.len()).unwrap_or(u32::MAX);
+                txs.push(serialize(&*body.tx));
+                at
+            });
+            bodies.insert(*hash, (body.landing, at, body.slot));
         }
         SnapshotRecord {
             base: self.base,
             chain: self.chain.clone(),
-            native: self.native.clone(),
-            headers_seen: self.headers_seen.clone(),
+            native: self
+                .native
+                .iter()
+                .map(|(height, txs)| (*height, txs.iter().map(|n| n.tx.clone()).collect()))
+                .collect(),
+            counted: self.counted.clone(),
             headers_by_height: self.headers_by_height.clone(),
-            settlements: self.settlements.clone(),
+            txs,
+            bodies,
             ksn1_txs: self.ksn1_txs.clone(),
-            pending_txs,
-            unresolved,
         }
     }
 
-    /// The snapshot a [`BtcSnapshot::record`] was taken from (the pending payloads of one transaction sharing one copy
-    /// of it again).
+    /// The snapshot a [`BtcSnapshot::record`] was taken from (the bodies one transaction landed sharing one copy of it
+    /// again, the leaf hashes of the native transactions computed again).
     pub fn from_record(record: SnapshotRecord) -> Result<Self, String> {
-        let mut txs = Vec::with_capacity(record.pending_txs.len());
-        for bytes in &record.pending_txs {
-            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(bytes)
-                .map_err(|e| format!("a pending transaction in the checkpoint is corrupt: {e}"))?;
+        let mut native = BTreeMap::new();
+        for (height, txs) in record.native {
+            let txs = txs
+                .into_iter()
+                .map(Native::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            native.insert(height, txs);
+        }
+        let mut txs = Vec::with_capacity(record.txs.len());
+        for bytes in &record.txs {
+            let tx: bitcoin::Transaction =
+                bitcoin::consensus::encode::deserialize(bytes).map_err(|e| {
+                    format!("a transaction landing bodies in the checkpoint is corrupt: {e}")
+                })?;
             txs.push(Arc::new(tx));
         }
-        let mut unresolved = BTreeMap::new();
-        for (hash, all) in record.unresolved {
-            let mut items = Vec::with_capacity(all.len());
-            for (at, height, index) in all {
-                let tx = usize::try_from(at)
-                    .ok()
-                    .and_then(|at| txs.get(at))
-                    .ok_or("a pending payload in the checkpoint names a transaction it lacks")?;
-                items.push((Arc::clone(tx), height, index));
-            }
-            unresolved.insert(hash, items);
+        let mut bodies = BTreeMap::new();
+        for (hash, (landing, at, slot)) in record.bodies {
+            let tx = usize::try_from(at)
+                .ok()
+                .and_then(|at| txs.get(at))
+                .ok_or("a landed body in the checkpoint names a transaction it lacks")?;
+            bodies.insert(
+                hash,
+                LandedBody {
+                    landing,
+                    tx: Arc::clone(tx),
+                    slot,
+                },
+            );
         }
         Ok(BtcSnapshot {
             base: record.base,
             chain: record.chain,
-            native: record.native,
-            headers_seen: record.headers_seen,
+            native,
+            counted: record.counted,
             headers_by_height: record.headers_by_height,
-            settlements: record.settlements,
+            bodies,
             ksn1_txs: record.ksn1_txs,
-            unresolved,
         })
     }
 }
 
-/// A pending payload in a [`SnapshotRecord`]: the position of its transaction in `pending_txs`, its height and its
-/// index in the BTC block.
-type PendingRecord = (u32, u32, u32);
+/// A landed body in a [`SnapshotRecord`]: its landing, the position of its transaction in `txs` and its slot.
+type BodyRecord = (Landing, u32, u32);
 
 /// A [`BtcSnapshot`] in the local format of a pruning checkpoint (D-097): the same fields, with the transactions
-/// carrying the pending payloads in Bitcoin's consensus encoding, each once.
+/// carrying the landed bodies in Bitcoin's consensus encoding, each once.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SnapshotRecord {
     base: u32,
     chain: Vec<([u8; 32], [u8; 80])>,
     native: BTreeMap<u32, Vec<NativeTx>>,
-    headers_seen: BTreeMap<[u8; 32], Landing>,
+    counted: BTreeMap<[u8; 32], Counted>,
     headers_by_height: BTreeMap<u32, Vec<[u8; 32]>>,
-    settlements: BTreeMap<[u8; 32], Vec<Landing>>,
+    txs: Vec<Vec<u8>>,
+    bodies: BTreeMap<[u8; 32], BodyRecord>,
     ksn1_txs: BTreeMap<[u8; 32], u32>,
-    pending_txs: Vec<Vec<u8>>,
-    unresolved: BTreeMap<[u8; 32], Vec<PendingRecord>>,
 }
 
 #[cfg(test)]
@@ -808,16 +857,17 @@ impl BtcSnapshot {
 
     /// For tests: a native transaction confirmed at height `height` (after those already there).
     pub(crate) fn push_native(&mut self, height: u32, tx: NativeTx) {
-        self.native.entry(height).or_default().push(tx);
+        let native = Native::new(tx).expect("the forced-inclusion entry encodes");
+        self.native.entry(height).or_default().push(native);
     }
 
-    /// For tests: a fast-lane header appears at BTC height `height` (recorded as its first appearance when it has not
-    /// appeared before); the sender is a republish taking no reward.
+    /// For tests: a fast-lane header counts at BTC height `height` (unless it already counts); the sender is a
+    /// republish taking no reward. The block needs a body when one has been landed for it with [`BtcSnapshot::settle`].
     pub(crate) fn see_header(&mut self, block: [u8; 32], height: u32) {
         self.see_header_from(block, height, 0, Sender::Payee([0; 32]));
     }
 
-    /// For tests: a fast-lane header appears in transaction `index` at BTC height `height`; the payload's sender is
+    /// For tests: a fast-lane header counts in transaction `index` at BTC height `height`; the payload's sender is
     /// `sender`.
     pub(crate) fn see_header_from(
         &mut self,
@@ -826,12 +876,18 @@ impl BtcSnapshot {
         index: u32,
         sender: Sender,
     ) {
-        if let std::collections::btree_map::Entry::Vacant(seen) = self.headers_seen.entry(block) {
-            seen.insert(Landing {
-                txid: [0; 32],
-                height,
-                index,
-                sender,
+        let settles = self.bodies.contains_key(&block);
+        if let std::collections::btree_map::Entry::Vacant(seen) = self.counted.entry(block) {
+            seen.insert(Counted {
+                landing: Landing {
+                    txid: [0; 32],
+                    height,
+                    index,
+                    sender,
+                },
+                anchor: 0,
+                parent_anchor: 0,
+                settles,
             });
             self.headers_by_height
                 .entry(height)
@@ -840,27 +896,15 @@ impl BtcSnapshot {
         }
     }
 
-    /// For tests: a payload of the unknown fast-lane block `block` confirms in `tx` at BTC height `height`.
-    pub(crate) fn add_unresolved_for_test(
-        &mut self,
-        block: [u8; 32],
-        tx: bitcoin::Transaction,
-        height: u32,
-    ) {
-        self.unresolved
-            .entry(block)
-            .or_default()
-            .push((Arc::new(tx), height, 0));
-    }
-
-    /// For tests: a transaction landing the block's data on BTC confirms at height `height`; the sender is a republish
+    /// For tests: a transaction landing the block's body on BTC confirms at height `height`; the sender is a republish
     /// taking no reward.
     pub(crate) fn settle(&mut self, block: [u8; 32], txid: [u8; 32], height: u32) {
         self.settle_from(block, txid, height, 0, Sender::Payee([0; 32]));
     }
 
-    /// For tests: transaction `txid` landing the block's data on BTC confirms as transaction `index` at BTC height
-    /// `height`; the payload's sender is `sender`.
+    /// For tests: transaction `txid` landing the block's body on BTC confirms as transaction `index` at BTC height
+    /// `height`; the payload's sender is `sender`. The block needs a body from then on, and its header counts there
+    /// unless it already counts; only the first landing is kept.
     pub(crate) fn settle_from(
         &mut self,
         block: [u8; 32],
@@ -869,14 +913,43 @@ impl BtcSnapshot {
         index: u32,
         sender: Sender,
     ) {
-        let all = self.settlements.entry(block).or_default();
-        all.push(Landing {
+        let landing = Landing {
             txid,
             height,
             index,
             sender,
-        });
-        all.sort_by_key(Landing::order);
+        };
+        let earlier = self
+            .bodies
+            .get(&block)
+            .is_some_and(|body| (body.landing.height, body.landing.index) <= (height, index));
+        if !earlier {
+            let tx = Arc::new(bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            });
+            self.bodies.insert(
+                block,
+                LandedBody {
+                    landing,
+                    tx,
+                    slot: 0,
+                },
+            );
+        }
+        self.see_header_from(block, height, index, sender);
+        if let Some(counted) = self.counted.get_mut(&block) {
+            counted.settles = true;
+        }
+    }
+
+    /// For tests: the counted block needs a body (none has landed unless [`BtcSnapshot::settle`] lands one).
+    pub(crate) fn needs_body_for_test(&mut self, block: [u8; 32]) {
+        if let Some(counted) = self.counted.get_mut(&block) {
+            counted.settles = true;
+        }
     }
 
     /// For tests: a BTC reorg back to height `height` (removes all data above it).
@@ -931,9 +1004,8 @@ pub fn settlement_backlog(
         .filter(|b| b.settles)
         .filter(|b| {
             !snapshot
-                .settlements
-                .get(&b.hash)
-                .is_some_and(|all| all.iter().any(|l| l.height <= anchor_height))
+                .settlement_of(&b.hash)
+                .is_some_and(|(_, height)| height <= anchor_height)
         })
         .find(|b| {
             u64::from(b.anchor_height)
@@ -996,7 +1068,7 @@ pub fn carrier_of(
     let Some(block) = accepted_summary(main, block_hash)? else {
         return Ok(None);
     };
-    let Some(landing) = snapshot.data_landing(&block.hash, block.settles) else {
+    let Some(landing) = snapshot.data_landing(&block.hash) else {
         return Ok(None);
     };
     if limit.is_some_and(|limit| landing.height > limit) {
@@ -1135,10 +1207,11 @@ fn initial_base(params: &Params, genesis_anchor: &BtcAnchor) -> u32 {
 pub struct BtcTracker {
     client: Arc<dyn BtcClient>,
     params: Params,
+    /// The genesis block's hash: it always counts (D-135).
+    genesis: [u8; 32],
     genesis_anchor: BtcAnchor,
     snapshot: RwLock<Arc<BtcSnapshot>>,
-    /// Snapshot updates (sync, resolving pending settlements) are mutually exclusive, so that concurrent updates do not
-    /// overwrite each other.
+    /// Snapshot updates (sync, pruning) are mutually exclusive, so that concurrent updates do not overwrite each other.
     update: Mutex<()>,
 }
 
@@ -1146,17 +1219,43 @@ fn btc_err(e: impl std::fmt::Display) -> TrackerError {
     TrackerError::Btc(e.to_string())
 }
 
+/// A settlement or republish payload of the BTC block being scanned that counts ([`payload_counts`]) and has a sender.
+struct Scanned<'a> {
+    tx: &'a bitcoin::Transaction,
+    payload: Payload,
+    /// The hashes of its headers, in order.
+    hashes: Vec<[u8; 32]>,
+    landing: Landing,
+}
+
+impl Scanned<'_> {
+    fn headers(&self) -> &[BlockHeader] {
+        match &self.payload {
+            Payload::Settlement { headers, .. } | Payload::Headers { headers, .. } => headers,
+            Payload::NativeOp { .. } => &[],
+        }
+    }
+}
+
+/// A header of the BTC block being scanned that does not count yet, at its earliest appearance in that block.
+struct Appearance<'a> {
+    header: &'a BlockHeader,
+    landing: Landing,
+    /// Its position: the transaction's index in the BTC block and the header's index in the payload.
+    order: (u32, u32),
+}
+
 impl BtcTracker {
-    /// Creates the tracker: the genesis anchor block must be on bitcoind's best chain (D-035). The snapshot starts at
-    /// `min(genesis anchor height, h(genesis) + 1)` (the first forced-inclusion range of §7.4 starts at
-    /// `h(genesis) + 1`).
+    /// Creates the tracker: the anchor block of the genesis block `genesis` must be on bitcoind's best chain (D-035).
+    /// The snapshot starts at `min(genesis anchor height, h(genesis) + 1)` (the first forced-inclusion range of §7.4
+    /// starts at `h(genesis) + 1`).
     pub fn new(
         client: Arc<dyn BtcClient>,
         params: Params,
-        genesis_anchor: BtcAnchor,
+        genesis: &BlockHeader,
     ) -> Result<Self, TrackerError> {
-        let base = initial_base(&params, &genesis_anchor);
-        Self::with_snapshot(client, params, genesis_anchor, BtcSnapshot::new(base))
+        let base = initial_base(&params, &genesis.btc_anchor);
+        Self::with_snapshot(client, params, genesis, BtcSnapshot::new(base))
     }
 
     /// Creates the tracker continuing from `snapshot` (restored from a pruning checkpoint, D-097): the next sync
@@ -1165,9 +1264,10 @@ impl BtcTracker {
     pub fn with_snapshot(
         client: Arc<dyn BtcClient>,
         params: Params,
-        genesis_anchor: BtcAnchor,
+        genesis: &BlockHeader,
         snapshot: BtcSnapshot,
     ) -> Result<Self, TrackerError> {
+        let genesis_anchor = genesis.btc_anchor.clone();
         let info = client.header(&genesis_anchor.hash).map_err(btc_err)?;
         match info {
             Some(info) if info.in_best_chain && info.height == genesis_anchor.height => {}
@@ -1181,6 +1281,7 @@ impl BtcTracker {
         Ok(BtcTracker {
             client,
             params,
+            genesis: genesis.hash(),
             genesis_anchor,
             snapshot: RwLock::new(Arc::new(snapshot)),
             update: Mutex::new(()),
@@ -1197,8 +1298,8 @@ impl BtcTracker {
         )))
     }
 
-    /// Prunes the snapshot (D-097, [`BtcSnapshot::prune`]) and publishes the result. Returns the number of fast-lane
-    /// blocks whose records were dropped.
+    /// Prunes the snapshot (D-097, [`BtcSnapshot::prune`]) and publishes the result. Returns the number of records of
+    /// fast-lane blocks dropped.
     pub fn prune(&self, cut: u32, keep: &dyn Fn(&[u8; 32]) -> bool) -> Result<usize, TrackerError> {
         let _guard = self.lock_update()?;
         let mut next = (*self.snapshot()?).clone();
@@ -1235,7 +1336,7 @@ impl BtcTracker {
     }
 
     /// Runs one round of syncing with bitcoind's best chain (at most [`SYNC_BATCH`] new blocks). Returns whether the
-    /// snapshot changed. `known` identifies which fast-lane block a settlement transaction confirmed on BTC belongs to.
+    /// snapshot changed. `known` checks the headers that may count (D-135).
     pub fn sync(&self, known: &dyn KnownBlocks) -> Result<bool, TrackerError> {
         let _guard = self.lock_update()?;
         let (tip_height, tip_hash) = self.client.tip().map_err(btc_err)?;
@@ -1319,96 +1420,9 @@ impl BtcTracker {
             .map_err(|_| TrackerError::Internal("the BTC snapshot update lock is poisoned".into()))
     }
 
-    /// Checks and counts the pending payloads of block `block_hash` (the block is now known). Returns whether the
-    /// snapshot changed; on a data source fault the pending items are kept. The snapshot is copied only when the block
-    /// turns out to be known.
-    pub fn resolve(
-        &self,
-        known: &dyn KnownBlocks,
-        block_hash: &[u8; 32],
-    ) -> Result<bool, TrackerError> {
-        let _guard = self.lock_update()?;
-        let old = self.snapshot()?;
-        if !old.unresolved.contains_key(block_hash) {
-            return Ok(false);
-        }
-        let data = known.block_data(block_hash)?;
-        if matches!(data, BlockData::Unknown) {
-            return Ok(false);
-        }
-        let mut next = BtcSnapshot::clone(&old);
-        self.resolve_in(&mut next, block_hash, data, &mut Decoded::default());
-        self.publish(next)?;
-        Ok(true)
-    }
-
-    /// Checks and counts the pending settlements of all known blocks. Returns whether the snapshot changed.
-    ///
-    /// Every pending block is looked up, but the snapshot is copied only once one of them turns out to be known: the
-    /// pending payloads of blocks that stay unknown (such as made-up headers nobody produces) cost one lookup per round
-    /// and nothing more.
-    pub fn resolve_all(&self, known: &dyn KnownBlocks) -> Result<bool, TrackerError> {
-        let _guard = self.lock_update()?;
-        let old = self.snapshot()?;
-        let mut next: Option<BtcSnapshot> = None;
-        let mut decoded = Decoded::default();
-        for block_hash in old.unresolved.keys() {
-            let data = known.block_data(block_hash)?;
-            if matches!(data, BlockData::Unknown) {
-                continue;
-            }
-            let snap = next.get_or_insert_with(|| BtcSnapshot::clone(&old));
-            self.resolve_in(snap, block_hash, data, &mut decoded);
-        }
-        let Some(next) = next else {
-            return Ok(false);
-        };
-        self.publish(next)?;
-        Ok(true)
-    }
-
-    /// Resolves the pending payloads of block `block_hash` in `snap` by the block's body information `data` (nothing
-    /// changes while the block is still unknown).
-    fn resolve_in(
-        &self,
-        snap: &mut BtcSnapshot,
-        block_hash: &[u8; 32],
-        data: BlockData,
-        decoded: &mut Decoded,
-    ) {
-        let ctx = match data {
-            BlockData::Unknown => return,
-            BlockData::NoBody => {
-                snap.unresolved.remove(block_hash);
-                return;
-            }
-            BlockData::Body(ctx) => ctx,
-        };
-        let pending = snap.unresolved.remove(block_hash).unwrap_or_default();
-        for (tx, height, index) in pending {
-            let txid = tx.compute_txid().to_byte_array();
-            match decoded.lands(&self.params, &tx, &ctx) {
-                Ok(sender) => {
-                    let all = snap.settlements.entry(*block_hash).or_default();
-                    all.push(Landing {
-                        txid,
-                        height,
-                        index,
-                        sender,
-                    });
-                    all.sort_by_key(Landing::order);
-                }
-                Err(e) => eprintln!(
-                    "[ksana-node] transaction {} at BTC height {height} cannot land the data of fast-lane block {}: {e}",
-                    hex::encode(txid),
-                    hex::encode(block_hash)
-                ),
-            }
-        }
-    }
-
-    /// Scans one BTC block: the header, native transactions, KSN1 settlement and republish payloads (those that count,
-    /// [`payload_counts`]).
+    /// Scans one BTC block: the header, native transactions, and the KSN1 settlement and republish payloads that count
+    /// ([`payload_counts`]): the headers that count at this height, then the bodies that land at it (D-135, see the
+    /// module docs).
     fn scan(
         &self,
         snap: &mut BtcSnapshot,
@@ -1421,10 +1435,15 @@ impl BtcTracker {
             .try_into()
             .map_err(|_| TrackerError::Btc("the block header is not 80 bytes".into()))?;
         snap.chain.push((hash, header));
-        let natives = native_txs(&self.params, block);
+        let natives = native_txs(&self.params, block)
+            .into_iter()
+            .map(Native::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TrackerError::Internal)?;
         if !natives.is_empty() {
             snap.native.insert(height, natives);
         }
+        let mut scanned = Vec::new();
         for (index, tx) in block.txdata.iter().enumerate() {
             let Some((_, payload)) = tx_payload(&self.params, tx) else {
                 continue;
@@ -1439,7 +1458,6 @@ impl BtcTracker {
             let index = u32::try_from(index).map_err(|_| {
                 TrackerError::Btc("the transaction index in the BTC block overflows".into())
             })?;
-            known.observe_payload(snap, height, tx, &payload)?;
             let txid = tx.compute_txid().to_byte_array();
             if matches!(payload, Payload::Settlement { .. }) {
                 snap.ksn1_txs.entry(txid).or_insert(height);
@@ -1448,117 +1466,206 @@ impl BtcTracker {
             let Some(sender) = payload_sender(&payload) else {
                 continue;
             };
-            let landing = Landing {
-                txid,
-                height,
-                index,
-                sender,
+            let hashes = headers.iter().map(BlockHeader::hash).collect();
+            scanned.push(Scanned {
+                tx,
+                payload,
+                hashes,
+                landing: Landing {
+                    txid,
+                    height,
+                    index,
+                    sender,
+                },
+            });
+        }
+        self.count_headers(snap, height, &scanned, known)?;
+        self.land_bodies(snap, height, &scanned)
+    }
+
+    /// Counts the headers carried by this BTC block's payloads (SPEC §6.5 item 1, D-135): a header counts once its
+    /// anchor is on the best chain, each of its parents has counted (below, or at this height) and `known` accepts it.
+    /// A header is tried once its last parent counts, the ready ones in order of first appearance; whether a header
+    /// counts depends only on it, its past and the BTC chain, so the headers that count are the same in any order of the
+    /// transactions and of the headers in their payloads. A header with a parent that neither counts nor appears in
+    /// this block is not even tried.
+    fn count_headers(
+        &self,
+        snap: &mut BtcSnapshot,
+        height: u32,
+        scanned: &[Scanned<'_>],
+        known: &dyn KnownBlocks,
+    ) -> Result<(), TrackerError> {
+        // each header not counted yet, at its earliest appearance in this block
+        let mut waiting: BTreeMap<[u8; 32], Appearance<'_>> = BTreeMap::new();
+        for s in scanned {
+            for (position, (header, hash)) in s.headers().iter().zip(&s.hashes).enumerate() {
+                if *hash == self.genesis || snap.counted.contains_key(hash) {
+                    continue;
+                }
+                let position = u32::try_from(position).unwrap_or(u32::MAX);
+                waiting.entry(*hash).or_insert(Appearance {
+                    header,
+                    landing: s.landing,
+                    order: (s.landing.index, position),
+                });
+            }
+        }
+        // how many parents each header still waits for, and the headers waiting for each parent: a parent that has not
+        // counted must be among them, or the header cannot count at this height
+        let mut missing: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+        let mut children: BTreeMap<[u8; 32], Vec<[u8; 32]>> = BTreeMap::new();
+        let mut ready: BTreeSet<((u32, u32), [u8; 32])> = BTreeSet::new();
+        for (hash, appearance) in &waiting {
+            let parents: Vec<&[u8; 32]> = appearance
+                .header
+                .parents
+                .iter()
+                .filter(|p| **p != self.genesis && !snap.counted.contains_key(*p))
+                .collect();
+            if parents.iter().any(|p| !waiting.contains_key(*p)) {
+                continue;
+            }
+            if parents.is_empty() {
+                ready.insert((appearance.order, *hash));
+                continue;
+            }
+            missing.insert(*hash, parents.len());
+            for parent in parents {
+                children.entry(*parent).or_default().push(*hash);
+            }
+        }
+        // the root of each forced-inclusion window met at this height: every header counting here anchors below it
+        // (`payload_counts`), so the native transactions of its window are all scanned and stay as they are
+        let mut roots = BTreeMap::new();
+        while let Some((_, hash)) = ready.pop_first() {
+            let Some(appearance) = waiting.get(&hash) else {
+                continue;
             };
-            for h in headers {
-                if let std::collections::btree_map::Entry::Vacant(seen) =
-                    snap.headers_seen.entry(h.hash())
-                {
-                    let hash = *seen.key();
-                    seen.insert(landing);
-                    snap.headers_by_height.entry(height).or_default().push(hash);
-                }
-            }
-            // each body the payload carries (the settlement payload's own block and the blocks in `bodies`, D-077):
-            // whether it lands that block's data on BTC
-            let carried = bodies_in(&payload);
-            // the blocks not known yet share one copy of the transaction, however many bodies it carries
-            let mut copy: Option<Arc<bitcoin::Transaction>> = None;
-            for (block_hash, _) in &carried {
-                let ctx = match known.block_data(block_hash)? {
-                    BlockData::NoBody => continue,
-                    BlockData::Unknown => {
-                        // the block is not known yet: check once it is known (BtcTracker::resolve)
-                        let copy = copy.get_or_insert_with(|| Arc::new(tx.clone()));
-                        snap.unresolved.entry(*block_hash).or_default().push((
-                            Arc::clone(copy),
-                            height,
-                            index,
-                        ));
-                        continue;
-                    }
-                    BlockData::Body(ctx) => ctx,
+            let Some(counted) = self.try_count(
+                snap,
+                appearance.header,
+                appearance.landing,
+                known,
+                &mut roots,
+            )?
+            else {
+                continue;
+            };
+            snap.counted.insert(hash, counted);
+            snap.headers_by_height.entry(height).or_default().push(hash);
+            for child in children.remove(&hash).unwrap_or_default() {
+                let Some(left) = missing.get_mut(&child) else {
+                    continue;
                 };
-                match carries_body(carried.iter().map(|(h, e)| (h, *e)), &ctx) {
-                    Ok(()) => snap
-                        .settlements
-                        .entry(*block_hash)
-                        .or_default()
-                        .push(landing),
-                    Err(e) => eprintln!(
-                        "[ksana-node] transaction {} at BTC height {height} cannot land the data of fast-lane block {}: {e}",
-                        hex::encode(txid),
-                        hex::encode(block_hash)
-                    ),
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    missing.remove(&child);
+                    if let Some(next) = waiting.get(&child) {
+                        ready.insert((next.order, child));
+                    }
                 }
             }
         }
         Ok(())
     }
-}
 
-/// Whether one of the bodies a payload carries ([`bodies_in`]: the settlement payload's own block entries and the
-/// items in `bodies`, as block hash and entries) is the body of the block described by `ctx` (D-077): both the header
-/// and the entries the same.
-fn carries_body<'a>(
-    mut bodies: impl Iterator<Item = (&'a [u8; 32], &'a [EntryData])>,
-    ctx: &SettlementContext,
-) -> Result<(), String> {
-    let hash = ctx.header.hash();
-    if bodies.any(|(h, entries)| *h == hash && entries == ctx.entries.as_slice()) {
-        Ok(())
-    } else {
-        Err("the payload does not carry the block's body".into())
-    }
-}
-
-/// What resolving needs from a pending transaction: the bodies its payload carries ([`bodies_in`]) and the payload's
-/// sender ([`payload_sender`]); `None` when it has no decodable KSN1 payload.
-type Carried = Option<(Vec<([u8; 32], Vec<EntryData>)>, Option<Sender>)>;
-
-/// The pending transaction decoded last in a resolution round and what it carries: a run of pending payloads sharing
-/// one transaction (a payload can repeat a block's header and body up to `MAX_SETTLEMENT_HEADERS` times) decodes it and
-/// hashes its headers once, not once per payload. Holds one transaction at a time.
-#[derive(Default)]
-struct Decoded(Option<(Arc<bitcoin::Transaction>, Carried)>);
-
-impl Decoded {
-    /// Whether pending transaction `tx` confirmed on BTC lands the data of the block described by `ctx` (D-077): its
-    /// payload carries the same body as that block (whether or not the transaction is the settlement transaction some
-    /// block carries). When it does, returns the payload's sender (D-095).
-    fn lands(
-        &mut self,
-        params: &Params,
-        tx: &Arc<bitcoin::Transaction>,
-        ctx: &SettlementContext,
-    ) -> Result<Sender, String> {
-        if !self
-            .0
-            .as_ref()
-            .is_some_and(|(last, _)| Arc::ptr_eq(last, tx))
-        {
-            self.0 = None;
+    /// Whether `header`, whose parents have all counted, counts (D-135): its anchor is on the best chain and `known`
+    /// accepts it. When it does, also settles whether its block needs a body, from the root of the entries it must
+    /// force-include (D-043, D-077), computed from the leaf hashes of their native transactions and kept in `roots` by
+    /// window for the other headers of the BTC block being scanned.
+    fn try_count(
+        &self,
+        snap: &BtcSnapshot,
+        header: &BlockHeader,
+        landing: Landing,
+        known: &dyn KnownBlocks,
+        roots: &mut BTreeMap<(u32, u32), [u8; 32]>,
+    ) -> Result<Option<Counted>, TrackerError> {
+        if !snap.contains(&header.btc_anchor) {
+            return Ok(None);
         }
-        let (_, carried) = self
-            .0
-            .get_or_insert_with(|| (Arc::clone(tx), Decoded::carried(params, tx)));
-        let (bodies, sender) = carried.as_ref().ok_or("no decodable KSN1 payload")?;
-        carries_body(bodies.iter().map(|(h, e)| (h, e.as_slice())), ctx)?;
-        sender.ok_or_else(|| "the payload has no sender".to_string())
+        let mut parent_anchor = 0u32;
+        for parent in &header.parents {
+            let anchor = if *parent == self.genesis {
+                self.genesis_anchor.height
+            } else {
+                match snap.counted.get(parent) {
+                    Some(counted) => counted.anchor,
+                    None => return Ok(None),
+                }
+            };
+            parent_anchor = parent_anchor.max(anchor);
+        }
+        if !known.count(snap, header)? {
+            return Ok(None);
+        }
+        let anchor = header.btc_anchor.height;
+        let root = *roots
+            .entry((parent_anchor, anchor))
+            .or_insert_with(|| snap.forced_root(&self.params, parent_anchor, anchor));
+        Ok(Some(Counted {
+            landing,
+            anchor,
+            parent_anchor,
+            settles: root != header.entries_root,
+        }))
     }
 
-    /// Decodes what transaction `tx` carries.
-    fn carried(params: &Params, tx: &bitcoin::Transaction) -> Carried {
-        let (_, payload) = tx_payload(params, tx)?;
-        let bodies = bodies_in(&payload)
-            .into_iter()
-            .map(|(hash, entries)| (hash, entries.to_vec()))
-            .collect();
-        Some((bodies, payload_sender(&payload)))
+    /// Lands the bodies carried by this BTC block's payloads (D-077, D-135): a body lands for a block whose header
+    /// counts and that needs one, when its entries match the header's `entries_root` once the entries the block must
+    /// force-include replace its `Forced` entries. The root is computed from the leaf hashes of the native
+    /// transactions those entries name and of the body's own entries ([`converted_root`]), so a body costs its own
+    /// bytes. Only the first landing is kept, the earliest in the BTC block; the bodies one transaction lands share one
+    /// copy of it.
+    fn land_bodies(
+        &self,
+        snap: &mut BtcSnapshot,
+        height: u32,
+        scanned: &[Scanned<'_>],
+    ) -> Result<(), TrackerError> {
+        for s in scanned {
+            let mut copy: Option<Arc<bitcoin::Transaction>> = None;
+            let mut refused = 0usize;
+            for (slot, (index, entries)) in bodies_at(&s.payload).into_iter().enumerate() {
+                let (Some(hash), Some(header)) = (s.hashes.get(index), s.headers().get(index))
+                else {
+                    continue;
+                };
+                if snap.bodies.contains_key(hash) {
+                    continue;
+                }
+                let Some(counted) = snap.counted.get(hash).filter(|c| c.settles) else {
+                    continue;
+                };
+                let forced =
+                    snap.forced_leaves(&self.params, counted.parent_anchor, counted.anchor);
+                let root = converted_root(entries, forced).map_err(|e| {
+                    TrackerError::Internal(format!("computing entries_root failed: {e}"))
+                })?;
+                if root != Some(header.entries_root) {
+                    refused = refused.saturating_add(1);
+                    continue;
+                }
+                let tx = copy.get_or_insert_with(|| Arc::new(s.tx.clone()));
+                snap.bodies.insert(
+                    *hash,
+                    LandedBody {
+                        landing: s.landing,
+                        tx: Arc::clone(tx),
+                        slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                    },
+                );
+            }
+            if refused > 0 {
+                eprintln!(
+                    "[ksana-btc] transaction {} at BTC height {height} carries {refused} bodies that do not match their \
+                     headers (D-135)",
+                    hex::encode(s.landing.txid)
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2324,7 +2431,7 @@ mod tests {
     }
 
     /// Pruning the snapshot (D-097) drops the BTC blocks below the cut and the records of the fast-lane blocks not kept
-    /// whose data appeared below it, keeps everything at or above the cut and whatever `keep` protects, and the record
+    /// that counted or landed below it, keeps everything at or above the cut and whatever `keep` protects, and the record
     /// of a snapshot restores the same snapshot.
     #[test]
     fn a_pruned_snapshot_keeps_the_cut_and_up_and_its_record_round_trips() {
@@ -2340,20 +2447,6 @@ mod tests {
                 snapshot.settle([b; 32], [b ^ 0xff; 32], u32::from(b));
             }
         }
-        let tx = |seed: u8| bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint {
-                    txid: bitcoin::Txid::from_byte_array([seed; 32]),
-                    vout: 0,
-                },
-                ..Default::default()
-            }],
-            output: vec![],
-        };
-        snapshot.add_unresolved_for_test([0xe1; 32], tx(1), 12);
-        snapshot.add_unresolved_for_test([0xe2; 32], tx(2), 25);
         let record = snapshot.record();
         let restored =
             BtcSnapshot::from_record(borsh::from_slice(&borsh::to_vec(&record).unwrap()).unwrap())
@@ -2368,20 +2461,19 @@ mod tests {
         assert_eq!(pruned.hash_at(19), None);
         assert_eq!(pruned.hash_at(20), snapshot.hash_at(20));
         for b in 11..=29u8 {
-            let settles = b % 2 == 1;
             let kept = b >= 20 || b == 13;
             assert_eq!(
-                pruned.block_data_height(&[b; 32], settles),
+                pruned.block_data_height(&[b; 32]),
                 kept.then_some(u32::from(b)),
                 "block {b}"
             );
+            assert_eq!(pruned.counted_at(&[b; 32]).is_some(), kept, "block {b}");
         }
         assert!(pruned.headers_at(18).is_empty());
         assert_eq!(pruned.headers_at(20), snapshot.headers_at(20));
-        assert!(!pruned.has_unresolved(&[0xe1; 32]));
-        assert!(pruned.has_unresolved(&[0xe2; 32]));
-        // 8 blocks below the cut not protected (11, 12, 14..=19 minus 13) and one pending payload
-        assert_eq!(dropped, 9);
+        // below the cut and not protected: the counted headers of 11, 12 and 14 to 19 and the bodies of 11, 15, 17 and
+        // 19
+        assert_eq!(dropped, 12);
         // a cut not above the base, or above the tip, changes nothing beyond the tip
         let mut again = pruned.clone();
         assert_eq!(again.prune(15, &|_| false), 0);
@@ -2398,13 +2490,12 @@ mod tests {
     }
 }
 
-/// Pending payloads on the mock BTC chain: bodies carried by a payload whose blocks this side did not know when it was
-/// scanned (joined late, catching up, or made-up headers nobody will ever produce).
+/// Counting headers and landing bodies on the mock BTC chain (D-135): a header counts once its parents have, in any
+/// order within a BTC block, a body lands only with its counted header, and nothing is held for what does not count.
 #[cfg(test)]
 #[cfg(feature = "mock")]
-mod pending_tests {
-    use std::collections::BTreeSet;
-    use std::sync::Weak;
+mod counting_tests {
+    use std::slice;
 
     use bitcoin::key::{Keypair, Secp256k1};
     use bitcoin::secp256k1::SecretKey;
@@ -2412,123 +2503,73 @@ mod pending_tests {
         absolute, transaction, Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash,
         Witness,
     };
-    use ksana_primitives::{compact, Body, DEVNET};
+    use ksana_crypto::entries_root;
+    use ksana_primitives::{compact, Body, EntryData, DEVNET};
+    use proptest::prelude::*;
 
     use super::*;
+    use crate::bodies::Bodies;
     use crate::envelope::envelope_script;
     use crate::mock::MockBtc;
 
-    /// The payee account of the republish payload.
+    /// The payee account of the republish payloads.
     const PAYEE: [u8; 32] = [0x66; 32];
 
-    /// Answers `block_data` from a table (blocks not in it are unknown). While a pending transaction is watched, every
-    /// lookup records how many references to it exist at that moment.
+    /// The headers and the bodies (by header index) one payload carries.
+    type Carried = (Vec<BlockHeader>, Vec<(usize, Vec<EntryData>)>);
+
+    /// Accepts every header but those in `rejected`, and records each header it is asked about.
     #[derive(Default)]
-    struct Table {
-        answers: Mutex<BTreeMap<[u8; 32], BlockData>>,
-        watched: Mutex<Option<Weak<Transaction>>>,
-        seen: Mutex<Vec<usize>>,
+    struct Accepts {
+        rejected: BTreeSet<[u8; 32]>,
+        asked: Mutex<Vec<[u8; 32]>>,
     }
 
-    impl Table {
-        fn new(answers: BTreeMap<[u8; 32], BlockData>) -> Self {
-            Table {
-                answers: Mutex::new(answers),
-                ..Table::default()
-            }
-        }
-
-        fn set(&self, hash: [u8; 32], data: BlockData) {
-            self.answers.lock().unwrap().insert(hash, data);
+    impl Accepts {
+        fn asked(&self) -> Vec<[u8; 32]> {
+            self.asked.lock().unwrap().clone()
         }
     }
 
-    impl KnownBlocks for Table {
-        fn block_data(&self, block_hash: &[u8; 32]) -> Result<BlockData, TrackerError> {
-            if let Some(watched) = &*self.watched.lock().unwrap() {
-                self.seen.lock().unwrap().push(watched.strong_count());
-            }
-            let answers = self.answers.lock().unwrap();
-            Ok(answers
-                .get(block_hash)
-                .cloned()
-                .unwrap_or(BlockData::Unknown))
+    impl KnownBlocks for Accepts {
+        fn count(&self, _: &BtcSnapshot, header: &BlockHeader) -> Result<bool, TrackerError> {
+            let hash = header.hash();
+            self.asked.lock().unwrap().push(hash);
+            Ok(!self.rejected.contains(&hash))
         }
     }
 
-    fn body(header: &BlockHeader, entries: Vec<EntryData>) -> BlockData {
-        BlockData::Body(Box::new(SettlementContext {
-            header: header.clone(),
-            entries,
-        }))
-    }
-
-    /// The body of made-up block `i`: one unlock entry.
-    fn unlock(i: usize) -> Vec<EntryData> {
+    /// The body of block `i` in a payload: one unlock entry.
+    fn unlock(i: u64) -> Vec<EntryData> {
         vec![EntryData::Unlock {
-            height: u64::try_from(i).unwrap() + 1,
+            height: i + 1,
             index: 0,
         }]
     }
 
-    /// The entries of the block the settlement payload belongs to.
-    fn own_entries() -> Vec<EntryData> {
-        vec![EntryData::Unlock {
-            height: 77,
-            index: 1,
-        }]
+    /// The block entries of a body without forced-inclusion entries.
+    fn entries(body: &[EntryData]) -> Vec<Entry> {
+        crate::bodies::convert(body, &[]).unwrap()
     }
 
-    /// `n` made-up headers in a chain; with the empty entries root each one after the first takes 14 bytes in a payload
-    /// (D-075). No such blocks exist, so they stay unknown unless a test says otherwise.
-    fn made_up_headers(n: usize) -> Vec<BlockHeader> {
-        let mut parent = [0x11; 32];
-        (0..n)
-            .map(|i| {
-                let i = u64::try_from(i).unwrap();
-                let header = BlockHeader {
-                    version: 1,
-                    height: i + 1,
-                    parents: vec![parent],
-                    btc_anchor: BtcAnchor {
-                        height: 1,
-                        hash: [0x22; 32],
-                    },
-                    entries_root: compact::empty_entries_root(),
-                    state_root: [0x44; 32],
-                    producer: [0x55; 32],
-                    timestamp: 1_700_000_000 + i,
-                    bits: 0x207f_ffff,
-                    nonce: i,
-                };
-                parent = header.hash();
-                header
-            })
-            .collect()
-    }
-
-    /// A transaction spending `inputs` with the KSN1 envelope carrying `payload` in the first input's witness and a
-    /// `junk`-byte leaf that is not an envelope in the second one (signatures and control blocks are placeholders: the
-    /// mock chain checks neither).
-    fn carrier(inputs: &[bitcoin::OutPoint], payload: &Payload, junk: usize) -> Transaction {
+    /// A transaction spending `inputs` with the KSN1 envelope carrying `payload` in the first input's witness
+    /// (signatures and control blocks are placeholders: the mock chain checks neither).
+    fn carrier(inputs: &[bitcoin::OutPoint], payload: &Payload) -> Transaction {
         let key =
             Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[7; 32]).unwrap())
                 .x_only_public_key()
                 .0;
         let leaf = envelope_script(&key, &DEVNET.magic, &payload.encode(&DEVNET).unwrap()).unwrap();
-        let witness = |leaf: Vec<u8>| Witness::from_slice(&[vec![1; 64], leaf, vec![0xc0; 33]]);
-        let witnesses = [witness(leaf.to_bytes()), witness(vec![0x51; junk])];
         Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
             input: inputs
                 .iter()
-                .zip(witnesses)
-                .map(|(previous_output, witness)| TxIn {
+                .map(|previous_output| TxIn {
                     previous_output: *previous_output,
                     script_sig: ScriptBuf::new(),
                     sequence: Sequence::MAX,
-                    witness,
+                    witness: Witness::from_slice(&[vec![1; 64], leaf.to_bytes(), vec![0xc0; 33]]),
                 })
                 .collect(),
             output: vec![TxOut {
@@ -2542,416 +2583,713 @@ mod pending_tests {
         tx.compute_txid().to_byte_array()
     }
 
-    /// BTC block 2 holds two transactions carrying bodies: transaction 1 a republish payload with the headers and
-    /// bodies of `n` made-up blocks (plus a `junk`-byte leaf in a second input), transaction 2 the settlement payload of
-    /// block `own`, which also carries the bodies of the first two made-up blocks again.
-    struct Scenario {
+    /// A mock BTC chain: block 1 funds `coins` outputs, blocks 2 and 3 are empty (anchors for the headers), and the
+    /// genesis block of a fast-lane chain anchors at its block 0.
+    struct Btc {
         btc: Arc<MockBtc>,
-        headers: Vec<BlockHeader>,
-        own: BlockHeader,
-        republish: Transaction,
-        settlement: Transaction,
+        coins: Vec<bitcoin::OutPoint>,
+        genesis: BlockHeader,
     }
 
-    impl Scenario {
-        fn new(n: usize, junk: usize) -> Self {
+    impl Btc {
+        fn new(coins: usize) -> Self {
             let btc = Arc::new(MockBtc::new());
             let funding = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([8; 20]));
-            let funded = btc.fund(&funding, &[50_000, 50_000, 50_000]);
-            let headers = made_up_headers(n);
-            let republish = Payload::Headers {
-                headers: headers.clone(),
-                bodies: (0..n)
-                    .map(|i| Body {
-                        header: u32::try_from(i).unwrap(),
-                        entries: unlock(i),
-                    })
-                    .collect(),
-                payee: PAYEE,
-            };
-            let republish = carrier(&funded[..2], &republish, junk);
-            let own = BlockHeader {
-                height: 9_999,
-                nonce: 9_999,
-                ..headers[1].clone()
-            };
-            let settlement = Payload::Settlement {
-                headers: vec![headers[0].clone(), headers[1].clone(), own.clone()],
-                entries: own_entries(),
-                bodies: vec![
-                    Body {
-                        header: 0,
-                        entries: unlock(0),
-                    },
-                    Body {
-                        header: 1,
-                        entries: unlock(1),
-                    },
-                ],
-            };
-            let settlement = carrier(&funded[2..], &settlement, 0);
-            btc.mine_block(vec![republish.clone(), settlement.clone()])
-                .unwrap();
-            Scenario {
+            let coins = btc.fund(&funding, &vec![50_000; coins]);
+            btc.mine(2);
+            let mut chain = Btc {
                 btc,
-                headers,
-                own,
-                republish,
-                settlement,
+                coins,
+                genesis: BlockHeader {
+                    version: 1,
+                    height: 0,
+                    parents: Vec::new(),
+                    btc_anchor: BtcAnchor {
+                        height: 0,
+                        hash: [0; 32],
+                    },
+                    entries_root: compact::empty_entries_root(),
+                    state_root: [0x44; 32],
+                    producer: [0; 32],
+                    timestamp: 1_700_000_000,
+                    bits: 0x207f_ffff,
+                    nonce: 0,
+                },
+            };
+            chain.genesis.btc_anchor = chain.anchor(0);
+            chain
+        }
+
+        /// The BTC block at `height` on the best chain.
+        fn anchor(&self, height: u32) -> BtcAnchor {
+            BtcAnchor {
+                height,
+                hash: self.btc.block_hash(height).unwrap().unwrap(),
             }
         }
 
         fn tracker(&self) -> BtcTracker {
-            tracker_on(&self.btc)
+            BtcTracker::new(self.btc.clone(), DEVNET, &self.genesis).unwrap()
         }
 
-        fn hash(&self, i: usize) -> [u8; 32] {
-            self.headers[i].hash()
+        /// A transaction carrying `payload`, spending a coin of its own.
+        fn carry(&mut self, payload: &Payload) -> Transaction {
+            let coin = self.coins.pop().unwrap();
+            carrier(&[coin], payload)
+        }
+
+        /// Mines a block holding a transaction for each payload, in order; returns them.
+        fn mine(&mut self, payloads: &[Payload]) -> Vec<Transaction> {
+            let txs: Vec<Transaction> = payloads.iter().map(|p| self.carry(p)).collect();
+            self.btc.mine_block(txs.clone()).unwrap();
+            txs
         }
     }
 
-    /// A tracker following `btc` from its genesis block.
-    fn tracker_on(btc: &Arc<MockBtc>) -> BtcTracker {
-        let client: Arc<dyn BtcClient> = btc.clone();
-        let genesis = BtcAnchor {
-            height: 0,
-            hash: client.block_hash(0).unwrap().unwrap(),
-        };
-        BtcTracker::new(client, DEVNET, genesis).unwrap()
+    /// A header of a block on `parents`, anchored at `anchor`, with the body `body` (the empty entries root without
+    /// one: the block needs no body).
+    fn header(
+        parents: &[&BlockHeader],
+        anchor: &BtcAnchor,
+        tag: u64,
+        body: Option<&[EntryData]>,
+    ) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            height: parents.iter().map(|p| p.height).max().unwrap_or(0) + 1,
+            parents: parents.iter().map(|p| p.hash()).collect(),
+            btc_anchor: anchor.clone(),
+            entries_root: match body {
+                Some(body) => entries_root(&entries(body)).unwrap(),
+                None => compact::empty_entries_root(),
+            },
+            state_root: [0x44; 32],
+            producer: [0x55; 32],
+            timestamp: 1_700_000_000 + tag,
+            bits: 0x207f_ffff,
+            nonce: tag,
+        }
     }
 
-    /// BTC block 2 holds a republish payload (transaction 1) repeating the header and body of one made-up block
-    /// `copies` times: every copy has the same block hash.
-    fn repeated(copies: usize) -> (Arc<MockBtc>, BlockHeader, Transaction) {
-        let btc = Arc::new(MockBtc::new());
-        let funding = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([8; 20]));
-        let funded = btc.fund(&funding, &[50_000, 50_000]);
-        let header = made_up_headers(1).remove(0);
-        let payload = Payload::Headers {
-            headers: vec![header.clone(); copies],
-            bodies: (0..copies)
-                .map(|i| Body {
-                    header: u32::try_from(i).unwrap(),
-                    entries: unlock(0),
+    /// `n` headers in a chain on `first`, each with the body `unlock(tag)`.
+    fn chain_on(first: &BlockHeader, anchor: &BtcAnchor, n: u64) -> Vec<BlockHeader> {
+        let mut out: Vec<BlockHeader> = Vec::new();
+        for tag in 0..n {
+            let parent = out.last().unwrap_or(first).clone();
+            out.push(header(&[&parent], anchor, tag, Some(&unlock(tag))));
+        }
+        out
+    }
+
+    /// A republish payload carrying `headers`, with the bodies of those at the positions in `bodies` (ascending).
+    fn republish(headers: &[BlockHeader], bodies: &[(usize, Vec<EntryData>)]) -> Payload {
+        Payload::Headers {
+            headers: headers.to_vec(),
+            bodies: bodies
+                .iter()
+                .map(|(at, entries)| Body {
+                    header: u32::try_from(*at).unwrap(),
+                    entries: entries.clone(),
                 })
                 .collect(),
             payee: PAYEE,
-        };
-        let tx = carrier(&funded, &payload, 0);
-        assert_eq!(tx_payload(&DEVNET, &tx).map(|(_, p)| p), Some(payload));
-        btc.mine_block(vec![tx.clone()]).unwrap();
-        (btc, header, tx)
-    }
-
-    /// The transactions held for the pending payloads of transaction `index` in BTC block 2 (one per pending body).
-    fn pending_of(snap: &BtcSnapshot, index: u32) -> Vec<&Arc<Transaction>> {
-        snap.unresolved
-            .values()
-            .flatten()
-            .filter(|(_, height, at)| (*height, *at) == (2, index))
-            .map(|(tx, _, _)| tx)
-            .collect()
-    }
-
-    /// A payload carrying the bodies of many blocks unknown when it is scanned keeps one copy of its transaction for
-    /// all of them, however many bodies it carries (a republish payload carries up to `MAX_SETTLEMENT_HEADERS`); the
-    /// copy is released once they are all resolved.
-    #[test]
-    fn pending_bodies_of_one_transaction_share_one_copy() {
-        let n = DEVNET.max_settlement_headers;
-        let s = Scenario::new(n, 16 * 1024);
-        let tracker = s.tracker();
-        let table = Table::default();
-        assert!(tracker.sync(&table).unwrap());
-        let copies = {
-            let snap = tracker.snapshot().unwrap();
-            assert!((0..n).all(|i| snap.has_unresolved(&s.hash(i))));
-            assert!(snap.has_unresolved(&s.own.hash()));
-            let (republish, settlement) = (pending_of(&snap, 1), pending_of(&snap, 2));
-            assert_eq!((republish.len(), settlement.len()), (n, 3));
-            assert!(republish.iter().all(|tx| ***tx == s.republish));
-            assert!(settlement.iter().all(|tx| ***tx == s.settlement));
-            let copies: BTreeSet<*const Transaction> =
-                republish.iter().map(|tx| Arc::as_ptr(tx)).collect();
-            let size = serialize(&s.republish).len();
-            assert_eq!(
-                copies.len(),
-                1,
-                "{n} pending bodies hold {} copies of the {size}-byte transaction carrying them ({} bytes)",
-                copies.len(),
-                copies.len() * size
-            );
-            assert_eq!(Arc::strong_count(republish[0]), n);
-            let distinct: BTreeSet<*const Transaction> =
-                settlement.iter().map(|tx| Arc::as_ptr(tx)).collect();
-            assert_eq!(distinct.len(), 1);
-            assert_eq!(Arc::strong_count(settlement[0]), 3);
-            [Arc::downgrade(republish[0]), Arc::downgrade(settlement[0])]
-        };
-
-        // resolving every block releases both copies
-        for (i, header) in s.headers.iter().enumerate() {
-            table.set(header.hash(), body(header, unlock(i)));
         }
-        table.set(s.own.hash(), body(&s.own, own_entries()));
-        assert!(tracker.resolve_all(&table).unwrap());
-        let snap = tracker.snapshot().unwrap();
-        assert!(snap.unresolved.is_empty());
-        assert_eq!(
-            snap.settlement_of(&s.hash(n - 1)),
-            Some((txid(&s.republish), 2))
-        );
-        assert!(copies.iter().all(|copy| copy.upgrade().is_none()));
     }
 
-    /// A pruning checkpoint keeps the sharing (D-097): its record holds each pending transaction once, and the snapshot
-    /// restored from it shares one copy among the pending payloads of each transaction again.
+    /// Each header of `headers` with its body `unlock(position)`.
+    fn with_bodies(headers: &[BlockHeader]) -> Payload {
+        let bodies: Vec<(usize, Vec<EntryData>)> = (0..headers.len())
+            .map(|i| (i, unlock(headers[i].nonce)))
+            .collect();
+        republish(headers, &bodies)
+    }
+
+    /// The second internal audit's A2-10 (D-135): a payload carrying a full republish of headers whose parent never
+    /// counted, each with a body, adds nothing: no header counts, none is even checked, and the snapshot and its record
+    /// hold nothing of them. Carried once their parents count, they count in full, their bodies land, and a
+    /// checkpoint shares one copy of the transaction among the bodies it landed.
     #[test]
-    fn a_checkpoint_keeps_one_copy_per_pending_transaction() {
-        let n = DEVNET.max_settlement_headers;
-        let s = Scenario::new(n, 16 * 1024);
-        let tracker = s.tracker();
-        assert!(tracker.sync(&Table::default()).unwrap());
+    fn headers_whose_parents_did_not_count_leave_no_trace() {
+        let mut btc = Btc::new(4);
+        let n = u64::try_from(DEVNET.max_settlement_headers).unwrap();
+        let anchor = btc.anchor(2);
+        let stray = header(&[], &anchor, 9_999, None);
+        let stray = BlockHeader {
+            parents: vec![[0x11; 32]],
+            ..stray
+        };
+        let orphans = chain_on(&stray, &anchor, n);
+        btc.mine(&[with_bodies(&orphans)]);
+        let tracker = btc.tracker();
+        let empty = tracker.snapshot().unwrap().record();
+        let known = Accepts::default();
+        assert!(tracker.sync(&known).unwrap());
         let snap = tracker.snapshot().unwrap();
+        assert!(known.asked().is_empty());
+        assert!(orphans.iter().all(|h| snap.counted(&h.hash()).is_none()));
+        assert!(snap.bodies.is_empty() && snap.counted.is_empty());
+        assert!(snap.headers_at(4).is_empty());
         let record = snap.record();
-        let size = borsh::to_vec(&record).unwrap().len();
-        let txs = serialize(&s.republish).len() + serialize(&s.settlement).len();
-        assert!(
-            size < txs + 1_000 * (n + 3),
-            "a record of {size} bytes for {txs} bytes of pending transactions"
+        assert!(record.txs.is_empty());
+        assert_eq!(
+            borsh::to_vec(&record).unwrap().len(),
+            borsh::to_vec(&empty).unwrap().len() + 5 * (32 + 80),
+            "only the BTC blocks 0 to 4"
         );
+
+        // the same number of headers on the genesis block counts in full, its bodies land, the bodies share one copy
+        // of their transaction, also in a checkpoint
+        let honest = chain_on(&btc.genesis, &anchor, n);
+        let txs = btc.mine(&[with_bodies(&honest)]);
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(
+            snap.headers_at(5),
+            honest.iter().map(BlockHeader::hash).collect::<Vec<_>>()
+        );
+        let landed = snap.landed_body(&honest[0].hash()).unwrap();
+        assert_eq!(
+            (landed.landing.txid, landed.landing.height),
+            (txid(&txs[0]), 5)
+        );
+        assert_eq!(Arc::strong_count(&landed.tx), honest.len());
+        let record = snap.record();
+        assert_eq!(record.txs.len(), 1);
         let restored = BtcSnapshot::from_record(record.clone()).unwrap();
-        assert_eq!(restored.unresolved, snap.unresolved);
         assert_eq!(restored.record(), record);
-        let (republish, settlement) = (pending_of(&restored, 1), pending_of(&restored, 2));
-        assert_eq!((republish.len(), settlement.len()), (n, 3));
-        assert_eq!(Arc::strong_count(republish[0]), n);
-        assert_eq!(Arc::strong_count(settlement[0]), 3);
+        let last = restored
+            .landed_body(&honest[honest.len() - 1].hash())
+            .unwrap();
+        assert_eq!(Arc::strong_count(&last.tx), honest.len());
+        // the bodies decode again from the transaction
+        let mut bodies = Bodies::new(DEVNET, btc.genesis.hash());
+        for (tag, h) in (0u64..).zip(&honest) {
+            let body = bodies.body(&restored, &h.hash()).unwrap().unwrap();
+            assert_eq!(*body, entries(&unlock(tag)));
+        }
+        assert_eq!(
+            *bodies
+                .body(&restored, &btc.genesis.hash())
+                .unwrap()
+                .unwrap(),
+            Vec::<Entry>::new()
+        );
+        assert_eq!(bodies.body(&restored, &stray.hash()).unwrap(), None);
     }
 
-    /// A republish payload with more headers than `MAX_SETTLEMENT_HEADERS` does not decode (D-100): none of its bodies
-    /// is pending, while the settlement payload next to it is scanned as usual.
+    /// Within one BTC block the headers count whatever the order (D-135): children in an earlier transaction than their
+    /// parents, or before them in a payload, count at that height, each after its parents and landing at its earliest
+    /// appearance. A header carried in a BTC block below the one its parent counts in does not count, nor does its
+    /// body land, until a payload carries them again.
+    #[test]
+    fn headers_count_in_any_order_within_a_block_and_only_after_their_parents() {
+        let mut btc = Btc::new(8);
+        let anchor = btc.anchor(2);
+        let g = btc.genesis.clone();
+        let a1 = header(&[&g], &anchor, 1, Some(&unlock(1)));
+        let a2 = header(&[&a1], &anchor, 2, None);
+        let b1 = header(&[&g], &anchor, 3, Some(&unlock(3)));
+        let m3 = header(&[&a2, &b1], &anchor, 4, Some(&unlock(4)));
+        // BTC block 4: m3 and a2 first, then a1 and b1 in a second transaction, the children before their parents
+        let txs = btc.mine(&[
+            republish(&[m3.clone(), a2.clone()], &[(0, unlock(4))]),
+            republish(&[b1.clone(), m3.clone(), a1.clone()], &[(2, unlock(1))]),
+        ]);
+        let tracker = btc.tracker();
+        let known = Accepts::default();
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        let order = snap.headers_at(4).to_vec();
+        assert_eq!(order.len(), 4);
+        let at = |h: &BlockHeader| order.iter().position(|x| *x == h.hash()).unwrap();
+        assert!(at(&a1) < at(&a2) && at(&a2) < at(&m3) && at(&b1) < at(&m3));
+        let landing = |h: &BlockHeader| snap.counted(&h.hash()).unwrap().landing;
+        assert_eq!((landing(&m3).txid, landing(&m3).index), (txid(&txs[0]), 1));
+        assert_eq!(landing(&a1).txid, txid(&txs[1]));
+        assert!(snap.counted(&a1.hash()).unwrap().settles);
+        assert!(!snap.counted(&a2.hash()).unwrap().settles);
+        // a2 needs no body: its data lands with its header; m3's and a1's bodies landed, b1's did not
+        assert_eq!(snap.data_landing(&a2.hash()), Some(landing(&a2)));
+        assert_eq!(snap.settlement_of(&m3.hash()), Some((txid(&txs[0]), 4)));
+        assert_eq!(snap.settlement_of(&a1.hash()), Some((txid(&txs[1]), 4)));
+        assert_eq!(snap.block_data_height(&b1.hash()), None);
+        assert_eq!(known.asked().len(), 4);
+
+        // c2 on a2 and its child c3 carried at 5, c2's parent's sibling d1 only at 6: c4 on c3 and d1 counts at 6 only
+        // when carried there again; its body carried at 5 does not land
+        let c2 = header(&[&a2], &anchor, 5, None);
+        let d1 = header(&[&g], &anchor, 6, None);
+        let c4 = header(&[&c2, &d1], &anchor, 7, Some(&unlock(7)));
+        btc.mine(&[republish(&[c2.clone(), c4.clone()], &[(1, unlock(7))])]);
+        btc.mine(&[republish(slice::from_ref(&d1), &[])]);
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(snap.counted_at(&c2.hash()), Some(5));
+        assert_eq!(snap.counted_at(&d1.hash()), Some(6));
+        assert_eq!(snap.counted_at(&c4.hash()), None);
+        let txs = btc.mine(&[republish(slice::from_ref(&c4), &[(0, unlock(7))])]);
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(snap.counted_at(&c4.hash()), Some(7));
+        assert_eq!(snap.settlement_of(&c4.hash()), Some((txid(&txs[0]), 7)));
+        // a BTC reorg of block 7 takes c4 back; the same transactions mined again at 7 count it again
+        btc.btc.reorg(1);
+        tracker.sync(&known).unwrap();
+        assert_eq!(tracker.snapshot().unwrap().counted_at(&c4.hash()), None);
+        btc.btc.mine(1);
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(snap.counted_at(&c4.hash()), Some(7));
+        assert_eq!(snap.settlement_of(&c4.hash()), Some((txid(&txs[0]), 7)));
+    }
+
+    /// A header the header DAG refuses does not count, and neither does any header on it, which is never even checked;
+    /// nor does a header anchored off the best chain (D-135).
+    #[test]
+    fn a_refused_or_unanchored_header_and_its_descendants_do_not_count() {
+        let mut btc = Btc::new(4);
+        let anchor = btc.anchor(2);
+        let g = btc.genesis.clone();
+        let a1 = header(&[&g], &anchor, 1, None);
+        let bad = header(&[&a1], &anchor, 2, None);
+        let child = header(&[&bad], &anchor, 3, None);
+        let off = header(
+            &[&a1],
+            &BtcAnchor {
+                height: 2,
+                hash: [0xab; 32],
+            },
+            4,
+            None,
+        );
+        let above = header(&[&off], &anchor, 5, None);
+        btc.mine(&[republish(
+            &[
+                child.clone(),
+                bad.clone(),
+                a1.clone(),
+                off.clone(),
+                above.clone(),
+            ],
+            &[],
+        )]);
+        let tracker = btc.tracker();
+        let known = Accepts {
+            rejected: BTreeSet::from([bad.hash()]),
+            ..Accepts::default()
+        };
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(snap.headers_at(4), &[a1.hash()]);
+        assert_eq!(known.asked(), vec![a1.hash(), bad.hash()]);
+    }
+
+    /// A body lands only when it matches its counted header's `entries_root`; only its first landing is kept, the
+    /// earliest transaction of the earliest BTC block; a body repeated in a payload lands once (D-135).
+    #[test]
+    fn a_body_lands_once_and_only_when_it_matches() {
+        let mut btc = Btc::new(8);
+        let anchor = btc.anchor(2);
+        let g = btc.genesis.clone();
+        let a1 = header(&[&g], &anchor, 1, Some(&unlock(1)));
+        // BTC block 4: a junk body, then the body twice in one payload, then the body again
+        let txs = btc.mine(&[
+            republish(slice::from_ref(&a1), &[(0, unlock(9))]),
+            republish(&[a1.clone(), a1.clone()], &[(0, unlock(1)), (1, unlock(1))]),
+            republish(slice::from_ref(&a1), &[(0, unlock(1))]),
+        ]);
+        btc.mine(&[republish(slice::from_ref(&a1), &[(0, unlock(1))])]);
+        let tracker = btc.tracker();
+        assert!(tracker.sync(&Accepts::default()).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(
+            snap.counted(&a1.hash()).unwrap().landing.txid,
+            txid(&txs[0])
+        );
+        let landed = snap.landed_body(&a1.hash()).unwrap();
+        assert_eq!(
+            (
+                landed.landing.txid,
+                landed.landing.height,
+                landed.landing.index,
+                landed.slot
+            ),
+            (txid(&txs[1]), 4, 2, 0)
+        );
+        assert_eq!(landed.landing.sender, Sender::Payee(PAYEE));
+        assert_eq!(snap.block_data_height(&a1.hash()), Some(4));
+    }
+
+    /// A republish payload with more headers than `MAX_SETTLEMENT_HEADERS` does not decode (D-100): nothing of it
+    /// counts, while the payload next to it is scanned as usual.
     #[test]
     fn a_payload_over_the_header_limit_is_not_scanned() {
-        let n = DEVNET.max_settlement_headers + 1;
-        let s = Scenario::new(n, 0);
-        let tracker = s.tracker();
-        assert!(tracker.sync(&Table::default()).unwrap());
+        let mut btc = Btc::new(4);
+        let anchor = btc.anchor(2);
+        let n = u64::try_from(DEVNET.max_settlement_headers).unwrap() + 1;
+        let over = chain_on(&btc.genesis, &anchor, n);
+        let a1 = header(&[&btc.genesis], &anchor, 7_777, None);
+        btc.mine(&[with_bodies(&over), republish(slice::from_ref(&a1), &[])]);
+        let tracker = btc.tracker();
+        assert!(tracker.sync(&Accepts::default()).unwrap());
         let snap = tracker.snapshot().unwrap();
-        assert!(pending_of(&snap, 1).is_empty());
-        assert_eq!(pending_of(&snap, 2).len(), 3);
-        assert!((2..n).all(|i| !snap.has_unresolved(&s.hash(i))));
+        assert_eq!(snap.headers_at(4), &[a1.hash()]);
+        assert!(snap.bodies.is_empty());
     }
 
-    /// D-100: a payload carrying a header anchored at or above the BTC height it is confirmed at does not count: none of
-    /// its headers appears and none of its bodies is pending or lands, while the same payload confirmed one BTC block
-    /// higher counts.
+    /// D-100: a payload carrying a header anchored at or above the BTC height it is confirmed at does not count as a
+    /// whole: none of its headers counts, not even those anchored below, and none of its bodies lands; the same payload
+    /// one BTC block higher counts, its headers counting as far as their anchors are on the chain.
     #[test]
     fn a_payload_with_a_header_anchored_at_its_own_height_is_not_scanned() {
-        let mut headers = made_up_headers(3);
-        assert!(payload_counts(&headers, 2));
-        assert!(!payload_counts(&headers, 1));
-        headers[1].btc_anchor.height = 2;
-        assert!(!payload_counts(&headers, 2));
-        assert!(payload_counts(&headers, 3));
-        let payload = Payload::Headers {
-            headers: headers.clone(),
-            bodies: (0..3)
-                .map(|i| Body {
-                    header: u32::try_from(i).unwrap(),
-                    entries: unlock(i),
-                })
-                .collect(),
-            payee: PAYEE,
+        let mut btc = Btc::new(4);
+        let low = btc.anchor(2);
+        let mut headers = chain_on(&btc.genesis, &low, 3);
+        // the last header anchors at BTC height 4, where the payload confirms (no hash can be that block's own)
+        let own = BtcAnchor {
+            height: 4,
+            hash: [0xab; 32],
         };
-        let btc = Arc::new(MockBtc::new());
-        let funding = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([8; 20]));
-        let funded = btc.fund(&funding, &[50_000, 50_000]);
-        let tx = carrier(&funded[..1], &payload, 0);
-        let again = carrier(&funded[1..], &payload, 0);
-        btc.mine_block(vec![tx]).unwrap();
-        let tracker = tracker_on(&btc);
-        assert!(tracker.sync(&Table::default()).unwrap());
-        {
-            let snap = tracker.snapshot().unwrap();
-            assert_eq!(snap.tip().map(|(height, _)| height), Some(2));
-            assert!(headers
-                .iter()
-                .all(|h| snap.header_seen(&h.hash()).is_none() && !snap.has_unresolved(&h.hash())));
-        }
-        btc.mine_block(vec![again]).unwrap();
-        assert!(tracker.sync(&Table::default()).unwrap());
+        headers[2] = header(&[&headers[1]], &own, 2, Some(&unlock(2)));
+        assert!(!payload_counts(&headers, 4));
+        assert!(payload_counts(&headers, 5));
+        let payload = with_bodies(&headers);
+        let tracker = btc.tracker();
+        let known = Accepts::default();
+        btc.mine(slice::from_ref(&payload));
+        assert!(tracker.sync(&known).unwrap());
         let snap = tracker.snapshot().unwrap();
-        assert!(headers
+        assert!(snap.counted.is_empty() && snap.bodies.is_empty());
+        assert!(known.asked().is_empty());
+        btc.mine(&[payload]);
+        assert!(tracker.sync(&known).unwrap());
+        let snap = tracker.snapshot().unwrap();
+        for h in &headers[..2] {
+            assert_eq!(snap.counted_at(&h.hash()), Some(5));
+            assert_eq!(snap.block_data_height(&h.hash()), Some(5));
+        }
+        assert_eq!(snap.counted_at(&headers[2].hash()), None);
+        assert_eq!(known.asked(), vec![headers[0].hash(), headers[1].hash()]);
+    }
+
+    /// A path C op calling a contract with `size` bytes of arguments.
+    fn native_op(nonce: u64, size: usize) -> VmOp {
+        use ksana_primitives::{Action, FeeMode, SigScheme, VMOP_VERSION};
+        VmOp {
+            version: VMOP_VERSION,
+            chain_id: DEVNET.chain_id,
+            account: [1; 32],
+            nonce,
+            fee: FeeMode::BtcNative,
+            max_gas: 100_000,
+            action: Action::Call {
+                contract: [3; 32],
+                method: "m".into(),
+                args: vec![u8::try_from(nonce % 251).unwrap(); size],
+                funds: Vec::new(),
+            },
+            sig: SigScheme::Bip340([0; 64]),
+        }
+    }
+
+    /// A native transaction carrying an op of `size` bytes of arguments, spending a coin of its own.
+    fn native_tx(btc: &mut Btc, nonce: u64, size: usize) -> Transaction {
+        let payload = Payload::NativeOp {
+            op: native_op(nonce, size),
+        }
+        .encode(&DEVNET)
+        .unwrap();
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: btc.coins.pop().unwrap(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[vec![1; 64]]),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: crate::data::data_script(&DEVNET.magic, &payload).unwrap(),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([9; 20])),
+                },
+            ],
+        }
+    }
+
+    /// Runs `f` and returns its result with the number of forced-inclusion entries built from native transactions
+    /// meanwhile, on this thread.
+    fn forced_built<R>(f: impl FnOnce() -> R) -> (R, u64) {
+        crate::native::probe::FORCED_ENTRIES.with(|built| built.set(0));
+        let result = f();
+        (
+            result,
+            crate::native::probe::FORCED_ENTRIES.with(std::cell::Cell::get),
+        )
+    }
+
+    /// The roots of the forced-inclusion entries computed from the leaf hashes kept with the native transactions are
+    /// `entries_root` of the entries themselves, for every window (D-135).
+    #[test]
+    fn forced_roots_from_leaf_hashes_are_the_entries_roots() {
+        let mut snapshot = BtcSnapshot::testing(0);
+        for height in 0..=12u8 {
+            snapshot.push_block([height; 32], 0);
+        }
+        let native = |txid: u8, size: usize| NativeTx {
+            txid: [txid; 32],
+            op: native_op(u64::from(txid), size),
+            first_input: OutPoint {
+                txid: [txid ^ 0xff; 32],
+                vout: 0,
+            },
+            outputs: Vec::new(),
+        };
+        for (height, txid, size) in [
+            (1, 1, 0),
+            (3, 2, 10),
+            (3, 3, 100),
+            (4, 4, 1),
+            (7, 5, 7),
+            (7, 6, 3),
+            (7, 7, 0),
+            (11, 8, 50),
+        ] {
+            snapshot.push_native(height, native(txid, size));
+        }
+        for parent_anchor in 0..=12 {
+            for anchor in parent_anchor..=12 {
+                let forced = forced_at(&DEVNET, &snapshot, parent_anchor, anchor);
+                assert_eq!(
+                    snapshot.forced_root(&DEVNET, parent_anchor, anchor),
+                    entries_root(&forced).unwrap(),
+                    "window above {parent_anchor} up to {anchor}"
+                );
+                let leaves: Vec<_> = snapshot
+                    .forced_leaves(&DEVNET, parent_anchor, anchor)
+                    .collect();
+                assert_eq!(leaves.len(), forced.len());
+                for ((txid, leaf), entry) in leaves.into_iter().zip(&forced) {
+                    assert!(matches!(entry, Entry::Forced { btc_txid, .. } if btc_txid == txid));
+                    assert_eq!(*leaf, ksana_crypto::entry_leaf(entry).unwrap());
+                }
+            }
+        }
+        // a checkpoint does not keep the leaf hashes: they are computed again
+        let restored = BtcSnapshot::from_record(snapshot.record()).unwrap();
+        assert_eq!(
+            restored.forced_root(&DEVNET, 0, 12),
+            snapshot.forced_root(&DEVNET, 0, 12)
+        );
+    }
+
+    /// The scan's work does not grow with the size of the native ops in the forced-inclusion windows (D-135): each
+    /// native transaction's forced-inclusion entry is built once, when its BTC block is scanned, for its leaf hash.
+    /// Counting many headers over a window of large ops, checking the bodies carried for them, junk naming every op of
+    /// the window or matching, and carrying the same again in a later BTC block build none of them again.
+    #[test]
+    fn the_scan_builds_each_forced_entry_once_whatever_the_payloads_carry() {
+        let natives = 8u64;
+        let k = 60u64;
+        let mut btc = Btc::new(32);
+        // BTC block 4: native transactions with 20 000 bytes of arguments each; block 5 the anchor
+        let txs: Vec<Transaction> = (0..natives)
+            .map(|i| native_tx(&mut btc, i, 20_000))
+            .collect();
+        btc.btc.mine_block(txs.clone()).unwrap();
+        btc.btc.mine(1);
+        let tracker = btc.tracker();
+        let known = Accepts::default();
+        let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+        assert!(synced);
+        assert_eq!(built, natives, "one leaf hash per native transaction");
+        // a block on the genesis block anchored at 5 must force-include all of them (devnet: heights 1 to 5)
+        let anchor = btc.anchor(5);
+        let g = btc.genesis.clone();
+        let forced = forced_at(&DEVNET, &tracker.snapshot().unwrap(), 0, 5);
+        assert_eq!(forced.len(), 8);
+        let named: Vec<EntryData> = txs
             .iter()
-            .all(|h| snap.header_seen(&h.hash()) == Some(3) && snap.has_unresolved(&h.hash())));
-    }
-
-    /// Resolving pending payloads once their blocks are known records exactly what scanning them records when the
-    /// blocks are already known: a payload carrying the block's body lands its data (a republish payload for its payee,
-    /// a settlement payload for the block it belongs to, D-095), one carrying other entries does not, a block needing
-    /// no body keeps only its header landing, and a block still unknown stays pending. A block known later is resolved
-    /// on its own, a round finding nothing new changes nothing, and a BTC reorg drops landings and pending payloads.
-    #[test]
-    fn resolving_later_records_what_a_scan_knowing_the_blocks_records() {
-        let n = 300;
-        let s = Scenario::new(n, 1_024);
-        let mut answers = BTreeMap::new();
-        for (i, header) in s.headers.iter().enumerate() {
-            let data = match i {
-                0..100 => body(header, unlock(i)),
-                100..150 => body(header, unlock(i + 1)),
-                150..200 => BlockData::NoBody,
-                _ => continue,
-            };
-            answers.insert(header.hash(), data);
-        }
-        answers.insert(s.own.hash(), body(&s.own, own_entries()));
-
-        let early = s.tracker();
-        assert!(early.sync(&Table::new(answers.clone())).unwrap());
-        let late = s.tracker();
-        let table = Table::default();
-        assert!(late.sync(&table).unwrap());
-        let scanned = late.snapshot().unwrap();
-        assert!((0..n).all(|i| scanned.has_unresolved(&s.hash(i))));
-        assert!(scanned.settlements.is_empty());
-        *table.answers.lock().unwrap() = answers;
-        assert!(late.resolve_all(&table).unwrap());
-
-        let (a, b) = (early.snapshot().unwrap(), late.snapshot().unwrap());
-        assert_eq!(b.settlements, a.settlements);
-        assert_eq!(b.unresolved, a.unresolved);
-        assert_eq!(b.headers_seen, a.headers_seen);
-        assert_eq!(b.headers_by_height, a.headers_by_height);
-        assert_eq!(b.ksn1_txs, a.ksn1_txs);
-        assert_eq!(b.chain, a.chain);
-
-        let by_payee = Landing {
-            txid: txid(&s.republish),
-            height: 2,
-            index: 1,
-            sender: Sender::Payee(PAYEE),
+            .map(|tx| EntryData::Forced { btc_txid: txid(tx) })
+            .collect();
+        let real_body: Vec<EntryData> = named.iter().cloned().chain(unlock(k)).collect();
+        let mut real_entries = forced.clone();
+        real_entries.extend(entries(&unlock(k)));
+        let real = BlockHeader {
+            entries_root: entries_root(&real_entries).unwrap(),
+            ..header(&[&g], &anchor, k, None)
         };
-        let by_own = Landing {
-            txid: txid(&s.settlement),
-            height: 2,
-            index: 2,
-            sender: Sender::Block(s.own.hash()),
+        let bare = BlockHeader {
+            entries_root: entries_root(&forced).unwrap(),
+            ..header(&[&g], &anchor, k + 1, None)
         };
-        for i in [0, 1] {
-            assert_eq!(b.settlements.get(&s.hash(i)), Some(&vec![by_payee, by_own]));
-        }
-        assert_eq!(b.settlements.get(&s.own.hash()), Some(&vec![by_own]));
-        for i in 2..100 {
-            assert_eq!(
-                b.data_landing(&s.hash(i), true),
-                Some(by_payee),
-                "block {i}"
-            );
-            assert!(!b.has_unresolved(&s.hash(i)));
-        }
-        for i in 100..200 {
-            assert_eq!(b.settlement_of(&s.hash(i)), None, "block {i}");
-            assert_eq!(b.data_landing(&s.hash(i), false), Some(by_payee));
-            assert!(!b.has_unresolved(&s.hash(i)));
-        }
-        for i in 200..n {
-            assert_eq!(b.settlement_of(&s.hash(i)), None, "block {i}");
-            assert!(b.has_unresolved(&s.hash(i)));
-        }
-
-        // nothing new is known: no change, the same snapshot stays published
-        assert!(!late.resolve_all(&table).unwrap());
-        assert!(Arc::ptr_eq(&b, &late.snapshot().unwrap()));
-        // one more block becomes known: resolved on its own
-        table.set(s.hash(250), body(&s.headers[250], unlock(250)));
-        assert!(late.resolve(&table, &s.hash(250)).unwrap());
-        let c = late.snapshot().unwrap();
-        assert_eq!(c.data_landing(&s.hash(250), true), Some(by_payee));
-        assert!(!c.has_unresolved(&s.hash(250)));
-        assert!(c.has_unresolved(&s.hash(251)));
-        assert!(!late.resolve(&table, &s.hash(251)).unwrap());
-
-        // a BTC reorg dropping block 2 drops its landings and its pending payloads
-        s.btc.reorg(1);
-        s.btc.clear_mempool();
-        s.btc.mine(2);
-        assert!(late.sync(&table).unwrap());
-        let d = late.snapshot().unwrap();
-        assert!(d.settlements.is_empty());
-        assert!(d.unresolved.is_empty());
-        assert_eq!(d.header_seen(&s.hash(0)), None);
-    }
-
-    /// While no pending block is known, a resolution round looks the pending blocks up without copying the snapshot:
-    /// during every lookup the published snapshot holds the only references to a pending transaction. Once a block is
-    /// known, its pending payloads are counted.
-    #[test]
-    fn resolving_copies_the_snapshot_only_once_a_pending_block_is_known() {
-        let n = 50;
-        let s = Scenario::new(n, 0);
-        let tracker = s.tracker();
-        let table = Table::default();
-        assert!(tracker.sync(&table).unwrap());
-        let first = s.hash(0);
-        let watched = Arc::downgrade(&tracker.snapshot().unwrap().unresolved[&first][0].0);
-        let held = watched.strong_count();
-        *table.watched.lock().unwrap() = Some(watched);
-        assert!(!tracker.resolve_all(&table).unwrap());
-        assert!(!tracker.resolve(&table, &first).unwrap());
-        let seen = table.seen.lock().unwrap().clone();
-        assert_eq!(
-            seen.len(),
-            n + 2,
-            "the made-up blocks and the own block (resolve_all), then the first block (resolve)"
-        );
-        assert!(
-            seen.iter().all(|count| *count == held),
-            "references to a pending transaction during the lookups: {seen:?}; the published snapshot holds {held}"
-        );
-
-        table.set(first, body(&s.headers[0], unlock(0)));
-        assert!(tracker.resolve(&table, &first).unwrap());
+        let junk: Vec<BlockHeader> = (0..k)
+            .map(|i| {
+                let mut root = [0xee; 32];
+                root[..8].copy_from_slice(&i.to_le_bytes());
+                BlockHeader {
+                    entries_root: root,
+                    ..header(&[&g], &anchor, i, None)
+                }
+            })
+            .collect();
+        // BTC block 6: the headers count; the one with only the forced-inclusion entries needs no body
+        let mut all = junk.clone();
+        all.extend([real.clone(), bare.clone()]);
+        btc.mine(&[republish(&all[..30], &[]), republish(&all[30..], &[])]);
+        let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+        assert!(synced);
+        assert_eq!(built, 0);
         let snap = tracker.snapshot().unwrap();
-        assert_eq!(snap.settlement_of(&first), Some((txid(&s.republish), 2)));
-        assert!(!snap.has_unresolved(&first));
-        assert!(snap.has_unresolved(&s.hash(1)));
+        assert!(junk
+            .iter()
+            .all(|h| snap.counted(&h.hash()).is_some_and(|c| c.settles)));
+        assert!(snap.counted(&real.hash()).is_some_and(|c| c.settles));
+        assert!(snap.counted(&bare.hash()).is_some_and(|c| !c.settles));
+        // BTC block 7, then 8 again: every junk header with a body naming every op of the window, which does not
+        // match, in two payloads; and the real body once
+        let junk_body: Vec<EntryData> = named.iter().cloned().chain(unlock(9_999)).collect();
+        let carried = |headers: &[BlockHeader]| {
+            let bodies: Vec<(usize, Vec<EntryData>)> =
+                (0..headers.len()).map(|i| (i, junk_body.clone())).collect();
+            republish(headers, &bodies)
+        };
+        let payloads = [
+            carried(&junk[..30]),
+            carried(&junk[30..]),
+            republish(slice::from_ref(&real), &[(0, real_body)]),
+        ];
+        for height in [7, 8] {
+            btc.mine(&payloads);
+            let (synced, built) = forced_built(|| tracker.sync(&known).unwrap());
+            assert!(synced);
+            assert_eq!(built, 0, "BTC block {height}");
+            let snap = tracker.snapshot().unwrap();
+            assert!(junk.iter().all(|h| snap.landed_body(&h.hash()).is_none()));
+            assert_eq!(snap.block_data_height(&real.hash()), Some(7));
+        }
+        // the landed body decodes to the block's entries (decoding builds them)
+        let mut bodies = Bodies::new(DEVNET, g.hash());
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(
+            *bodies.body(&snap, &real.hash()).unwrap().unwrap(),
+            real_entries
+        );
+        assert_eq!(*bodies.body(&snap, &bare.hash()).unwrap().unwrap(), forced);
     }
 
-    /// A payload repeating one block's header and body (every copy has the same block hash): scanning it with the block
-    /// known records one landing per copy, and so does resolving its pending payloads once the block is known; until
-    /// then all the copies' pending payloads share one copy of the transaction.
-    #[test]
-    fn a_body_repeated_in_one_payload_resolves_like_a_scan_knowing_it() {
-        let copies = 400;
-        let (btc, header, tx) = repeated(copies);
-        let known = Table::new(BTreeMap::from([(header.hash(), body(&header, unlock(0)))]));
-        let early = tracker_on(&btc);
-        assert!(early.sync(&known).unwrap());
-        let late = tracker_on(&btc);
-        assert!(late.sync(&Table::default()).unwrap());
-        {
-            let snap = late.snapshot().unwrap();
-            let pending = pending_of(&snap, 1);
-            assert_eq!(pending.len(), copies);
-            assert_eq!(Arc::strong_count(pending[0]), copies);
-            assert!(snap.settlements.is_empty());
-        }
-        assert!(late.resolve_all(&known).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
 
-        let (a, b) = (early.snapshot().unwrap(), late.snapshot().unwrap());
-        let landing = Landing {
-            txid: txid(&tx),
-            height: 2,
-            index: 1,
-            sender: Sender::Payee(PAYEE),
-        };
-        assert_eq!(
-            a.settlements.get(&header.hash()),
-            Some(&vec![landing; copies])
-        );
-        assert_eq!(b.settlements, a.settlements);
-        assert!(a.unresolved.is_empty() && b.unresolved.is_empty());
+        /// Counting depends only on the current BTC chain (D-135): whatever the order in which the headers and bodies
+        /// are carried, how they are split into transactions and how BTC reorgs on the way (also below an anchor, and
+        /// confirming the orphaned transactions again higher), a tracker that followed every step holds exactly what
+        /// a fresh tracker scanning the final chain once holds. The header DAG here prunes nothing: with pruning, a
+        /// header whose parent has left it does not count (D-135's rationale). Every header counted has its parents counted at or
+        /// below its height and was accepted; every body landed matches its header and lands at or above it.
+        #[test]
+        fn counting_depends_only_on_the_current_chain(
+            shape in proptest::collection::vec((0usize..12, 0usize..12, any::<bool>(), 0u8..2, 0u8..8), 12),
+            plan in proptest::collection::vec(
+                proptest::collection::vec((0usize..12, any::<bool>(), 0u8..6), 1..7),
+                2..9,
+            ),
+            splits in proptest::collection::vec((1usize..4, any::<bool>()), 9),
+            reorgs in proptest::collection::vec((0u8..5, 1u32..4, any::<bool>()), 9),
+        ) {
+            let mut btc = Btc::new(64);
+            let anchors = [btc.anchor(2), btc.anchor(3)];
+            let g = btc.genesis.clone();
+            // the DAG: each header on one or two earlier headers or the genesis block, anchored at BTC block 2 or 3,
+            // with a body or not; a few are refused
+            let mut headers: Vec<BlockHeader> = Vec::new();
+            let mut rejected = BTreeSet::new();
+            for (i, (first, second, merge, anchor, refuse)) in shape.iter().enumerate() {
+                let pick = |at: usize| if at % (i + 1) == i { &g } else { &headers[at % (i + 1)] };
+                let mut parents = vec![pick(*first).clone()];
+                let other = pick(*second).clone();
+                if *merge && other.hash() != parents[0].hash() {
+                    parents.push(other);
+                }
+                let parents: Vec<&BlockHeader> = parents.iter().collect();
+                let tag = u64::try_from(i).unwrap();
+                let body = (i % 3 != 0).then(|| unlock(tag));
+                let h = header(&parents, &anchors[usize::from(*anchor)], tag, body.as_deref());
+                if *refuse == 0 {
+                    rejected.insert(h.hash());
+                }
+                headers.push(h);
+            }
+            let known = Accepts {
+                rejected,
+                ..Accepts::default()
+            };
+            let tracker = btc.tracker();
+            prop_assert!(tracker.sync(&known).is_ok());
+            for (step, block) in plan.iter().enumerate() {
+                // the payloads of this BTC block
+                let (parts, reversed) = splits[step];
+                let mut payloads: Vec<Carried> = vec![(Vec::new(), Vec::new()); parts];
+                for (k, (index, with_body, junk)) in block.iter().enumerate() {
+                    let (carried, bodies) = &mut payloads[k % parts];
+                    let h = headers[*index].clone();
+                    if *with_body {
+                        let tag = h.nonce + if *junk == 0 { 100 } else { 0 };
+                        bodies.push((carried.len(), unlock(tag)));
+                    }
+                    carried.push(h);
+                }
+                if reversed {
+                    payloads.reverse();
+                }
+                let payloads: Vec<Payload> = payloads
+                    .into_iter()
+                    .filter(|(carried, _)| !carried.is_empty())
+                    .map(|(carried, bodies)| republish(&carried, &bodies))
+                    .collect();
+                btc.mine(&payloads);
+                prop_assert!(tracker.sync(&known).is_ok());
+                let (kind, depth, again) = reorgs[step];
+                if kind == 0 {
+                    // never below BTC block 2: block 3, an anchor, may go
+                    let depth = depth.min(btc.btc.tip_height() - 2);
+                    btc.btc.reorg(depth);
+                    if again {
+                        // the orphaned transactions confirm again in one block
+                        btc.btc.mine(1);
+                    } else {
+                        btc.btc.mine_block(Vec::new()).unwrap();
+                    }
+                    prop_assert!(tracker.sync(&known).is_ok());
+                }
+            }
+            let fresh = btc.tracker();
+            prop_assert!(fresh.sync(&known).is_ok());
+            let snap = tracker.snapshot().unwrap();
+            prop_assert_eq!(snap.record(), fresh.snapshot().unwrap().record());
+            for (hash, counted) in &snap.counted {
+                let h = headers.iter().find(|h| h.hash() == *hash).unwrap();
+                prop_assert!(!known.rejected.contains(hash));
+                prop_assert!(snap.contains(&h.btc_anchor));
+                for parent in &h.parents {
+                    prop_assert!(
+                        *parent == g.hash()
+                            || snap.counted_at(parent).is_some_and(|p| p <= counted.landing.height)
+                    );
+                }
+                prop_assert_eq!(counted.settles, h.nonce % 3 != 0);
+            }
+            let mut bodies = Bodies::new(DEVNET, g.hash());
+            for (hash, landed) in &snap.bodies {
+                let h = headers.iter().find(|h| h.hash() == *hash).unwrap();
+                prop_assert!(snap.counted_at(hash).is_some_and(|c| c <= landed.landing.height));
+                let body = bodies.body(&snap, hash).unwrap().unwrap();
+                prop_assert_eq!(&*body, &entries(&unlock(h.nonce)));
+            }
+        }
     }
 }

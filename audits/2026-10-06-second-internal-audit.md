@@ -117,13 +117,13 @@ open findings point at `5819b26`.
 | A2-04 | Medium | Re-execution in anchor-invalid mode can disqualify a valid block after a BTC reorg | Fixed (M27) |
 | A2-05 | Medium | GHOSTDAG work before the proof of work, merge-depth walks not memoized | Fixed (chain-base change) |
 | A2-06 | Medium | Refusals that are not invalidity are never remembered | Partly fixed (M27) |
-| A2-07 | Medium | Cheap dead tips keep honest producers rebuilding templates | Partly fixed (chain-base change) |
+| A2-07 | Medium | Cheap dead tips keep honest producers rebuilding templates | Partly fixed (chain-base change); signet's PoW limit raised after this report in M51 (D-136) |
 | A2-08 | Medium | Entry-pool churn keeps honest producers rebuilding templates | Open; fixed after this report in M47 (D-130) |
 | A2-09 | Medium | A block's own low-fee settlement holds its rescue back, and nothing raises a stuck fee | Open, fix before mainnet; fixed after this report in M28 (D-102), its P2A pinning residual in M48 (D-131) |
-| A2-10 | Medium | Headers with unknown parents from BTC payloads are held unchecked and without a size limit | Open |
+| A2-10 | Medium | Headers with unknown parents from BTC payloads are held unchecked and without a size limit | Open; fixed after this report in M51 (D-135) |
 | A2-11 | Medium | The CLI, SDK and web app default to devnet and never check the node's chain ID | Open, fix before mainnet; fixed after this report in M31 (D-106) |
 | A2-12 | Medium | A fresh indexer holds the whole history in memory before it first prunes | Fixed (chain-base change) |
-| A2-13 to A2-22 | Low | Ten bounded local costs and hardening items, in the [Low](#low) table | Open |
+| A2-13 to A2-22 | Low | Ten bounded local costs and hardening items, in the [Low](#low) table | Open; A2-15 and A2-19 closed after this report in M51 (D-135) |
 
 ### Critical
 
@@ -345,6 +345,12 @@ main-chain tip (the filter is the exact complement of GHOSTDAG's bound), and its
 dead tips cost a template almost nothing. Still open: such side blocks are still relayed to every node, and any DAG
 insertion still makes the running template stale.
 
+After this report, the same side blocks can also put their headers on BTC, where they count in the header DAG of every
+node and indexer until pruning even after M51 (D-135), since their parents have counted. M51 raises signet's PoW limit
+from devnet's `0x207fffff` to `0x1f0fffff` (D-136): a block at the limit takes about 4 096 Argon2id evaluations instead
+of about 2, whether it is relayed or landed on BTC, about 3.5 CPU-days for a full BTC block of such headers. Mainnet's
+limit, `0x1f00ffff`, already asks about 65 536.
+
 #### A2-08: entry-pool churn keeps honest producers rebuilding templates
 
 **Where.** `crates/ksana-mempool/src/lib.rs:414-419` (replacement needs only a higher fee) and `:475` (generation
@@ -454,6 +460,14 @@ limit, and the PoW against the header's own `bits` at weight 1, which every vali
 the largest); cap the pending set by count and bytes; collect candidate bodies only for headers the DAG holds; cap the
 candidates per hash and in total.
 
+Fixed after this report in M51 (D-135), in the protocol rather than locally, since a full cap on the pending set has to
+drop headers, valid ones the finality determination may wait for included. A header in a payload that counts now
+counts only when its anchor is on the BTC best chain, it passes the header checks and its parents have counted, within
+one BTC block in any order; an appearance that does not count leaves no trace, so nothing is held pending and no
+payload waits to be resolved. A body lands only with its counted header, checked against `entries_root` when its BTC
+block is scanned, and landed bodies are kept as the bytes of their transactions, one copy per transaction. Devnet and
+signet restart from genesis.
+
 #### A2-11: the CLI, SDK and web app default to devnet and never check the node's chain ID
 
 **Where.** `crates/ksana-cli/src/main.rs:53-54` (`--chain` defaults to devnet; nothing calls `get_chain_info`),
@@ -522,11 +536,11 @@ still scans to the BTC tip before it verifies its state store and prunes, so its
 |----|---------|-------|--------|
 | A2-13 | After a BTC reorg at least `ANCHOR_DEPTH + NATIVE_CONFIRMATIONS` deep (5 on mainnet), a forced-only block whose anchor was reorged out can only be derived from the new chain's window; nodes and indexers that saw it before keep its cached body, a fresh one marks it invalid or waits for it. A forced-only body cannot be republished, so SPEC §17.3's "heals once the body is republished" does not apply. | `crates/ksana-btc/src/bodies.rs` (`check_stale_entries`, `stale_body`); `crates/ksana-node/src/chain.rs` (`check_body`) | Open. SPEC §17.3 lists the deep-reorg limits, but its D-056 row still says the pause heals once the body is republished, which a forced-only body cannot be. |
 | A2-14 | Native transactions are looked up by ID with a linear scan: in anchored execution over every native transaction kept up to the anchor height, once per forced entry, which includes every template build (`merge_hazard`) and lenient execution; for an anchor-invalid block over its `stale_range`, once per forced entry on acceptance and in the indexer. Up to about 2 400 forced entries per forged block times the native transactions in range. | `crates/ksana-btc/src/tracker.rs` (`native_tx_at_most`, `native_tx_in`, `AnchoredView::native_input`); `crates/ksana-btc/src/bodies.rs` (`check_stale_entries`, `convert_by_txid`) | Open. Since M27 a refusal on acceptance is remembered for 30 seconds while the BTC tip stays the same (A2-06), and an anchor-invalid block's lookups cover only its `stale_range` instead of the whole snapshot. |
-| A2-15 | `BtcSnapshot::unresolved` (payloads naming blocks this node does not know yet) has no cap, and `resolve_all` probes every pending key, including inside `accept_one` under the process lock; the indexer re-runs it and the body re-derivation of every undetermined block on each 500 ms poll under its known lock. Bounded by pruning and BTC fees. | `crates/ksana-btc/src/tracker.rs:1460-1470`, `:1338-1358`; `crates/ksana-node/src/chain.rs:3048` | Open. |
+| A2-15 | `BtcSnapshot::unresolved` (payloads naming blocks this node does not know yet) has no cap, and `resolve_all` probes every pending key, including inside `accept_one` under the process lock; the indexer re-runs it and the body re-derivation of every undetermined block on each 500 ms poll under its known lock. Bounded by pruning and BTC fees. | `crates/ksana-btc/src/tracker.rs:1460-1470`, `:1338-1358`; `crates/ksana-node/src/chain.rs:3048` | Open. Closed after this report in M51 (D-135): nothing waits to be resolved any more, the unresolved payloads, `resolve_all` and the undetermined bodies are gone. |
 | A2-16 | Compact header decoding is still quadratic in the canonical-reference check (the first audit's F-33): about 16 million 32-byte comparisons for a 500-header payload, reachable without BTC fees through the attached settlement of a block sent over P2P, under the process lock. | `crates/ksana-primitives/src/compact.rs:157-180`; `sdk/ts/src/compact.ts:124-132` | Open. M27 checks the header count (at most 500) before decoding; the figure above already assumes that cap. |
 | A2-17 | The TypeScript SDK recognizes a native transaction by its outputs only and ignores D-081 (a transaction with a KSN1 envelope in an input and a KSN1 output has two carriers and is not recognized by nodes), so it can report a path C op that nodes will not execute. | `sdk/ts/src/pathC.ts:136-165` against `crates/ksana-btc/src/data.rs:129-174` | Open. |
 | A2-18 | The state store prunes a whole jump of retained versions (at least `PRUNE_STEP`) in one RocksDB write batch inside the chain commit, and a pruning error after the commit is reported as a failed connect. | `crates/ksana-state` pruning, called from `crates/ksana-node/src/chain.rs` (`commit_chain`) | Open. |
-| A2-19 | A local fault in the middle of connecting pending headers drops the children already taken out of the pending set; their payloads are not scanned again, so this observer's header DAG lacks them until someone republishes. Trigger: a local fault only. | `crates/ksana-btc/src/headers.rs:144-162`, `:439-448` | Open. |
+| A2-19 | A local fault in the middle of connecting pending headers drops the children already taken out of the pending set; their payloads are not scanned again, so this observer's header DAG lacks them until someone republishes. Trigger: a local fault only. | `crates/ksana-btc/src/headers.rs:144-162`, `:439-448` | Open. Closed after this report in M51 (D-135): no header is held pending, a header joins the DAG only once its parents have, and a local fault fails the BTC sync round, which scans the block again. |
 | A2-20 | The `REORG_WINDOW` refusal stops at the first candidate too deep to switch to instead of trying the next one, and a forced switch that keeps failing repeats its whole cost on every call (a full re-execution from genesis with `--no-pruning`). | `crates/ksana-node/src/chain.rs` (`best_candidate`, `rewind_deep`) | Open. |
 | A2-21 | One fork block landed on BTC between a node's highest BTC-connected main-chain block and its tip makes every funded node republish up to its tip right after `COMPETITOR_GRACE` (D-091), with no coordination between nodes: each pays for its own copy. | `crates/ksana-node/src/chain.rs:1756-1799`; `crates/ksana-node/src/rescue.rs:750-771` | Open. |
 | A2-22 | The indexer writes `indexer.json` with a write and a rename but no fsync, unlike its checkpoint; after a crash a torn file stops it from starting, and deleting the file then hits the "state store not empty" error. | `crates/ksana-indexer/src/meta.rs` (`Meta::save`) | Open. |
@@ -562,7 +576,7 @@ S-03. Its fixes landed in M26 (D-098) and M27 (D-100). Status as of `5819b26`:
 |----|---------------------|--------|-------|
 | F-01 | Body size not bounded by consensus | Fixed (M27, D-100 b) | The bound and the landing code first disagreed (A2-03, fixed in M27) |
 | F-02 | Forged-anchor block via sync: forced entries unchecked | Fixed (M27, D-100 c) | Forced entries are checked on acceptance in both modes; A2-01 and A2-04 fixed in M27; deep BTC reorgs remain (A2-13) |
-| F-03 | Tracker copies a whole BTC transaction per unknown carried body | Fixed (M26) | Residual A2-15 |
+| F-03 | Tracker copies a whole BTC transaction per unknown carried body | Fixed (M26) | Residual A2-15, closed in M51 (D-135) |
 | F-04 | GHOSTDAG ancestor walk before merge depth and PoW | Fixed (M26, chain-base change) | The chain-base change closed the residual (A2-05): PoW first, memoized merge-depth walks |
 | F-05 | Orphan pool without PoW, parent-count or byte bounds | Fixed (M26) | Orphans need PoW at their own bits, a valid parent list and a fitting body; capped at 256 blocks and 32 MiB. No per-peer share |
 | F-06 | Exchange: a dust payment closes a lock | Fixed (M26) | See the info item on two exchange instances sharing a script |
@@ -584,8 +598,8 @@ S-03. Its fixes landed in M26 (D-098) and M27 (D-100). Status as of `5819b26`:
 | F-22 | CLI top-up: fixed fee rate, no payment deadline shown | Open | See also A2-11 (fixed after this report in M31: the claim is signed for the node's network) |
 | F-23 | Indexer wipes its state on restart when bitcoind is behind | Fixed (M26) | It waits until bitcoind reaches its oldest kept version, then verifies by state root; since the chain-base change processing after a restart also waits for the scan to reach the BTC tip |
 | F-24 | Web mock wallet key in the query string | Open | |
-| F-25 | Unbounded sets (pending headers, invalid set, `best_candidate`, `headers_seen`) | Partly fixed | Invalid set capped; `best_candidate` uses a tip index; `headers_seen` pruned; since the chain-base change templates skip tips beyond the merge depth (A2-07). Open: pending headers (A2-10) |
-| F-26 | Header DAG time checks not repeated after a BTC reorg | Documented (D-098) | |
+| F-25 | Unbounded sets (pending headers, invalid set, `best_candidate`, `headers_seen`) | Partly fixed; fixed after this report in M51 (D-135) | Invalid set capped; `best_candidate` uses a tip index; `headers_seen` pruned; since the chain-base change templates skip tips beyond the merge depth (A2-07). Open at this report: pending headers (A2-10), which M51 removes |
+| F-26 | Header DAG time checks not repeated after a BTC reorg | Documented (D-098); settled after this report in M51 (D-135) | A header counts on the current BTC chain only with its anchor on that chain, so its time bound is the one already checked |
 | F-27 | Header DAG maps `GhostdagError::Corrupt` to invalid | Open | `headers.rs` `From<GhostdagError> for Reject`; the node maps the same error to a local fault |
 | F-28 | P2P: no connection limits, banned peers' queued gossip, sync server concurrency | Partly fixed (M26); fixed after this report in M49 (D-132) | Banned peers' gossip is dropped. Open at this report: connection limits, per-peer buckets, ops decoded with the 16 MiB limit, the shared queue, unbounded sync-serve tasks, `GetMempool` responses up to about 32 MiB; M49 bounds them all (connections by address, quotas by address that outlive connections, ops within `MAX_OP_BYTES`, budgets per topic and per source, serving 4 at a time within a byte budget, `GetMempool` responses within 4 MiB). The orphan pool's share per peer stays open (F-05) |
 | F-29 | RPC: unlimited batches and bodies, `getAccount` cost | Open; fixed after this report in M49 (D-132) | Batches of at most 64 calls, bodies of 1 MiB, 16 subscriptions per connection, for the node and the indexer; `getAccount` reads a balance per asset and finds carriers in an index of the window |
@@ -594,7 +608,7 @@ S-03. Its fixes landed in M26 (D-098) and M27 (D-100). Status as of `5819b26`:
 | F-32 | VM: event pricing, sticky `limit_hit`, bulk-memory tests | Open | |
 | F-33 | Super-linear compact header decoding | Open | Bounded by the 500-header cap; see A2-16 |
 | F-34 | TypeScript `decodePayload` defaults to devnet | Open; fixed after this report in M31 (D-106) | `params` is required; see A2-11 |
-| F-35 | Indexer candidate bodies and pending headers unbounded | Partly fixed | Dropped at each pruning step; no size bound (A2-10) |
+| F-35 | Indexer candidate bodies and pending headers unbounded | Partly fixed; fixed after this report in M51 (D-135) | Dropped at each pruning step; no size bound at this report (A2-10); M51 holds neither |
 | F-36 | Duplicate block messages trigger `update_virtual` | Open | Cheaper now (tips index) |
 | F-37 | Anchor-invalid heavier side chain retried forever | Open | By design (D-056): a state root mismatch or an invalid verdict on re-execution in anchor-invalid mode is a local fault after the block entered the DAG, so the switch is tried again on every update |
 | F-38 | A fake settlement claim in the BTC mempool stops every rescue | Fixed (M26) | Residuals: the patience window restarts per claim and on restart; a block's own pair (A2-09, fixed after this report in M28) |

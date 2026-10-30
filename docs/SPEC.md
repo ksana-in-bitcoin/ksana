@@ -1,6 +1,6 @@
 # Ksana: Technical Specification of the BTC Fast-Lane VM Chain
 
-v2 final · 2026-10-05, amended by D-097 and D-100 on 2026-10-06, by D-101 and D-104 on 2026-10-08 and by D-105 on 2026-10-12 (v2: 2026-10-03; v1: 2026-09-30)
+v2 final · 2026-10-05, amended by D-097 and D-100 on 2026-10-06, by D-101 and D-104 on 2026-10-08, by D-105 on 2026-10-12 and by D-135 and D-136 on 2026-10-29 (v2: 2026-10-03; v1: 2026-09-30)
 
 This version (v2 final) is the frozen consensus: v2 (2026-10-03) merged the decisions made during implementation after v1 and confirmed by the project owner (`docs/DECISIONS.md`,
 D-001 to D-086) back into the specification text; this version additionally merges in D-087 to D-096, and closes out all the decisions in DECISIONS that were originally marked "pending confirmation".
@@ -17,6 +17,19 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-10-29, signet's PoW limit raised (M51, D-136)**: a consensus change for signet only, decided by the project owner with D-135 and taking effect at the same restart from
+  genesis. Signet's `POW_LIMIT_BITS` becomes `0x1f0fffff`, a target of about 2^244, so that a header at the limit takes about 4 096 Argon2id evaluations instead of the 2 or so of devnet's
+  `0x207fffff`: a full BTC block of valid headers of a side branch forked from an old block, whose difficulty falls to the limit, then costs about 3.5 CPU-days instead of about 3 CPU-minutes
+  (the part of the second internal audit's A2-07 that D-135 leaves, §16). Signet's difficulty has stayed between about 10 000 and 16 000 evaluations per block, and one seed node on one thread
+  solves a block at the limit in about 3.5 seconds, so honest producers never mine at it (§6.6, §13, §13.1, §16, §17.5). devnet and mainnet are unchanged.
+- **2026-10-29, a header counts on BTC only once its parents have (M51, D-135)**: a consensus change, the second internal audit's A2-10; devnet and signet restart from genesis. A header
+  carried by a payload that counts now counts only when its anchor is on the BTC best chain, it passes the header checks and each of its parents has already counted, within one BTC block in
+  any order (§6.5 item 1). An appearance that does not count leaves no trace, so nodes and indexers no longer hold headers waiting for their parents, payloads waiting to be resolved or
+  candidate bodies, which anyone paying BTC fees could make grow by about 150 to 250 MB per BTC block. A body lands only with its own header, in a payload at or above the height at which that
+  header counts; it is checked against `entries_root` when its BTC block is scanned and kept as the bytes of its transaction (§6.4, §7.1, §10.3). A block's data lands no earlier than before,
+  and later only when a header reaches BTC before its parents count. Producers carry the headers of blocks whose settlement is no longer in flight, a settlement that counted without landing
+  anything is rescued once the headers it needs have counted, and republishing waits for the next settlement to count rather than to land (§7.3, §7.5, §7.6). The encodings, the shared vectors,
+  execution and the golden state roots, GHOSTDAG and the finality determination's algorithm are unchanged.
 - **2026-10-28, the source published without mainnet's block share (D-134)**: no protocol change. The repository is published with mainnet's block share (its fraction, its end and its
   account) left out until the project owner announces it: `MAINNET` holds placeholders for `BLOCK_SHARE_BPS` and `BLOCK_SHARE_END`, a mainnet node or indexer does not start until they are
   filled in (§6.1), and §8.6, §13, §13.1 and §17 leave the values out. devnet and signet are unchanged.
@@ -504,8 +517,9 @@ A block whose header version is higher than the highest version this software kn
   does not exceed `REORG_WINDOW`; beyond that the switch is refused with an alert (a forced switch to the finalized chain is not subject to this limit, §6.5); when the depth exceeds `SETTLEMENT_DEPTH`, a highest-severity
   alert is logged (already-broadcast settlement transactions may be abandoned). For blocks removed from the main chain (also by a retreat after a BTC reorg): their settlement records are no longer broadcast, the path B ops in them that are still valid are returned to the entry pool, and
   the funding inputs of their transactions stay reserved while those are in the BTC mempool (§7.3).
-- **Settled closure** (D-038, D-063, D-077): the **data landing height** `data(b)` of block b: for a block that needs a body (one containing entries other than forced-inclusion entries), it is the confirmation height, on the current BTC best chain,
-  of the first KSN1 payload (§7.5) that carries its header together with the same body; for an empty block or a block containing only forced-inclusion entries, it is the earliest height at which its header appears in any KSN1 payload.
+- **Settled closure** (D-038, D-063, D-077, D-135): the **data landing height** `data(b)` of block b: for a block that needs a body (one containing entries other than forced-inclusion entries), it is the confirmation height, on the current BTC best chain,
+  of the first KSN1 payload (§7.5) at or above the height at which its header counts (§6.5 item 1) that carries its header together with the same body (§10.3 item 3); for an empty block or a block containing only forced-inclusion entries,
+  it is the height at which its header counts.
   The settled prefix at main-chain height h is `prefix(h) = max(data of each accepted block)`, the maximum over main-chain blocks 1 to h and the blocks they merge (the main-chain blocks
   together with the blocks they merge cover exactly the whole past of the tip, equivalently `prefix(b) = max(data(b), max prefix(each parent))`); it is undefined when any block has no data.
   A block is settled at BTC height H if and only if `prefix ≤ H`. It determines the unlocking of sponsored fees and rewards (§8.5), and it is also the prefix the indexer can process (§10.3).
@@ -524,23 +538,27 @@ an attacker must reorg BTC rather than rely on fast-lane hashrate alone (item 4)
 is "finalized out" by a lighter chain that settles on time. Only a block whose execution is valid, and whose anchor and the anchors of the blocks it merges are on the BTC chain, becomes final (D-101): any
 other block that lands first is excluded, not finalized.
 
-1. **Header DAG**: the headers that have appeared on BTC (in settlement and republish payloads that count, §7.1) form a header DAG (shared by node and indexer), with the same GHOSTDAG rules as §6.6, additionally
-   checking the header rules (the first group in §6.3), the anchor not lower than the parents' and the timestamp's anchor bound; a header whose parents have not yet appeared is held, and connected in order of appearance once the parents arrive; invalid ones are discarded;
-   accepted headers are not deleted on a BTC reorg. The **connection height** of block B is `conn(B) = max(seen(B), max conn(parents))`, where `seen` is the earliest height at which the header appears
-   on the current best chain (the genesis block is considered to have always been on chain).
+1. **Header DAG** (D-082, D-135): the headers that count on BTC form a header DAG (shared by node and indexer), with the same GHOSTDAG rules as §6.6. A header carried by a settlement or republish
+   payload that counts at BTC height h (§7.1) **counts** at h when its anchor is on the BTC best chain (the BTC block at the anchor height is the one it names), it passes the header rules (the first
+   group in §6.3), its anchor is not lower than its parents' and its timestamp meets the anchor bound (§6.8), and each of its parents has counted at a height at most h (the genesis block is considered
+   to have always counted). Within one BTC block this is applied until no further header counts, so neither the order of the transactions in the block nor the order of the headers in a payload
+   matters. An appearance that does not count leaves no trace: no header is held waiting for its parents, and a header whose parents count later counts only when a payload at or above that height
+   carries it again. Accepted headers are not deleted on a BTC reorg (only by pruning, D-097); a header accepted while another BTC chain was the best counts on the current one only under the same
+   conditions there, and since its anchor block is then on the current chain, its timestamp bound needs no new check. `seen(B)` is the height at which B counts on the current best chain, and its
+   landing there (§8.6) is its earliest appearance in that BTC block; since B's parents count first, the **connection height** is `conn(B) = seen(B)` (the genesis block is considered to have always
+   been on chain).
 2. **Determination per BTC height**: the finalized tip F starts at the genesis block. For each BTC height H (in order, incrementally): the candidates are the blocks with `conn ≤ H` whose selected chain passes through F
    and through no excluded block, and `best_H` is the one with the largest `(chain_work, hash)`; walk `best_H`'s selected chain block by block after F. Block C is first **excluded** at H, before anything else
-   is asked about it, when the anchor of C or of a block C merges is not on the BTC best chain: the BTC block at that anchor height is another one (these anchors lie below the height at which C's header first
-   appeared, §7.1, so below H). Otherwise, when, for C's closure (C and the blocks it merges, together with F's closure), the data landing height `landed(C)` (by `data` of §6.4) satisfies
+   is asked about it, when the anchor of C or of a block C merges is not on the BTC best chain: the BTC block at that anchor height is another one (these anchors lie below the height at which C's header
+   counted, §7.1, so below H). Since D-135 a block whose anchor, or the anchor of a block it merges, is off the BTC best chain does not count (item 1), so no candidate is excluded this way any more;
+   implementations keep the check. Otherwise, when, for C's closure (C and the blocks it merges, together with F's closure), the data landing height `landed(C)` (by `data` of §6.4) satisfies
    `landed(C) + BTC_FINALITY_CONFS − 1 ≤ H`, the verdict on C is asked (item 6): valid, C is final and F advances to C; invalid, C is **excluded** at H. An excluded C goes together with every block whose
    selected chain passes through it, `best_H` is chosen again among the other candidates and the walk goes on at H (a block that merges C without passing through it on its selected chain stays a candidate,
    D-101). When the landing condition does not hold, stop. At each step, record the BTC block (height and hash) at which the determination (or the exclusion) was made.
-3. **Pause when it cannot be determined**: when the data landing status of some block cannot yet be determined (the node does not have the block and the data on BTC cannot rule out that its data has landed -- it is requested from peers and
-   rebuilt from the data on BTC, see item 5 -- or its payload has not yet been parsed against it; or the indexer cannot yet determine its body), or when no verdict on C can be given yet (item 6), the determination
-   stops at that height until it is determined, and when it resumes that height is determined again from the start (item 4); later BTC blocks do not change earlier determinations. A block the node does not have is answered from the data on BTC, with the same criterion as the indexer (§10.3 item 3): when the header DAG and §7.4 establish that it needs a body and the current BTC
-   best chain has no payload carrying the same body, its data has **not yet landed**, and the determination does not pause -- someone who puts only the header on BTC and withholds the body cannot make the node's determination stop there
-   (D-093). A block whose header appears only after `H − BTC_FINALITY_CONFS + 1` cannot be final at H anyway, so no pause is needed when its data status cannot be determined. Nor is the data status of a
-   block anchored off the BTC chain ever asked (item 2 excludes it first): its body could never be determined if its anchor names no BTC block (§10.3 item 3), and waiting for it would be a pause for good.
+3. **Pause when it cannot be determined**: whether a block's data has landed is settled when its BTC block is scanned (§6.4, §10.3 item 3, D-135), for the blocks the node has and those it does
+   not alike, so someone who puts only a header on BTC and withholds the body cannot make the determination stop (D-093). The determination stops at a height only while no verdict on C can be given yet
+   (item 6: the node still lacks the block and is requesting or rebuilding it, item 5, or its execution met a local fault); when it resumes, that height is determined again from the start (item 4), and
+   later BTC blocks do not change earlier determinations. A block anchored off the BTC chain does not count (item 1), so its data is never asked.
 4. **BTC reorg**: determinations, exclusions and connections made at reorged-out BTC blocks are revoked and redone along the new branch, those made at a height where the determination paused
    included (D-114); the finalized tip may therefore move back or even switch to another chain. Fast-lane finality is bounded by BTC's own finality. The determination of C at H rests on two things:
    the data of C's closure, `BTC_FINALITY_CONFS` blocks deep at H, and no heavier candidate having connected by H, which is only as deep as the BTC block at H. A reorg replacing the BTC block at H
@@ -554,7 +572,7 @@ other block that lands first is excluded, not finalized.
    block (regardless of work, and not subject to `REORG_WINDOW`; every state version from the finalized tip on is kept (D-101), so the state at the fork point is gone only after a BTC reorg deeper than
    `BTC_FINALITY_CONFS` revoked determinations: then a highest-severity alert is logged, the state store is cleared and the old main chain is re-executed from the genesis block up to the fork point before attaching
    the new chain, with no new blocks processed in the meantime, D-093; a pruning node keeps every state version from the pruning root on, so it never needs that, D-097); when it lacks a finalized block, it requests it from peers and **rebuilds it from the data on BTC** (D-093): the header is taken from the header DAG,
-   the body is determined by the indexer's rules (§10.3 item 3: a block that needs no body needs only its header, one that does takes it from the payload carrying it, and forced-inclusion entries are derived per §7.4), the rebuilt block
+   the body is the one that landed (§10.3 item 3: a block that needs no body needs only its header, one that does takes the body that landed with its header, and forced-inclusion entries are derived per §7.4), the rebuilt block
    carries no settlement transactions and is accepted after verification under all the rules for syncing historical blocks (missing parents of orphans are rebuilt the same way). So a node with no peers, or whose peers are all on another chain, can still follow
    the finalized chain on BTC. The block template merges only tips no heavier than the main-chain tip, so block production never leaves the finalized chain. The indexer takes the finalized tip as the lower bound of its main chain, and executes finalized blocks without waiting for
    `SETTLEMENT_DEPTH` confirmations (§10.3).
@@ -625,7 +643,8 @@ Numeric conventions of the PoW (D-025, all following Bitcoin):
 - `bits` is Bitcoin's compact encoding: exponent = `bits >> 24`, mantissa = `bits & 0x007f_ffff`, target = mantissa × 256^(exponent − 3). A set sign bit, a target of 0,
   a target ≥ 2^256, or a target above the PoW limit are all invalid. Converting a target to compact uses the canonical form of Bitcoin's `GetCompact` (take the top 3 significant bytes; when the mantissa's high bit is 1,
   shift right one byte and add 1 to the exponent), and a block's `bits` must be bit-for-bit identical to the value computed by the difficulty adjustment.
-- The PoW limit (minimum difficulty) is `pow_limit_bits` (devnet `0x207f_ffff`, about 2^255, letting devnet produce blocks every 5 seconds on an ordinary CPU), which is also the genesis block's default `bits`.
+- The PoW limit (minimum difficulty) is `pow_limit_bits` (devnet `0x207f_ffff`, about 2^255, letting devnet produce blocks every 5 seconds on an ordinary CPU; signet `0x1f0f_ffff`, about 2^244,
+  about 4 096 Argon2id computations per block, D-136), which is also the genesis block's default `bits`.
 
 ### 6.7 Difficulty adjustment (ASERT)
 
@@ -758,16 +777,19 @@ Two data carriers, both identified by the 4-byte magic `KSN1`:
   ends there. Each witness byte counts as only 1 weight unit (0.25 vB); in an OP_RETURN it is 1 vB.
 - The payload is taken only when a transaction's KSN1 outputs and inputs carrying a KSN1 envelope **together number exactly one** and that one is well-formed; the payload's length is checked against `MAX_BLOCK_DATA_BYTES` before it is fully
   decoded (complete consumption required), and the data carrier must match the payload kind; otherwise it is not recognized (neither a native transaction nor a settlement / republish transaction).
-- A settlement or republish payload confirmed at BTC height h **counts** only when every header it carries anchors below h (`btc_anchor.height < h`, D-100); one that does not count is ignored as a whole: none of its headers has appeared on BTC
-  through it (§6.5), it lands no body (§6.4) and its sender carries nothing (§8.6). An honest payload always counts: a block anchors to a BTC block already on the chain when it is produced, and a payload carrying it is broadcast later, so it confirms higher up. So every header in the header DAG anchors to
-  a BTC block already scanned when the header appears, its timestamp bound (§6.8) is checked right then, and node and indexer reach the same conclusion whatever order they learn the blocks in.
+- A settlement or republish payload confirmed at BTC height h **counts** only when every header it carries anchors below h (`btc_anchor.height < h`, D-100); one that does not count is ignored as a whole: none of its headers counts
+  through it (§6.5), it lands no body (§6.4) and its sender carries nothing (§8.6). In a payload that counts, each header counts or not by §6.5 item 1, and a body lands only with its own header (the one
+  `Body::header` points at, or the last header for `entries`), at or above the height at which that header counts, and only when it matches the header's `entries_root` (§6.4, §10.3 item 3, D-135).
+  An honest payload always counts: a block anchors to a BTC block already on the chain when it is produced, and a payload carrying it is broadcast later, so it confirms higher up. Its producer
+  carries the headers its block needs that have not counted yet (§7.5), so they count as soon as it confirms, unless a settlement it relies on confirms later (§7.3). So every header in the header DAG
+  anchors to a BTC block already scanned when the header counts, its timestamp bound (§6.8) is checked right then, and node and indexer reach the same conclusion whatever order they learn the blocks in.
 - bitcoind is started with `-txindex=1 -datacarriersize=100000` (regtest additionally with `-acceptnonstdtxn=0`); from Bitcoin Core 30 on, large OP_RETURN
   data outputs are relayed by default; earlier versions by default relay only those of at most 83 bytes, which affects path C transactions.
 
 ```rust
 pub enum Payload {
     Settlement {                       // variant 0: settlement payload
-        headers: Vec<BlockHeader>,     // at most MAX_SETTLEMENT_HEADERS; the last is this block's header, the rest are headers not yet on-chain that the producer chose to carry
+        headers: Vec<BlockHeader>,     // at most MAX_SETTLEMENT_HEADERS; the last is this block's header, the rest are headers that have not counted yet (§6.5) that the producer chose to carry
         entries: Vec<EntryData>,       // all entries of this block; Forced entries write only btc_txid
         bodies: Vec<Body>,             // bodies of other blocks being carried (D-077); may not point at the last header
     },
@@ -892,7 +914,7 @@ Local policy (D-045, D-057, D-077, D-081):
 
 - For a block accepted by the main chain and `SETTLEMENT_DEPTH` deep whose settlement transactions cannot enter the mempool (the producer's funding input was spent, etc.), or wait there too cheaply or too long (below), when the data it carries (this block's data,
   the other headers and the data of each block in `bodies`) has not all landed on-chain yet, the node rebuilds with its own funding wallet: the payload unchanged, assembling and signing the commit / reveal pair at this node's fee rate
-  (the envelope uses this node's funding key), broadcasting and tracking it like an ordinary settlement record (rebroadcast, reserved funding inputs, closed once confirmed or once all the data it carries has landed on-chain).
+  (the envelope uses this node's funding key), broadcasting and tracking it like an ordinary settlement record (rebroadcast, reserved funding inputs, closed once all the data it carries has landed on-chain; one that confirmed without landing it stays open, below).
 - The order follows the fast-lane main chain: the block's producer rebuilds immediately; when the k-th main-chain block (k ≤ `RESCUE_ORDER_WINDOW` = 6) from the main-chain block that accepts the block is produced by this node, it waits k BTC blocks after finding that it cannot
   broadcast; other nodes wait `RESCUE_ORDER_WINDOW + RESCUE_DELAY` (6 + 2). Before initiating, check the BTC mempool: when a KSN1 transaction claiming to settle the block already exists
   (the last header of its payload is that block), do not initiate.
@@ -903,6 +925,10 @@ Local policy (D-045, D-057, D-077, D-081):
   carrier reward can send a republish payload with its own payee instead (§7.6), which qualifies after `CARRIER_REPOST_DELAY`.
 - **A settlement that did not count** (D-100): a settlement transaction confirmed at or below its block's anchor height after a BTC reorg does not count (§7.1) and lands nothing; rescue treats the block as stuck, and
   redoes its own rescue that confirmed that way. A node rescues a block only once its local BTC tip has reached the block's anchor.
+- **A settlement that counted but landed nothing** (D-135): a settlement transaction that confirmed and counted while a header its payload needs from outside it (a parent of a header it carries) had
+  not counted yet lands nothing for the headers that depend on it (§6.5 item 1); typically the settlement of a parent block confirmed later, or a BTC reorg moved it higher. Once every such outside
+  header has counted, rescue treats the block as stuck and sends the payload again, unchanged, in the order above, also when a later payload has counted the block's header meanwhile: a body lands
+  only in a payload at or above the height at which its header counted (§6.4). Before that a rescue would land nothing either.
 - **Claims in the mempool** (D-098): a mempool transaction claiming to settle the block counts only when it is a commit / reveal pair carrying exactly the block's own payload, its commit spends confirmed outputs only and it pays at least
   this node's fee rate, and only for `RESCUE_ORDER_WINDOW + RESCUE_DELAY` BTC blocks after this node first saw it; otherwise anyone could suppress every rescue of a stuck block with a cheap claim that never confirms.
 - **The block's own settlement waiting in the mempool** (D-102): it holds the rescue back on the same terms as a claim, only while it pays at least this node's fee rate and for `RESCUE_ORDER_WINDOW + RESCUE_DELAY`
@@ -947,13 +973,17 @@ unlocking, BTC finality and the indexer all follow this definition.
 
 The producer's strategy (local, D-063, D-075, D-077):
 
-- Headers carried: starting from the parents, go through the blocks in the past in descending order of blue work (at most 1 000), not searching further into the past of a block that carries settlement transactions, and collect those whose headers have not yet appeared on
-  BTC, at most `MAX_SETTLEMENT_HEADERS − 1`, sorted by blue work ascending; the compact encoding takes at most half of the payload limit, dropping the earliest when it exceeds that.
-- Bodies carried: among them, the bodies (together with the headers) of blocks that carry no settlement transaction, need a body and whose data has not landed on-chain yet; they share the remaining space with this block's entries, with bodies taking at most
+- Headers carried (D-135): starting from the parents, go through the blocks in the past in descending order of blue work (at most 1 000) and collect those whose headers have not counted on BTC
+  yet, at most `MAX_SETTLEMENT_HEADERS − 1`, sorted by blue work ascending; the compact encoding takes at most half of the payload limit, dropping the earliest when it exceeds that (republishing
+  carries them, §7.6). A block that carries settlement transactions is skipped together with its past while its settlement is in flight (below) or once its header has counted. When its settlement
+  is no longer in flight and its header has not counted, its header is collected, not its body, and the search goes on into its past for headers only: a header counts only once its parents have
+  (§6.5 item 1), so leaving it out would make this block's own header wait for that settlement.
+- Bodies carried: among them, the bodies (together with the headers) of blocks that carry no settlement transaction, need a body, whose data has not landed on-chain yet and that are reached
+  without passing a block that carries settlement transactions; they share the remaining space with this block's entries, with bodies taking at most
   a quarter of the payload limit, dropping the earliest when they do not fit (republishing fills them in later). Block production and republishing pack by the entries' upper bound (every key other than KSA counted as written in full), so any block's body fits later when
   carried by any payload; §6.3 makes that bound a validity rule (D-100).
 - **When to carry settlement transactions (settlement batching, on by default)**: carry them when there is a body to carry (this block's or backlogged) and no settlement transaction is in flight. "In flight" means the most recent block in this block's past that carries settlement
-  transactions has a header not yet on-chain and its anchor is at most 2 blocks behind the BTC tip (one waiting in the mempool longer is not waited for anymore: its producer bumps it and other nodes rescue it, §7.3, §7.7). In addition, carry them also when the backlogged bodies
+  transactions has a header that has not counted yet and its anchor is at most 2 blocks behind the BTC tip (one waiting in the mempool longer is not waited for anymore: its producer bumps it and other nodes rescue it, §7.3, §7.7). In addition, carry them also when the backlogged bodies
   in total, or this block's own body, exceed an eighth of the payload limit, no longer waiting for the in-flight settlement transaction (the threshold is half of the body budget: before triggering, the backlog is at most twice the threshold,
   which fits in one payload). This way, when data is sparse, the block containing each op settles immediately; with continuous ops, the bodies backlogged while one settlement transaction is in flight (about one BTC block) are carried at once by
   the next block after it confirms, and each BTC block interval usually has only one batched settlement transaction. `--no-settlement-batching` turns batching off: every block that needs a body carries its own settlement
@@ -969,14 +999,16 @@ The producer's strategy (local, D-063, D-075, D-077):
 Local policy (D-047, D-075, D-077). A settlement payload carries at most `MAX_SETTLEMENT_HEADERS` headers; when consecutive blocks without settlement transactions exceed this number, or the chain has had no
 block with settlement transactions for a long time, the settled closure stalls and path C ops cannot become BTC-final either. After each round of BTC sync, the node, in the main chain's acceptance order (each main-chain block preceded by the blocks it merges), finds
 the first block f whose data is not on-chain. If f carries no settlement transaction and no later settlement payload will include it anymore: the first later block with settlement transactions whose past contains f is more than
-`MAX_SETTLEMENT_HEADERS − 1` away from f, or that block's settlement has already landed on-chain without carrying f (the producer carried fewer headers or bodies because of the payload size); or there is no such block after it yet, but there are already
+`MAX_SETTLEMENT_HEADERS − 1` away from f, or that block's settlement transaction has already confirmed and counted (§7.1) without carrying f (the producer carried fewer headers or bodies because of the payload size; that block's own data may then be waiting for f's headers, D-135); or there is no such block after it yet, but there are already
 at least `MAX_SETTLEMENT_HEADERS − 1` blocks, or f's anchor is more than `4 × SETTLEMENT_TIMEOUT` blocks behind the BTC tip (no block with settlement transactions for a long time), or a block of a competing chain has
-appeared on BTC and one BTC block has passed but fewer than `BTC_FINALITY_CONFS` (D-091: among the tips of the header DAG, a block not on this node's main chain whose fork-choice key `(chain_work, hash)`
-is below this node's main-chain tip but above the highest connected block of this node's main chain; of a tip whose selected chain holds a block anchored, or merging a block anchored, off the BTC best chain,
+counted on BTC and one BTC block has passed but fewer than `BTC_FINALITY_CONFS` (D-091: among the tips of the header DAG, a block not on this node's main chain whose fork-choice key `(chain_work, hash)`
+is below this node's main-chain tip but above the highest block of this node's main chain that has counted (§6.5 item 1); of a tip whose selected chain holds a block anchored, or merging a block anchored, off the BTC best chain,
 or one the finality determination excluded, only the part below the lowest such block counts, since nothing above it can become final, D-104 -- if this node's chain does not land on-chain in time, the other side's block may be determined final first; waiting one BTC block first is because a parallel block
 landing on-chain first is normal, and this node's next block with settlement transactions usually carries its own headers right away) -- then it sends a
 `Headers { headers, bodies }` transaction (a commit / reveal pair, funded by this node; while such a competing chain is on BTC, this node's BTC transactions pay the next-block fee rate, §7.7, D-102): containing only the headers that settlement payload cannot fit (from f on, those whose accepting main-chain block is `SETTLEMENT_DEPTH` deep, consecutive,
-without settlement transactions and not yet on-chain; when republishing because of a competing chain the depth is not waited for, up to the main-chain tip), plus the bodies of those among them that need a body, truncated to `MAX_BLOCK_DATA_BYTES`. A block with settlement transactions parallel to f (which may come
+without settlement transactions and whose data has not landed; when republishing because of a competing chain the depth is not waited for, up to the main-chain tip), plus the bodies of those among them that need a body, truncated to `MAX_BLOCK_DATA_BYTES`.
+Such a run starts at the first block whose data has not landed and stops at the first one that carries settlement transactions or whose data has landed, so every parent of a header in it has counted
+or is in the same payload, and its headers count as soon as it confirms (D-135). A block with settlement transactions parallel to f (which may come
 after it in acceptance order) will not carry it and is not counted. The same run of headers (distinguished by the starting hash) is not sent again until the transaction is confirmed or evicted; several nodes may each send one, and duplicates are
 ignored by the indexer. The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
 `CARRIER_REPOST_DELAY` (2) BTC blocks, the payee takes that block's carrier reward (§8.6); an earlier republish (typically D-091's republish of this node's own headers)
@@ -1288,11 +1320,11 @@ wasmtime's, is a consensus parameter; `ksana-state` also keeps golden roots comp
 from the pruning root's height on (D-097). A read view pinned to a version returns an error once that version is rolled back or pruned, and never reads another branch's data.
 - **Pruning** (D-097; local policy, on by default, `--no-pruning` turns it off): after each BTC sync, the pruning root R is the highest block determined final (§6.5) at a BTC height at least `PRUNE_BTC_MARGIN`
   (144) below the BTC tip, and on the main chain; the pruning point P is the block on R's selected chain `min_pruning_depth` (§6.6) below it, and the node prunes once P is at least `PRUNE_STEP` (1 000) blue score
-  above the previous one. Memory then holds the block DAG (GHOSTDAG data) and the header DAG from P on, the finality determination with R as its root, the candidate bodies of the blocks whose headers the header DAG still holds (in it or pending),
+  above the previous one. Memory then holds the block DAG (GHOSTDAG data) and the header DAG from P on, the finality determination with R as its root, the bodies that landed for the blocks the header DAG still holds, kept as the bytes of the transactions that carried them, one copy per transaction (D-135),
   the BTC snapshot from `anchor(P) − NATIVE_CONFIRMATIONS` on, and the main chain's summaries from a window base no higher than P's height, the unlock cursor of R's state or the settled closure at that BTC height.
   Everything below is answered from the block store. A pruned block delivered again is a duplicate; a block whose computation needs a pruned block is not processed (which does not make it invalid); peers syncing
   from far behind are served the main chain's acceptance order from the store, so a new node still syncs from the genesis block. Each pruning writes the checkpoint `pruning.ckpt` (Borsh with a SHA-256 checksum,
-  replaced atomically), from which a restart restores the DAGs, the finality determination, the bodies and the BTC snapshot, then inserts the blocks stored after it. Without a usable checkpoint, or with pruning off,
+  replaced atomically; format 3 since D-135, without pending headers, unresolved payloads or candidate bodies), from which a restart restores the DAGs, the finality determination, the bodies and the BTC snapshot, then inserts the blocks stored after it. Without a usable checkpoint, or with pruning off,
   the GHOSTDAG data and the header DAG are rebuilt from the block store at startup and BTC is rescanned from the genesis anchor. A BTC reorg deeper than what was kept (one that revokes R's determination, or reaches
   below the snapshot) stops the node with a highest-severity alert: it has to be resynced from an empty data directory. The orphan pool holds at most 256 blocks.
 - **RocksDB memory** (D-103; local settings): the block store and the state store are opened with fixed memory bounds. A column family's write buffer is flushed at 4 MiB and a database's write buffers at 16 MiB
@@ -1306,24 +1338,24 @@ from the pruning root's height on (D-097). A read view pinned to a version retur
   the genesis state, rewind the main chain to the genesis block and, after syncing, re-execute the whole original main chain (D-093). When the fork point rewound to is below the state database's oldest version (pruned), likewise clear it and re-execute from the genesis block up to
   the fork point (this happens only when a BTC reorg revoked finality determinations, §6.5 item 5). A pruning node always finds a consistent version at or above the pruning root (D-097).
 - The BTC tracker scans bitcoind's best chain block by block starting near the genesis anchor, or from the pruning checkpoint's snapshot (native transactions, block headers in KSN1 payloads, the transactions that land each block's data on chain); on a BTC reorg it truncates to the fork point
-  and rescans, publishing the result as immutable snapshots. When a payload carrying a block body is scanned, this node may not yet know the corresponding block: it is first recorded as unresolved, and counted according to the block's content once the node has stored
-  the block. The data directory also holds the P2P node key (`p2p.key`) and the genesis config fingerprint.
+  and rescans, publishing the result as immutable snapshots. The headers of the payloads that count in a BTC block are judged when that block is scanned (§6.5 item 1), and each body is checked then against its header's
+  `entries_root` (§6.4, §10.3 item 3); nothing waits for the node to store a block, and nothing is left unresolved (D-135). The headers decoded from one BTC block are held only while it is scanned. The data directory also holds the P2P node key (`p2p.key`) and the genesis config fingerprint.
 
 ### 10.3 Standalone indexer
 
 The indexer is the source of final truth: it connects only to bitcoind, never to any fast-lane node, and rebuilds the fast-lane chain and all state from BTC data alone (D-048, D-063, D-082).
 
 1. Scan BTC blocks in order with the same tracker as the node, recognizing native transactions, settlement payloads and republish payloads.
-2. Take the block headers out of the payloads that count (§7.1), check them by the header DAG rules of §6.5 (GHOSTDAG limits, header rules, anchor not below the parents', anchor bound of the timestamp), and build the DAG with the same
-   GHOSTDAG; main-chain selection is the same as the node's (§6.4: the selected chain of the best eligible candidate, with the finalized tip as the lower bound; after each round of the finality determination the main
+2. Take the block headers out of the payloads that count (§7.1), count them by §6.5 item 1 (anchor on the best chain, GHOSTDAG limits, header rules, anchor not below the parents', anchor bound of the
+   timestamp, parents counted; D-135), and build the DAG with the same GHOSTDAG; main-chain selection is the same as the node's (§6.4: the selected chain of the best eligible candidate, with the finalized tip as the lower bound; after each round of the finality determination the main
    chain is chosen again under the current BTC chain, retreating below a block a BTC reorg made ineligible, with an alert, D-104).
-3. **Block bodies**: the entries block B must force-include, `forced(B)`, are derived from BTC per §7.4 (this needs the headers of B and its parents, and B's anchor must be on the snapshot's best chain).
-   When `entries_root(forced(B))` equals the header's `entries_root`, B needs no body; otherwise take, among the payloads carrying B's body, the first candidate whose `entries_root` matches after conversion
-   (`Forced` entries are replaced, by position, with the entries of `forced(B)` with the same transaction ID). The body is uniquely determined by `entries_root` and, once determined, no longer changes with the snapshot. For an anchor-invalid block
-   (§6.8): when `entries_root` is the root of empty entries, the body is empty; otherwise take the candidate that matches after conversion (`Forced` looks up the native transaction by transaction ID on the current best chain, over the range of §6.3); when there is none,
-   derive the forced-inclusion entries from the current best chain over the same height range and adopt them if they match; when still undetermined, wait. The nodes accept an anchor-invalid block only when its entries pass these same
-   lookups on their BTC chain (§6.3, D-100), so its body can be determined. The node uses the same rules to rebuild the blocks it lacks from the data on BTC, and answers
-   the data landing status of blocks it does not have by the same rules (§6.5 items 3 and 5, D-093).
+3. **Block bodies** (D-077, D-093, D-135): when B's header counts, the entries B must force-include, `forced(B)`, are derived from BTC per §7.4; B's parents have counted and its anchor is on the
+   best chain, so this is always possible. When `entries_root(forced(B))` equals the header's `entries_root`, B needs no body. Otherwise its body is the first one carried with its header, in a payload at
+   or above the height at which the header counts, whose `entries_root` matches after conversion (`Forced` entries are replaced, by position, with the entries of `forced(B)` with the same transaction ID).
+   Each body is checked when its BTC block is scanned and kept as the bytes of the transaction that carried it; it is uniquely determined by `entries_root` and, once landed, no longer changes with the
+   snapshot. A block anchored off the best chain does not count, so its body is never asked, and the rules that derived the bodies of anchor-invalid blocks are gone (the nodes still check an
+   anchor-invalid block's entries when they accept it, §6.3). The node uses the same rules to rebuild the blocks it lacks from the data on BTC and to answer the data landing status of every block
+   (§6.5 items 3 and 5, D-093).
 4. **Processable prefix**: the longest prefix of the main chain from the genesis block in which each block's body and the bodies of the blocks it merges are known and their data has landed on BTC (the settled closure), and the block has
    `SETTLEMENT_DEPTH` confirmations on the indexer's main chain or is on the finalized chain (§6.5). Rationale for the confirmation count: the settlement of a merged parallel block may appear on BTC first, while the header of the main-chain block at the same height is brought up
    only later by another payload; whenever a node broadcasts a settlement its main chain is already `SETTLEMENT_DEPTH` blocks past that block, and these headers all land on BTC afterwards, so the wait does not stall the indexer.
@@ -1345,7 +1377,7 @@ The indexer is the source of final truth: it connects only to bitcoind, never to
 9. Output: logs, plus the JSON-RPC `indexer_status` / `indexer_stateRoot` (§11.2). The halted state is kept in memory only; after a restart, execution runs again (the same block halts it again);
    local faults (bitcoind, storage, data source) are retried in the next round.
 10. **Pruning** (D-097; on by default, `--no-pruning` turns it off): the policy of §10.2, the pruning root being the highest executed block determined final at least the margin ago. Memory holds the header DAG from
-   the pruning point on, the finality determination from the root, the bodies of the blocks whose headers the header DAG still holds, the BTC snapshot from the pruning point's anchor and the executed main chain from its window base.
+   the pruning point on, the finality determination from the root, the bodies that landed for the blocks the header DAG still holds, as the bytes of their transactions (D-135), the BTC snapshot from the pruning point's anchor and the executed main chain from its window base.
    An index in the data directory (`index/`, RocksDB) keeps the executed main chain's summaries and state roots by height and the height that accepted each block, written before the state of that height is committed;
    it answers the RPC and the carrier rule (§8.6) below the window and rebuilds the window after a restart. Each pruning writes the checkpoint `pruning.ckpt` (as the node's); an unusable one only means rescanning
    BTC from the genesis anchor, and a lost index after pruning makes the indexer start over from the genesis anchor. The index and the state store are opened with the RocksDB memory bounds of §10.2 and share
@@ -1576,7 +1608,7 @@ overflow or lossy conversions; errors are always returned and the block or op ju
 ## 13. Protocol parameter defaults
 
 All parameters are defined centrally in `ksana-primitives::params` (`Params`), distinguished by network: devnet (`DEVNET`, running on BTC regtest), signet (`SIGNET`) and
-mainnet (`MAINNET`, D-096). signet differs from devnet only in `CHAIN_ID` and `ANCHOR_DEPTH` (D-055, D-056); mainnet differs from devnet in `CHAIN_ID`,
+mainnet (`MAINNET`, D-096). signet differs from devnet in `CHAIN_ID`, `ANCHOR_DEPTH` and `POW_LIMIT_BITS` (D-055, D-056, D-136); mainnet differs from devnet in `CHAIN_ID`,
 `NATIVE_CONFIRMATIONS`, `ANCHOR_DEPTH`, `POW_LIMIT_BITS` and the four KSA issuance figures (D-089); "same" in the table means the same as devnet. The rationale and
 status of each value are in §13.1. Node, indexer and CLI select the network with `--chain devnet|signet|mainnet`.
 
@@ -1605,7 +1637,7 @@ status of each value are in §13.1. Node, indexer and CLI select the network wit
 | `MEDIAN_TIME_SPAN` | 11 | same | same | Reception rule: the timestamp must exceed the median of this many preceding blocks |
 | `MAX_FUTURE_BLOCK_TIME` | 15 seconds | same | same | Reception rule: how far the timestamp may be ahead of local time at most |
 | `MAX_TIMESTAMP_AHEAD_OF_ANCHOR` | 14 400 seconds | same | same | Consensus rule: how far the timestamp may be ahead of the anchor BTC block's header time at most (§6.8) |
-| `POW_LIMIT_BITS` | `0x207fffff` | same | `0x1f00ffff` | PoW limit (minimum difficulty), also the genesis block's default `bits`; the mainnet target is about 2^240 |
+| `POW_LIMIT_BITS` | `0x207fffff` | `0x1f0fffff` | `0x1f00ffff` | PoW limit (minimum difficulty), also the genesis block's default `bits`; the signet target is about 2^244 (D-136), the mainnet target about 2^240 |
 | `POW_ALGORITHM` | `Argon2id` | same | same | Mining algorithm (D-094): the message is the encoded block header, the salt is `"ksana-pow" ‖ CHAIN_ID` |
 | `POW_ARGON2_MEMORY` | 2 048 KiB (2 MiB) | same | same | Argon2id memory: the memory one computation per block header occupies, which determines verification time (about 1 ms on an ordinary CPU); fixed per network, not in the upgrade schedule |
 | `POW_ARGON2_ITERATIONS` | 1 | same | same | Argon2id passes; fixed per network |
@@ -1671,7 +1703,7 @@ and confirming it changes no code; the project owner confirmed all six such valu
 | `MEDIAN_TIME_SPAN` | 11 | Reception rule, the BTC median time (BIP113) convention | Settled |
 | `MAX_FUTURE_BLOCK_TIME` | 15 seconds | Reception rule, 3 block intervals; only affects reception, not part of consensus | Settled |
 | `MAX_TIMESTAMP_AHEAD_OF_ANCHOR` | 14 400 seconds | D-083: a BTC block header's time itself may be up to 2 hours ahead, plus a margin for the anchor lagging behind the tip and for block production; `timestamp_attack.rs`: a single block can enlarge the target by at most 2^(14 400 / 7 200) = 4×, and over-reporting by 1 second makes it invalid | Settled; verified (tests) |
-| `POW_LIMIT_BITS` | `0x1f00ffff` | Target about 2^240, at the limit one block is expected per 65 536 Argon2id computations; D-094 measured about 0.98 ms per verification and about 0.86 ms per solve attempt, so about 13 CPU cores suffice for one block per 5 seconds; a floor that is too hard stalls a network with too little hashrate, while one that is too easy is only a matter of ramping up from the genesis `bits` early after launch, so the easy one is chosen; the mainnet hashrate is unknown, and the genesis `bits` is filled in according to the expected hashrate | Settled (confirmed by the project owner, 2026-10-06) |
+| `POW_LIMIT_BITS` | `0x1f00ffff` | Target about 2^240, at the limit one block is expected per 65 536 Argon2id computations; D-094 measured about 0.98 ms per verification and about 0.86 ms per solve attempt, so about 13 CPU cores suffice for one block per 5 seconds; a floor that is too hard stalls a network with too little hashrate, while one that is too easy is only a matter of ramping up from the genesis `bits` early after launch, so the easy one is chosen; the mainnet hashrate is unknown, and the genesis `bits` is filled in according to the expected hashrate; signet's `0x1f0fffff` (about 4 096 computations at the limit, D-136) makes the headers of a side branch whose difficulty fell to the limit about 2 000 times dearer than devnet's limit did (§16), while its honest difficulty has stayed 2.4 to 4 times above it | Settled (confirmed by the project owner, 2026-10-06) |
 | `POW_ALGORITHM` and the Argon2id parameters | Argon2id, 2 MiB / 1 pass / 1 lane | D-094 (the project owner's decision): measured about 1 ms per block header, verifiable in a browser; the GPU advantage is estimated at 10–30× from GPU memory bandwidth, not measured; the retuning path of D-094 is to tune the memory and passes before mainnet by the measured GPU advantage and sync cost | Algorithm settled; parameters carried over from devnet, confirmed by the project owner (2026-10-06); GPU advantage unverified, to be measured |
 | `GHOSTDAG_K` | 16 | D-063 set 8 for 5-second blocks by Kaspa's method k = min{k : P[Poisson(2Dλ) > k] < δ}, with λ = 0.2 blocks / second and propagation delay bound D = 5 seconds, 2Dλ = 2: P[Poisson(2) > 8] ≈ 2.4 × 10⁻⁴ (δ = 10⁻³ gives 8, δ = 10⁻² gives 6), the same method by which D-075 computed 18 for 1-second blocks. D-100 raised it to 16 against withholding a heavy empty block (§16, §17.4): the honest weight-1 blocks that a withheld empty block of weight 12 can overtake then fit in a blue anticone. At δ = 10⁻³, 16 tolerates a propagation delay bound of about 17.6 seconds (8: about 6.1 seconds); the cost is coloring work (up to K + 1 blue blocks per merge set) and 24 more blocks of pruning depth (D-097); the propagation delay of a real network has not been measured | Settled; unverified, to be measured (propagation delay) |
 | `MAX_BLOCK_PARENTS` | 10 | D-063, the same as Kaspa | Settled |
@@ -1728,6 +1760,7 @@ acceptance details of each milestone were kept in a development log that is not 
 | M32 Public signet | Ksana on Bitcoin's public signet: the relay probe of both data carriers, one hosted server deployed over ssh (seed node, indexer, web wallet, BTC proxy, KSA faucet), the guide for joining; real wallets on paths B and C; four weeks of observation before mainnet (D-107) | In progress |
 | M38 BTC-final waits for the BTC block of the determination | a block is reported BTC-final once the BTC block that determined it has `BTC_FINALITY_CONFS` confirmations, so taking back a reported block takes a BTC reorg of at least `BTC_FINALITY_CONFS` blocks; a height the determination paused at is determined again when it resumes (D-114) | In progress |
 | M42 Issuer capabilities of built-in assets | the issuing contract of an asset declares at creation which of mint, freeze, allowlist and pause it holds and can only give them up; every movement of the asset obeys them, none moves a balance (no clawback); asset symbols; `ksana_getAssetStatus` (D-121); devnet / signet restart from genesis | In progress |
+| M51 A header counts only after its parents | the second audit's A2-10: a header on BTC counts only once its anchor is on the best chain and its parents have counted, within one BTC block in any order; no pending headers, unresolved payloads or candidate bodies; bodies checked when they land and kept as the bytes of their transactions; producers carry the headers their block needs, and a settlement that counted but landed nothing is rescued (D-135); signet's PoW limit `0x1f0fffff` (D-136); devnet and signet restart from genesis | Done |
 
 M15 acceptance criteria: the finality determination is a deterministic function of the BTC chain data (incremental determination agrees with determination from scratch; a heavier chain that lands on BTC in time wins and a late one is ignored; pause when it cannot be determined; a BTC reorg revokes
 the determination); a node's finalized blocks are not reorged by a late heavier chain, a node that chose another chain switches over, a node without the finalized blocks requests them from peers; the indexer executes finalized blocks without waiting for confirmations
@@ -1817,17 +1850,22 @@ Testing focuses on determinism and exception paths: any problem that makes state
 | The seller pays a few sats to its own lock just before the buyer's payment is force-included | The seller's claim buys only its share, for the beneficiary; the rest stays locked and the buyer's payment buys it (D-098) |
 | A block with an invalid body lands on BTC with two headers on top of it | The indexer disqualifies it, re-selects the main chain and keeps agreeing with the nodes (D-098) |
 | An invalid block (wrong `state_root`, invalid body) lands on BTC first and its data reaches `BTC_FINALITY_CONFS` confirmations | It is excluded from the finality determination with the blocks built on it, and the honest chain becomes final; the same on a running indexer, a fresh one and a node that never had the block (D-101) |
-| A block whose anchor names no BTC block lands on BTC first and gets `BTC_FINALITY_CONFS` confirmations, with its body (wrong `state_root`) or without it, or merged by a landed block | It, or the block merging it, is excluded for the anchor before anything else is asked, and node and indexer finalize the honest chain exactly as when the anchor hash is real (D-101) |
+| A block whose anchor names no BTC block lands on BTC first and gets `BTC_FINALITY_CONFS` confirmations, with its body (wrong `state_root`) or without it, or merged by a landed block | Its header does not count, nor does any header with it in its past, and node and indexer finalize the honest chain exactly as when the anchor hash is real (D-101, D-135) |
 | A peer hands over, through sync, a block anchored off the BTC chain: an empty block on an old main-chain block with a made-up anchor hash, an attacker's block on the tip merging it, a block on an idle tip with a made-up anchor hash, or one on the tip anchored on a stale BTC block | The honest producer never merges it or builds on it, and node and indexer finality goes on exactly as when the anchor is real (D-101) |
 | A peer sends junk blocks: a parent far below the merge depth, orphans without valid PoW, huge orphans | Rejected before any ancestor query; orphans are checked before they are kept and the pool is capped by bytes (D-098) |
 | Many accounts fill the entry pool with ops behind nonce gaps | The pool evicts the ops that stand lowest (behind a nonce gap first) instead of rejecting newcomers; new path B ops still get in (D-098) |
-| A BTC payload carries hundreds of junk headers and bodies | One copy of the carrying transaction is kept, not one per body (D-098); a payload with more than `MAX_SETTLEMENT_HEADERS` headers is not recognized (D-100) |
+| A BTC payload carries hundreds of junk headers and bodies | Headers whose parents have not counted are ignored and nothing is held for them; a landed body is kept as the bytes of its transaction, one copy per transaction (D-098, D-135); a payload with more than `MAX_SETTLEMENT_HEADERS` headers is not recognized (D-100) |
+| A payload carries 500 headers whose parents never appeared, without valid PoW | Ignored: the memory and the checkpoint of nodes and indexers do not grow (the second audit's A2-10, D-135) |
+| A parent's header and a child's header land in two transactions of one BTC block, in either order | Both count at that height (D-135) |
+| A child's settlement confirms before its parent's: the parent's is still in flight or stuck, or a BTC reorg moved it higher | The child's header does not count and its data does not land; once the parent's header counts, the child's payload is rescued unchanged and lands; node and indexer agree (D-135) |
+| The headers waiting to land exceed one payload | The settlement carries the latest; once it has counted, the earliest are republished, the settlement is rescued, and all the data lands (D-135) |
+| A header counts on one BTC chain; a reorg moves its anchor off the best chain, then BTC returns | It does not count on the other chain and counts again on the first; a running tracker and one scanning from scratch agree at every step (D-135) |
 | A block that needs a body carries more entries than any payload can fit | Invalid block (D-100) |
 | A new block with a forged anchor arrives by sync with a forced-inclusion entry naming a transaction that is not a native transaction carrying its op | Rejected (invalid when the transaction is a native transaction carrying another op), the same however much the node has pruned; a block merging such an entry is invalid (D-100) |
 | A block's attached settlement payload carries a header anchored above the block | Invalid block (D-100) |
 | A settlement transaction confirms at or below its block's anchor height after a BTC reorg | It does not count; the block is rescued (D-100) |
 | A peer delivers the same refused block again and again while syncing | Answered from memory while the BTC tip stays the same, not checked again (D-100 item h) |
-| A payload lands with a header anchored at or above the payload's own BTC height | The payload does not count: its headers have not appeared on BTC through it and it lands no body (D-100) |
+| A payload lands with a header anchored at or above the payload's own BTC height | The payload does not count: none of its headers counts through it and it lands no body (D-100) |
 | A block carries settlement transactions with an input `nSequence` other than `0xFFFFFFFD` | Invalid block (D-100) |
 
 ## 16. Threat model and security requirements
@@ -1856,8 +1894,9 @@ or for BTC finality.
 | A new block with a forged anchor delivered by sync | Accepted as an anchor-invalid historical block; before D-100 its forced-inclusion entries went unchecked, and merging it could stop block production or leave a body the indexer can never determine | Its forced-inclusion entries must be determinable from the current best BTC chain when it is accepted, looked up from the start of its own forced window (§6.8, D-100), and a block merging one whose forced entry names no native transaction carrying its op is invalid (§7.4, §9.6, D-100); producers leave blocks with a merge hazard out of their templates (D-098); a BTC reorg that drops such a transaction afterwards takes the blocks relying on it off the main chain (§6.4, D-104) |
 | Replacing the payload in the witness | Settlement broken cheaply (the transaction ID is unchanged) | The payload sits in a leaf script committed to by the output, preceded by a commit transaction |
 | Time-locking the settlement transactions | A block delivered by sync carries settlement transactions whose inputs BIP68 locks, so its data cannot land before the lock expires and a rescue is needed | Every input of the commit and the reveal transaction has `nSequence = 0xFFFFFFFD` (§7.2, D-100) |
-| Oversized or malformed settlement data | Node crash or state fork; memory or CPU exhaustion of every node and indexer; a header whose timestamp bound cannot be checked when it appears | Strict length limits, `MAX_SETTLEMENT_HEADERS` checked before any header is read; a decoding failure only rejects the copy; canonical encoding; fuzzing; the payloads pending in the tracker share one copy of their carrying transaction, and a parent's merge depth is checked before any ancestor query (D-098); a payload with a header anchored at or above its own BTC height does not count (§7.1, D-100) |
+| Oversized or malformed settlement data | Node crash or state fork; memory or CPU exhaustion of every node and indexer; a header whose timestamp bound cannot be checked when it counts | Strict length limits, `MAX_SETTLEMENT_HEADERS` checked before any header is read; a decoding failure only rejects the copy; canonical encoding; fuzzing; nothing from a payload is held waiting: a header counts only once its parents have, and a landed body is kept as the bytes of its transaction (D-135); a parent's merge depth is checked before any ancestor query (D-098); a payload with a header anchored at or above its own BTC height does not count (§7.1, D-100) |
 | Deep side chains: a long chain of cheap blocks forked from an old block, offered for merging again and again | Every check walks the whole history (CPU); a block only a full history can judge would split pruned from unpruned nodes | The merge-depth root rule (§6.3, D-097): such a chain cannot be merged, and the check goes no lower than the root's blue work; carried bodies are bounded by the root too, so pruned and unpruned nodes judge alike |
+| Cheap valid side-branch headers through BTC payloads (the second audit's A2-07; what D-135 leaves) | Memory and CPU of every node and indexer: forked from an old block, a side branch's difficulty falls to the PoW limit, and its headers count and stay until pruning: about 85 000 headers of non-empty blocks (46 bytes each in a payload, about 85 MB in memory) per full BTC block, or about 250 000 headers of empty blocks (14 bytes, about 250 MB) at 12 to 120 times the work; the same headers can land junk bodies, about 4 MB of transaction bytes per full BTC block | Each header costs a valid PoW and BTC block space: at signet's limit about 4 096 Argon2id evaluations per header since D-136, about 3.5 CPU-days for a full BTC block of headers of non-empty blocks and at least about 120 CPU-days for empty ones (before D-136 about 3 CPU-minutes); on mainnet about 65 536 evaluations per header, about 55 CPU-days; kept only until pruning (D-097). Not counting side headers below the finalized tip beyond the merge depth is a separate design, not adopted |
 | Memory growth | Node and indexer memory grows with the chain (31.9 GB per active year measured before D-097) until the process fails | Pruning below a BTC-final pruning point (§10.2, §10.3, D-097): memory is bounded by the window the pruning margin and depth keep; RocksDB's write buffers and block cache have fixed bounds, and on Linux jemalloc returns the memory the threads free (§10.2, D-103) |
 | VM non-determinism | State fork between nodes | No floating point, NaN canonicalization, architecture-independent stack metering, pinned wasmtime / jmt versions, determinism test, the indexer checks `state_root` |
 | Cross-domain signature replay | Assets stolen | Tagged hash domain separation, `chain_id`, nonce; the BIP322 message is the hex of the sighash; the path C signature is bound to the carrying transaction's first input. The protection is one-way: a site that asks for a BIP322 signature of a "random" 64-hex string can present a VmOp sighash, so wallets must show the decoded op before signing (D-098) |
@@ -1896,7 +1935,7 @@ or void: the data carrier (Taproot witness envelope), the cost of landing header
 (path A deleted), issuance and distribution of the project token (D-089), the block production method (PoW, D-088; no merged mining, D-087), the form of the fast-lane PoW (Argon2id, D-094;
 empty block headers keep landing on BTC, with the difficulty escalating with the streak, D-090; immediate republishing when a competing chain appears on BTC, D-091), the unification of accounts and BTC addresses (D-092), the carrier reward (D-095),
 the mainnet parameters (§13, D-096), bounded node memory (pruning with the merge-depth root rule, D-097). Only three kinds of content remain in this section, plus the consensus fixes the security audit of
-2026-10-06 proposed and their outcome (§17.4, D-098, D-100); until settled, the implementation always follows the default option.
+2026-10-06 proposed and their outcome (§17.4, D-098, D-100) and the consensus fix of the second audit (§17.5, D-135, D-136); until settled, the implementation always follows the default option.
 
 ### 17.1 The only open item
 
@@ -1962,6 +2001,15 @@ A smaller `EMPTY_BLOCK_DIFFICULTY` does nothing for an idle chain, where the hon
 stay blue: with 16 the honest blocks that a withheld empty block of weight 12 can overtake fit in a blue anticone. What remains is on an idle chain, where the honest blocks are empty blocks found minutes apart and the private chain
 can still put more than K blocks in the anticone of one of them. The costs of 16: coloring checks up to K + 1 blue blocks per merge set, about twice the worst-case work of 8; the pruning depth of D-097 grows by 24 blocks; payment
 reversal (§10.4) moves by at most half a percentage point.
+
+### 17.5 Consensus fix of the second internal audit (D-135, D-136)
+
+The second internal audit of 2026-10-06 left open one finding that only a consensus rule closes. The project owner chose on 2026-10-29 to fix it in the protocol before mainnet, and to raise signet's
+PoW limit in the same restart against what the rule leaves (D-136); M51 implements both, and devnet and signet restart from genesis once.
+
+| Problem | Rule adopted (D-135) | What remains |
+| --- | --- | --- |
+| Headers whose parents had not appeared were held without any check until the pruning point passed their anchor: about 150 to 250 MB per BTC block of such payloads for anyone paying BTC fees (A2-10, with F-25 and F-35) | A header counts only once its anchor is on the BTC best chain and its parents have counted, within one BTC block in any order; an appearance that does not count leaves no trace; a body lands only with its counted header and is checked then (§6.4, §6.5 item 1, §7.1, §10.3) | Valid side-branch headers at the PoW limit still count and stay until pruning (A2-07, §16); on signet each costs about 4 096 Argon2id evaluations since D-136 |
 
 The work items before mainnet (no consensus change) are at the end of §14: real wallets on the public signet, the security audit, the measurements of §13.1, the D-095 update of the web pages.
 

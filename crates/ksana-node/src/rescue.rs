@@ -3,11 +3,14 @@
 //! settlement broadcasting.
 //!
 //! - Rescue settlement: when a block accepted by the main chain with `SETTLEMENT_DEPTH` reached carries settlement
-//!   transactions that cannot enter the mempool (the producer's funding inputs were spent, etc.) or that confirmed in a
+//!   transactions that cannot enter the mempool (the producer's funding inputs were spent, etc.), that confirmed in a
 //!   BTC block without counting (at or below the anchor of a header they carry, after a BTC reorg, D-100;
-//!   `confirmed_uncounted`), and the data it carries has not all landed yet ([`Chain::carried_on_chain`]), rebuild
-//!   them with this node's funding, payload unchanged (the path A user input/output pairs were removed, D-078), once
-//!   the next BTC block is above the block's anchor so that the rebuilt payload counts. The order follows the fast-lane
+//!   `confirmed_uncounted`), or that confirmed and counted but landed nothing because a header their payload needs
+//!   from outside it had not counted, once those headers have counted, also when a later payload has counted the
+//!   block's header meanwhile (D-135; `stalled`), and the data it carries has not all landed yet
+//!   ([`Chain::carried_on_chain`]), rebuild them with this node's funding, payload unchanged (the
+//!   path A user input/output pairs were removed, D-078), once the next BTC block is above the block's anchor so that
+//!   the rebuilt payload counts. The order follows the fast-lane
 //!   main chain (D-057): blocks produced by this node are rebuilt immediately; when the k-th main-chain block (k ≤
 //!   [`RESCUE_ORDER_WINDOW`], counting from the main-chain block that accepted it, or from the block after it for a
 //!   block on the main chain) was produced by this node, wait k BTC blocks after finding it cannot be broadcast; other
@@ -23,8 +26,9 @@
 //! - Republishing block headers and bodies: in the main chain's acceptance order (each main-chain block preceded by the
 //!   blocks it merges, D-063), when the first block whose data has not landed carries no settlement transactions and
 //!   later settlement payloads will not include it any more (the first later block carrying settlement transactions
-//!   with it in its past is more than `MAX_SETTLEMENT_HEADERS − 1` away, or that block's settlement has landed without
-//!   carrying it — the producer carried fewer headers or bodies because of the payload size, D-075, D-077; or there is
+//!   with it in its past is more than `MAX_SETTLEMENT_HEADERS − 1` away, or that block's settlement has confirmed and
+//!   counted without carrying it — the producer carried fewer headers or bodies because of the payload size, D-075,
+//!   D-077, and its own data may be waiting for those headers, D-135; or there is
 //!   no such block yet but there already are at least `MAX_SETTLEMENT_HEADERS − 1` blocks, or its anchor has lagged the
 //!   BTC tip for a long time, or a lighter competing chain recently appeared on BTC ([`Chain::btc_competitor`], D-091:
 //!   this node's chain is not landing in time and the other side's blocks might be decided final first; then do not
@@ -74,7 +78,7 @@ use ksana_btc::settlement::{
     SettlementPair,
 };
 use ksana_btc::tracker::{BlockSummary, BtcSnapshot};
-use ksana_primitives::{compact, Block, Body, Payload};
+use ksana_primitives::{compact, Block, BlockHeader, Body, Payload};
 
 use crate::chain::{test_settlement, Chain};
 use crate::producer::{fund, Funding};
@@ -170,6 +174,36 @@ fn confirmed_uncounted(
         return Ok(false);
     };
     Ok(info.in_best_chain && snapshot.hash_at(info.height) == Some(block))
+}
+
+/// Whether a settlement transaction (`txid`, the reveal) of block `block`, whose data has not landed, with the payload
+/// headers `headers`, confirmed and counted but landed nothing, and lands it if sent again (D-135): a header the
+/// payload needs from outside it counted only after it confirmed, or the block's own header did (through a later
+/// payload: a body lands only at or above the height at which its header counted), and every header it needs from
+/// outside has counted since. The payload then goes out again unchanged; while one of them has not counted, it waits for
+/// later payloads to carry them. One that confirmed after all of them had counted would land no more if sent again.
+fn stalled(
+    snapshot: &BtcSnapshot,
+    genesis: &[u8; 32],
+    txid: &[u8; 32],
+    block: &[u8; 32],
+    headers: &[BlockHeader],
+) -> bool {
+    let Some(confirmed) = snapshot.ksn1_height(txid) else {
+        return false;
+    };
+    let inside: BTreeSet<[u8; 32]> = headers.iter().map(BlockHeader::hash).collect();
+    let mut latest = snapshot.counted_at(block);
+    for parent in headers.iter().flat_map(|header| &header.parents) {
+        if inside.contains(parent) || parent == genesis {
+            continue;
+        }
+        match snapshot.counted_at(parent) {
+            Some(height) => latest = latest.max(Some(height)),
+            None => return false,
+        }
+    }
+    latest.is_some_and(|height| height > confirmed)
 }
 
 /// Records `sent` as the pair this node sent for what `lands` names, in place of `old` (D-131), whose funding inputs
@@ -503,19 +537,6 @@ impl Rescuer {
                 state.stuck_since.remove(&block_hash);
                 continue;
             }
-            if let Some(sent) = state.rescues.get(&block_hash) {
-                if confirmed_uncounted(client.as_ref(), snapshot, &sent.txid)? {
-                    eprintln!(
-                        "[ksana-node] the rescue settlement {} (height {}) confirmed without counting (D-100); rescuing again",
-                        sent.shown(),
-                        record.height
-                    );
-                    chain.release_inputs(&sent.inputs)?;
-                } else if self.keep_alive(client.as_ref(), sent)? {
-                    continue;
-                }
-                state.rescues.remove(&block_hash);
-            }
             let Some(txs) = &block.settlement else {
                 continue;
             };
@@ -524,7 +545,38 @@ impl Rescuer {
             let Some(payload) = settlement::attached_payload(params, &attached) else {
                 continue;
             };
-            if snapshot.ksn1_height(&attached_txid).is_some() {
+            let Ok(Payload::Settlement { headers, .. }) = Payload::decode(&payload, params) else {
+                continue;
+            };
+            let genesis = chain.genesis().hash();
+            if let Some(sent) = state.rescues.get(&block_hash) {
+                let again = if confirmed_uncounted(client.as_ref(), snapshot, &sent.txid)? {
+                    Some("confirmed without counting (D-100)")
+                } else if stalled(snapshot, &genesis, &sent.txid, &block_hash, &headers) {
+                    Some("counted before a header it needs did, and landed nothing (D-135)")
+                } else {
+                    None
+                };
+                if let Some(why) = again {
+                    eprintln!(
+                        "[ksana-node] the rescue settlement {} (height {}) {why}; rescuing again",
+                        sent.shown(),
+                        record.height
+                    );
+                    chain.release_inputs(&sent.inputs)?;
+                } else if snapshot.ksn1_height(&sent.txid).is_some() {
+                    // Confirmed and counted without landing the data: it goes out again once the headers it waits for
+                    // have counted, and not at all when it confirmed after them (D-135)
+                    continue;
+                } else if self.keep_alive(client.as_ref(), sent)? {
+                    continue;
+                }
+                state.rescues.remove(&block_hash);
+            }
+            // Confirmed and counted without landing the data it carries: it waits for the headers it needs from outside
+            // its payload, then goes out again (D-135)
+            let stalled = stalled(snapshot, &genesis, &attached_txid, &block_hash, &headers);
+            if snapshot.ksn1_height(&attached_txid).is_some() && !stalled {
                 state.stuck_since.remove(&block_hash);
                 state.waiting.remove(&block_hash);
                 continue;
@@ -552,6 +604,7 @@ impl Rescuer {
                 !waiting && confirmed_uncounted(client.as_ref(), snapshot, &attached_txid)?;
             if !waiting
                 && !uncounted
+                && !stalled
                 && test_settlement(client.as_ref(), &attached)
                     .map_err(btc)?
                     .is_ok()
@@ -560,7 +613,8 @@ impl Rescuer {
                 continue;
             }
             // The settlement transactions carried by the block cannot enter the mempool, wait there paying too little
-            // or for too long, or confirmed without counting: wait in the order set by the fast-lane main chain (D-057)
+            // or for too long, confirmed without counting, or counted and landed nothing: wait in the order set by the
+            // fast-lane main chain (D-057)
             let since = *state.stuck_since.entry(block_hash).or_insert(btc_tip);
             if btc_tip < since.saturating_add(self.rescue_delay(&block, record.height)?) {
                 continue;
@@ -596,6 +650,8 @@ impl Rescuer {
                 Ok(Ok(())) => {
                     let why = if uncounted {
                         "confirmed without counting, D-100"
+                    } else if stalled {
+                        "counted before a header they need did, and landed nothing, D-135"
                     } else if waiting {
                         "wait in the BTC mempool paying less than this node's fee rate, or for too long, D-102"
                     } else {
@@ -1212,6 +1268,33 @@ impl Rescuer {
         Ok(Some((fee, vsize)))
     }
 
+    /// Whether the data of block `block`, which carries settlement transactions, has landed, or its settlement (its own
+    /// pair or this node's rescue of it) has confirmed and counted on BTC (D-135).
+    fn settlement_counted(
+        &self,
+        state: &State,
+        snapshot: &BtcSnapshot,
+        block: &BlockSummary,
+    ) -> Result<bool, NodeError> {
+        if snapshot.data_height(block).is_some()
+            || state
+                .rescues
+                .get(&block.hash)
+                .is_some_and(|sent| snapshot.ksn1_height(&sent.txid).is_some())
+        {
+            return Ok(true);
+        }
+        let Some(stored) = self.chain.store().block(&block.hash)? else {
+            return Ok(false);
+        };
+        let Some(txs) = &stored.settlement else {
+            return Ok(false);
+        };
+        Ok(snapshot
+            .ksn1_height(&settlement::decode(txs)?.txid())
+            .is_some())
+    }
+
     fn republish(
         &self,
         snapshot: &BtcSnapshot,
@@ -1278,9 +1361,10 @@ impl Rescuer {
             }
         }
         let end = match next_carrier {
-            // c's settlement has landed without carrying first (the producer carried fewer headers or bodies because of
-            // the payload size, D-075, D-077): everything before c that has not landed needs republishing
-            Some((c, settling)) if snapshot.data_height(&settling).is_some() => c,
+            // c's settlement has confirmed and counted without carrying first (the producer carried fewer headers or
+            // bodies because of the payload size, D-075, D-077): everything before c that has not landed needs
+            // republishing, and c's own data may be waiting for those headers (D-135)
+            Some((c, settling)) if self.settlement_counted(&state, snapshot, &settling)? => c,
             Some((c, _)) => c.saturating_sub(keep),
             None => {
                 let gap = accepted.len().saturating_sub(first) >= keep;

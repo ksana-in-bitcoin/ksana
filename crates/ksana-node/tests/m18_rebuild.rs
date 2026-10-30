@@ -19,7 +19,7 @@ use common::{transfer_op, user};
 use bitcoin::hashes::Hash as _;
 use ksana_btc::mock::MockBtc;
 use ksana_node::chain::{Accepted, Chain};
-use ksana_primitives::{Block, Params, DEVNET};
+use ksana_primitives::{Block, Params, DEVNET, SIGNET};
 use ksana_state::{StateDb, WriteSet};
 
 /// Keep only 2 versions of rollback-able state: a fork point slightly deeper is already pruned.
@@ -208,6 +208,29 @@ fn a_heavier_chain_deeper_than_the_reorg_window_is_still_rejected() {
         Some(0),
         "the finalized tip is still the genesis block, whose state is kept (D-101)"
     );
+}
+
+/// A genesis config the genesis block cannot be built from, here `bits` above signet's PoW limit (D-136), is refused
+/// before anything is written: the same data directory then opens with the config corrected.
+#[test]
+fn a_refused_genesis_config_leaves_the_data_directory_unwritten() {
+    let (mock, genesis) = setup(&[(&user("m18/genesis"), 1_000)]);
+    let dir = tempfile::tempdir().unwrap();
+    let easy = ksana_node::genesis::GenesisFile {
+        bits: Some(0x2001_0624),
+        ..genesis.clone()
+    };
+    let err = Chain::open(dir.path(), SIGNET, &easy, mock.clone())
+        .err()
+        .expect("bits above the PoW limit");
+    assert!(err.to_string().contains("bits 0x20010624 invalid"), "{err}");
+    let limit = ksana_node::genesis::GenesisFile {
+        bits: Some(SIGNET.pow_limit_bits),
+        ..genesis
+    };
+    let chain = Chain::open(dir.path(), SIGNET, &limit, mock.clone()).unwrap();
+    assert_eq!(chain.tip().unwrap().header.height, 0);
+    assert_eq!(chain.tip().unwrap().header.bits, SIGNET.pow_limit_bits);
 }
 
 /// Crash recovery finds no state version consistent with the main chain: the state store belongs to another chain

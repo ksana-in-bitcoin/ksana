@@ -5,10 +5,10 @@
 //! heaviest chain it saw and the indexer by the heaviest chain on BTC, and a divergence deeper than `REORG_WINDOW`
 //! could not heal automatically).
 //!
-//! - The header DAG ([`HeaderDag`]) is built from the headers that appeared in BTC payloads. The **connection height**
-//!   of block B, `conn(B) = max(seen(B), max conn(parents))`: it and all headers of its past have appeared on BTC
-//!   (`seen` is the height at which the header first appeared on the current best chain; the genesis block counts as
-//!   always on the chain).
+//! - The header DAG ([`HeaderDag`]) is built from the headers that count in BTC payloads (D-135). The **connection
+//!   height** of block B, `conn(B) = seen(B)`, the height at which its header counts on the current best chain: a header
+//!   counts only once its parents have counted, so it and all headers of its past have counted by then (the genesis
+//!   block counts as always on the chain).
 //! - **Height-by-height decision**: at each BTC height H, the candidate `best_H` is the block with the largest
 //!   fork-choice key `(chain_work, hash)` (D-100) among the blocks whose connection height does not exceed H and whose
 //!   selected chain passes through the finalized tip `fin` (`fin` advances only along its selected chain, so `best_H`
@@ -23,29 +23,25 @@
 //!   asked ([`Validity`]). A valid C is final. An invalid C is **excluded** at that BTC height: it and every block
 //!   whose selected chain passes through it stop being candidates, `best_H` is chosen again among the rest, and the
 //!   walk goes on at the same height (a block that merges C without passing through it on its selected chain stays a
-//!   candidate). While the verdict cannot be given yet the decision pauses at that height, as for an undetermined
-//!   landing status ([`Outcome::validating`]). The verdict is asked only at that point and never earlier: the data of
+//!   candidate). While the verdict cannot be given yet the decision pauses at that height ([`Outcome::validating`]).
+//!   The verdict is asked only at that point and never earlier: the data of
 //!   C's closure has landed by then, so the verdict depends only on the BTC chain up to that height, and every node and
 //!   indexer reaches the same decisions however early it learned that a block is invalid.
 //! - **Only a block anchored on the BTC chain can become final** (D-101): when the walk reaches block C, C is excluded
 //!   at once, before its landing status or verdict is asked, when the anchor of C or of a block C merges is not on the
 //!   BTC best chain (the BTC block at that anchor height is another one: an anchor hash no BTC block has, or a block a
 //!   BTC reorg orphaned; [`Exclusion::Unanchored`]). A payload counts only when the headers it carries anchor below its
-//!   own height (D-100), so these anchors lie below the height at which C's header first appeared, below the height
-//!   being decided: the rule depends only on the BTC chain up to it. Such a block's body and execution could be
-//!   reproduced only on its anchor chain: its body may never be determinable, and its execution in anchor-invalid mode
-//!   (D-056) answers from the current chain, so waiting for either could stop the decision for good.
+//!   own height (D-100), so these anchors lie below the height at which C's header counts, below the height being
+//!   decided: the rule depends only on the BTC chain up to it. Since D-135 a header counts only with its anchor on the
+//!   best chain, so a connected block never meets this rule; it stays as a check.
 //! - **A finalized block cannot be reorged**: the main chain of node and indexer must pass through it; a chain forking
 //!   below it does not take part in main-chain selection however heavy it is ([`HeaderDag::set_floor`], the node's
 //!   `Chain::best_candidate`). A finalized block was judged valid before it became final, so a finalized block that
 //!   later turns out invalid means the implementation has a non-determinism bug: the only option is to stop and alert.
-//! - **Pause when information is insufficient**: the decision at a height depends on the result of the previous
-//!   height, so when the needed information cannot be determined yet (the node does not have the block yet, the
-//!   indexer cannot determine its body yet, [`DataStatus::Undetermined`]), that height and the heights after it are
-//!   not decided for now, and the decision continues from that height once the information arrives; the node uses
-//!   this to request missing blocks from peers. The landing height of the data is not below the landing height of the
-//!   header, so a block whose header appeared only after `H − BTC_FINALITY_CONFS + 1` cannot be final at H anyway,
-//!   and there is no need to pause when its data status cannot be determined.
+//! - **Landing status**: the snapshot answers it alone ([`BtcSnapshot::block_data_height`]): a block that needs a body
+//!   lands with the first payload landing its body, checked when that BTC block was scanned, and every other block
+//!   when its header counts (D-135). Nothing waits for the node or the indexer to know a block; the decision pauses only
+//!   for a verdict, and the node then requests the block from its peers.
 //! - **BTC reorg**: every evaluated height records the BTC block hash at the time; when the best chain no longer
 //!   contains that block, all decisions, exclusions and connections from that height on are revoked and decided again.
 //!   What was done at a height the evaluation paused at is done again from the start when the evaluation resumes: the
@@ -65,9 +61,8 @@
 //!   ([`Finality::tip`]), so nothing a block's validity or the encodings depend on changes.
 //!
 //! Validity is not computed here (invalid blocks are found by execution): the inputs of [`Finality`] are only the
-//! header DAG, the BTC snapshot, the landing status of each block's data ([`DataStatus`], answered by the node or
-//! indexer by the same rules as the settled closure, D-038, D-077) and the verdict of executing a block that meets the
-//! landing condition ([`Validity`], D-101).
+//! header DAG, the BTC snapshot (whose landing heights are those of the settled closure, D-038, D-077) and the verdict
+//! of executing a block that meets the landing condition ([`Validity`], D-101).
 //!
 //! - **Pruning** (D-097, [`Finality::prune`]): after the header DAG is pruned at a finalized block P, the finalized
 //!   chain is held from a finalized root R at or above P (the node and the indexer take the highest block decided at
@@ -85,22 +80,6 @@ use ksana_consensus::{Hash, U256};
 
 use crate::headers::HeaderDag;
 use crate::tracker::BtcSnapshot;
-
-/// The landing status of a block's data (the header, plus the body when one is needed) on the current BTC best chain
-/// (the same rules as the settled closure, D-038, D-077).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DataStatus {
-    /// The data landed at this height on the current best chain (for a block that needs a body, the confirmation
-    /// height of the earliest payload carrying its body; for other blocks, the height at which the header first
-    /// appeared).
-    Landed(u32),
-    /// There is no transaction on the current best chain that lands its data (the header has appeared, but a body is
-    /// needed and no payload carries the same body).
-    NotLanded,
-    /// This side cannot determine it yet: the node does not have the block yet, the indexer cannot determine its body
-    /// yet.
-    Undetermined,
-}
 
 /// The verdict of executing a block as a main-chain block on top of its selected parent, the finalized tip (D-101):
 /// the same execution as when a node connects a main-chain block or the indexer executes one (the body rules of the
@@ -174,11 +153,9 @@ impl From<&Root> for BtcFinal {
 pub struct Outcome {
     /// Whether the finalized tip changed (advanced, or went back after a BTC reorg and advanced again).
     pub advanced: bool,
-    /// The evaluation paused because the landing status of this block's data cannot be determined (see the module
-    /// docs); `None` when evaluated up to the snapshot tip.
-    pub waiting_on: Option<Hash>,
     /// The evaluation paused because this block meets the landing condition and its verdict ([`Validity`]) cannot be
-    /// given yet (D-101): the node or indexer executes it on top of the finalized tip and evaluates again.
+    /// given yet (D-101): the node or indexer executes it on top of the finalized tip and evaluates again; `None` when
+    /// evaluated up to the snapshot tip.
     pub validating: Option<Hash>,
     /// The blocks excluded in this evaluation, each with the reason (D-101).
     pub excluded: Vec<(Hash, Exclusion)>,
@@ -186,15 +163,8 @@ pub struct Outcome {
     pub rolled_back: bool,
 }
 
-enum Closure {
-    Landed(u32),
-    NotLanded,
-    Undetermined(Hash),
-}
-
 enum Advance {
     Done,
-    Undetermined(Hash),
     Validating(Hash),
 }
 
@@ -367,8 +337,7 @@ impl Finality {
         self.evaluated.last().map(|(h, _)| *h)
     }
 
-    /// The block's connection height (the height at which it and all headers of its past have appeared on the current
-    /// BTC best chain).
+    /// The block's connection height (the height at which its header counts on the current BTC best chain, D-135).
     pub fn connected_at(&self, hash: &Hash) -> Option<u32> {
         self.conn.get(hash).copied()
     }
@@ -386,8 +355,8 @@ impl Finality {
     /// The highest finalized block decided at BTC height `btc_height` or below, with its height (D-097: a BTC reorg
     /// that leaves that height in place cannot revoke it). The root counts as decided at its own decision height (the
     /// genesis block at any height); `None` when even the root was decided above `btc_height`. A height the evaluation
-    /// paused at (waiting for a landing status or a verdict, D-101) is not evaluated yet: the decisions already made at
-    /// it do not count until it is.
+    /// paused at (waiting for a verdict, D-101) is not evaluated yet: the decisions already made at it do not count until
+    /// it is.
     pub fn decided_by(&self, btc_height: u32) -> Option<(Hash, u64)> {
         let evaluated = self.evaluated_height();
         let decided = self.decisions.iter().rposition(|d| {
@@ -426,18 +395,16 @@ impl Finality {
     }
 
     /// Continues the height-by-height evaluation from the last evaluated height up to the tip by snapshot `snapshot`
-    /// (the current BTC best chain) (see the module docs). `data` answers the landing status of each block's data and
-    /// must agree with the rules of the settled closure. `valid` answers the verdict of executing a block that meets
+    /// (the current BTC best chain) (see the module docs). `valid` answers the verdict of executing a block that meets
     /// the landing condition on top of its selected parent, the finalized tip (D-101); it is asked for nothing else.
-    /// `dag` must contain all headers that appeared in the snapshot (added by the caller while scanning).
+    /// `dag` must contain all headers that count in the snapshot (added by the caller while the tracker scanned).
     ///
-    /// Returns `Err` only when the DAG data is inconsistent or `data` or `valid` fails (local fault, retry later); it
-    /// does not mean any block is invalid.
+    /// Returns `Err` only when the DAG data is inconsistent or `valid` fails (local fault, retry later); it does not
+    /// mean any block is invalid.
     pub fn evaluate(
         &mut self,
         dag: &HeaderDag,
         snapshot: &BtcSnapshot,
-        data: &mut dyn FnMut(&Hash) -> Result<DataStatus, String>,
         valid: &mut dyn FnMut(&Hash) -> Result<Validity, String>,
     ) -> Result<Outcome, String> {
         let mut outcome = Outcome::default();
@@ -485,25 +452,19 @@ impl Finality {
             let Some(btc_hash) = snapshot.hash_at(height) else {
                 break;
             };
-            // headers that first appeared at this height: connect them (together with the descendants connected as a
-            // result)
+            // the headers that count at this height, each after its parents (D-135)
             for hash in snapshot.headers_at(height) {
-                self.connect(dag, snapshot, *hash, height)?;
+                self.connect(dag, *hash, height)?;
             }
             let advance = self.advance(
                 dag,
                 snapshot,
                 (height, btc_hash),
-                data,
                 valid,
                 &mut outcome.excluded,
             )?;
             match advance {
                 Advance::Done => {}
-                Advance::Undetermined(hash) => {
-                    outcome.waiting_on = Some(hash);
-                    break;
-                }
                 Advance::Validating(hash) => {
                     outcome.validating = Some(hash);
                     break;
@@ -576,50 +537,21 @@ impl Finality {
         Ok(())
     }
 
-    /// Block `hash` (whose header first appeared on the current chain at `height`) and those of its descendants whose
-    /// parents are all connected connect at height `height`.
-    fn connect(
-        &mut self,
-        dag: &HeaderDag,
-        snapshot: &BtcSnapshot,
-        hash: Hash,
-        height: u32,
-    ) -> Result<(), String> {
-        let mut stack = vec![hash];
-        while let Some(current) = stack.pop() {
-            if self.conn.contains_key(&current) {
-                continue;
-            }
-            // not in the header DAG yet (parents unknown or header invalid): handled later when the parents appear
-            let Some(block) = dag.dag().get(&current) else {
-                continue;
-            };
-            let mut at = height;
-            let mut ready = true;
-            for parent in &block.parents {
-                match self.conn.get(parent) {
-                    Some(c) => at = at.max(*c),
-                    None => {
-                        ready = false;
-                        break;
-                    }
-                }
-            }
-            if !ready {
-                continue;
-            }
-            self.conn.insert(current, at);
-            self.consider_best(dag, &current)?;
-            for child in &block.children {
-                if snapshot
-                    .header_seen(child)
-                    .is_some_and(|seen| seen <= height)
-                {
-                    stack.push(*child);
-                }
-            }
+    /// Block `hash`, whose header counts at BTC height `height`, connects at that height (D-135): its parents counted
+    /// at that height or below, and connected before it. A block the header DAG does not hold (pruned away, D-097) or
+    /// with a parent not connected is left out.
+    fn connect(&mut self, dag: &HeaderDag, hash: Hash, height: u32) -> Result<(), String> {
+        if self.conn.contains_key(&hash) {
+            return Ok(());
         }
-        Ok(())
+        let Some(block) = dag.dag().get(&hash) else {
+            return Ok(());
+        };
+        if !block.parents.iter().all(|p| self.conn.contains_key(p)) {
+            return Ok(());
+        }
+        self.conn.insert(hash, height);
+        self.consider_best(dag, &hash)
     }
 
     /// The connected block `hash` becomes the candidate when its fork-choice key is larger than the current
@@ -672,7 +604,6 @@ impl Finality {
         dag: &HeaderDag,
         snapshot: &BtcSnapshot,
         (height, btc_hash): (u32, [u8; 32]),
-        data: &mut dyn FnMut(&Hash) -> Result<DataStatus, String>,
         valid: &mut dyn FnMut(&Hash) -> Result<Validity, String>,
         excluded: &mut Vec<(Hash, Exclusion)>,
     ) -> Result<Advance, String> {
@@ -716,10 +647,8 @@ impl Finality {
                     self.choose_best(dag)?;
                     continue 'walk;
                 }
-                let own = match self.closure_landed(dag, snapshot, &block, limit, data)? {
-                    Closure::Landed(l) => l,
-                    Closure::NotLanded => return Ok(Advance::Done),
-                    Closure::Undetermined(hash) => return Ok(Advance::Undetermined(hash)),
+                let Some(own) = self.closure_landed(dag, snapshot, &block)? else {
+                    return Ok(Advance::Done);
                 };
                 landed = landed.max(own);
                 if landed > limit {
@@ -755,44 +684,29 @@ impl Finality {
         }
     }
 
-    /// The maximum landing height of the data of the block and the blocks it merges. A block whose data status cannot
-    /// be determined is treated as "not landed yet" when its header landed only after `limit` (data never lands before
-    /// the header, so it cannot be final at this height anyway).
+    /// The maximum landing height of the data of the block and the blocks it merges; `None` while the data of one of
+    /// them has not landed.
     fn closure_landed(
         &mut self,
         dag: &HeaderDag,
         snapshot: &BtcSnapshot,
         hash: &Hash,
-        limit: u32,
-        data: &mut dyn FnMut(&Hash) -> Result<DataStatus, String>,
-    ) -> Result<Closure, String> {
+    ) -> Result<Option<u32>, String> {
         if let Some(landed) = self.closure_landed.get(hash) {
-            return Ok(Closure::Landed(*landed));
+            return Ok(Some(*landed));
         }
         let ghostdag = dag
             .ghostdag(hash)
             .ok_or_else(|| corrupt("a block on the candidate chain is missing from the DAG"))?;
-        let members: Vec<Hash> = std::iter::once(*hash)
-            .chain(ghostdag.mergeset_ordered.iter().copied())
-            .collect();
         let mut landed = 0u32;
-        for member in members {
-            match data(&member)? {
-                DataStatus::Landed(h) => landed = landed.max(h),
-                DataStatus::NotLanded => return Ok(Closure::NotLanded),
-                DataStatus::Undetermined => {
-                    if snapshot
-                        .header_seen(&member)
-                        .is_none_or(|seen| seen > limit)
-                    {
-                        return Ok(Closure::NotLanded);
-                    }
-                    return Ok(Closure::Undetermined(member));
-                }
+        for member in std::iter::once(hash).chain(ghostdag.mergeset_ordered.iter()) {
+            match snapshot.block_data_height(member) {
+                Some(h) => landed = landed.max(h),
+                None => return Ok(None),
             }
         }
         self.closure_landed.insert(*hash, landed);
-        Ok(Closure::Landed(landed))
+        Ok(Some(landed))
     }
 
     /// Prunes after the header DAG was pruned at a finalized block (D-097, see the module docs): `root`, a finalized
@@ -905,15 +819,11 @@ mod tests {
     const CONFS: u32 = 6;
     const BASE: u32 = 10;
 
-    /// Test scene: the header DAG, the BTC snapshot, the data-landing rules and the verdict of each block.
+    /// Test scene: the header DAG, the BTC snapshot and the verdict of each block.
     struct Scene {
         consensus: PowConsensus,
         dag: HeaderDag,
         snapshot: BtcSnapshot,
-        /// Blocks that need a body (the data landing height is the settlement's confirmation height).
-        settles: BTreeSet<Hash>,
-        /// Blocks this side does not know yet.
-        unknown: BTreeSet<Hash>,
         /// Blocks whose execution fails (D-101).
         invalid: BTreeSet<Hash>,
         /// Blocks this side has no verdict for yet (D-101).
@@ -939,8 +849,6 @@ mod tests {
                 consensus,
                 dag,
                 snapshot,
-                settles: BTreeSet::new(),
-                unknown: BTreeSet::new(),
                 invalid: BTreeSet::new(),
                 unjudged: BTreeSet::new(),
                 asked: RefCell::new(Vec::new()),
@@ -991,33 +899,62 @@ mod tests {
             header
         }
 
-        /// The header appears at BTC height `height` (mining up to that height first when necessary).
+        /// The header counts at BTC height `height` (mining up to that height first when necessary): its parents must
+        /// have counted at that height or below (D-135).
         fn see(&mut self, header: &BlockHeader, height: u32) {
             self.mine_to(height);
+            for parent in &header.parents {
+                assert!(
+                    *parent == self.genesis.hash()
+                        || self
+                            .snapshot
+                            .counted_at(parent)
+                            .is_some_and(|h| h <= height),
+                    "a header counts only once its parents have (D-135)"
+                );
+            }
             self.snapshot.see_header(header.hash(), height);
         }
 
         /// The block needs a body; the payload carrying its body is confirmed at BTC height `height`.
         fn settle(&mut self, header: &BlockHeader, height: u32) {
             self.mine_to(height);
-            self.settles.insert(header.hash());
             self.snapshot
                 .settle(header.hash(), [0xaa ^ header.producer[0]; 32], height);
         }
 
-        fn data(&self, hash: &Hash) -> Result<DataStatus, String> {
-            if self.unknown.contains(hash) {
-                return Ok(DataStatus::Undetermined);
+        /// The headers of `planned` (block hash → the BTC height at which it is carried) carried at heights up to the
+        /// tip count, each at the lowest height at or above that at which its parents have counted (as when a header
+        /// carried before its parents is carried again, D-135).
+        fn count_planned(&mut self, planned: &BTreeMap<Hash, u32>) {
+            let tip = self.btc_tip();
+            loop {
+                let mut counted = false;
+                for (hash, at) in planned {
+                    if *at > tip || self.snapshot.counted_at(hash).is_some() {
+                        continue;
+                    }
+                    let parents = &self.dag.dag().get(hash).unwrap().parents;
+                    let mut height = *at;
+                    let mut ready = true;
+                    for parent in parents {
+                        if *parent == self.genesis.hash() {
+                            continue;
+                        }
+                        match self.snapshot.counted_at(parent) {
+                            Some(h) => height = height.max(h),
+                            None => ready = false,
+                        }
+                    }
+                    if ready && height <= tip {
+                        self.snapshot.see_header(*hash, height);
+                        counted = true;
+                    }
+                }
+                if !counted {
+                    return;
+                }
             }
-            Ok(
-                match self
-                    .snapshot
-                    .block_data_height(hash, self.settles.contains(hash))
-                {
-                    Some(h) => DataStatus::Landed(h),
-                    None => DataStatus::NotLanded,
-                },
-            )
         }
 
         fn validity(&self, hash: &Hash) -> Result<Validity, String> {
@@ -1033,9 +970,7 @@ mod tests {
 
         fn evaluate(&self, finality: &mut Finality) -> Outcome {
             finality
-                .evaluate(&self.dag, &self.snapshot, &mut |h| self.data(h), &mut |h| {
-                    self.validity(h)
-                })
+                .evaluate(&self.dag, &self.snapshot, &mut |h| self.validity(h))
                 .unwrap()
         }
 
@@ -1145,52 +1080,6 @@ mod tests {
     }
 
     #[test]
-    fn undetermined_data_pauses_evaluation_at_that_height() {
-        let mut scene = Scene::new();
-        let g = scene.genesis.clone();
-        let a1 = scene.block(&[&g], 1);
-        let a2 = scene.block(&[&a1], 2);
-        let a3 = scene.block(&[&a2], 3);
-        // the b chain forks after a1 and is heavier than the a chain
-        let b2 = scene.block(&[&a1], 4);
-        let b3 = scene.block(&[&b2], 5);
-        let b4 = scene.block(&[&b3], 6);
-        scene.see(&a1, 11);
-        scene.see(&a2, 12);
-        scene.see(&a3, 13);
-        scene.see(&b2, 18);
-        scene.see(&b3, 18);
-        scene.see(&b4, 18);
-        scene.unknown.insert(a2.hash());
-        scene.mine_to(20);
-        let mut f = Finality::new(CONFS, g.hash());
-        let outcome = scene.evaluate(&mut f);
-        // 16: a1 final; 17: a2's data status cannot be determined, pause
-        assert_eq!(final_chain(&f), hashes(&[&a1]));
-        assert_eq!(outcome.waiting_on, Some(a2.hash()));
-        assert_eq!(f.evaluated_height(), Some(16));
-        // evaluating again still pauses
-        assert_eq!(scene.evaluate(&mut f).waiting_on, Some(a2.hash()));
-        // a2 known: at 17 the b chain has not landed yet, a2 final; once a2 is final the b chain forking after a1 no
-        // longer takes part, at 18 a3 final
-        scene.unknown.clear();
-        let outcome = scene.evaluate(&mut f);
-        assert_eq!(outcome.waiting_on, None);
-        assert!(outcome.advanced);
-        assert_eq!(final_chain(&f), hashes(&[&a1, &a2, &a3]));
-        assert_eq!(f.evaluated_height(), Some(20));
-        assert_eq!(f.decisions()[1].btc_height, 17);
-        assert_eq!(f.decisions()[2].btc_height, 18);
-        scene.mine_to(40);
-        scene.evaluate(&mut f);
-        assert_eq!(final_chain(&f), hashes(&[&a1, &a2, &a3]));
-        assert_eq!(
-            final_chain(&scene.evaluated_from_scratch()),
-            final_chain(&f)
-        );
-    }
-
-    #[test]
     fn a_btc_reorg_revokes_the_decisions_made_on_the_orphaned_blocks() {
         let mut scene = Scene::new();
         let g = scene.genesis.clone();
@@ -1236,12 +1125,12 @@ mod tests {
     fn closures_wait_for_bodies_and_for_merged_blocks() {
         let mut scene = Scene::new();
         let g = scene.genesis.clone();
-        // a1 needs a body: the header appears at 11, the body lands at 14
+        // a1 needs a body: the header counts at 11, the body lands at 14
         let a1 = scene.block(&[&g], 1);
         scene.see(&a1, 11);
         scene.settle(&a1, 14);
-        // the header of the parallel block s (hash smaller than a1's, so a1 is m's selected parent) appears only at
-        // 20; m merges it
+        // the header of the parallel block s (hash smaller than a1's, so a1 is m's selected parent) counts only at
+        // 20; m merges it, so m counts at 20 at the earliest (D-135)
         let s = (9u8..=255)
             .map(|tag| block(&scene.consensus, &scene.dag, &[&g], tag))
             .find(|s| s.hash() < a1.hash())
@@ -1252,7 +1141,6 @@ mod tests {
         ));
         let m = scene.block(&[&a1, &s], 2);
         assert_eq!(m.parents[0], a1.hash());
-        scene.see(&m, 15);
         scene.mine_to(18);
         let mut f = Finality::new(CONFS, g.hash());
         scene.evaluate(&mut f);
@@ -1265,6 +1153,7 @@ mod tests {
         assert_eq!(f.decisions()[0].landed, 14);
         assert_eq!(f.connected_at(&m.hash()), None);
         scene.see(&s, 20);
+        scene.see(&m, 20);
         scene.mine_to(24);
         scene.evaluate(&mut f);
         assert_eq!(f.connected_at(&m.hash()), Some(20));
@@ -1276,7 +1165,7 @@ mod tests {
         // a block that needs a body whose body never lands: never final
         let n = scene.block(&[&m], 3);
         scene.see(&n, 26);
-        scene.settles.insert(n.hash());
+        scene.snapshot.needs_body_for_test(n.hash());
         scene.mine_to(60);
         scene.evaluate(&mut f);
         assert_eq!(final_chain(&f), hashes(&[&a1, &m]));
@@ -1318,8 +1207,15 @@ mod tests {
                 let header = scene.block(&ps, u8::try_from(i + 1).unwrap());
                 headers.push(header);
             }
+            let mut counted_at: BTreeMap<Hash, u32> = BTreeMap::new();
             for (i, header) in headers.iter().enumerate().skip(1) {
-                let height = BASE + 1 + seen[i];
+                // a header carried before its parents count counts once it is carried again after them (D-135)
+                let height = header
+                    .parents
+                    .iter()
+                    .filter_map(|p| counted_at.get(p))
+                    .fold(BASE + 1 + seen[i], |h, p| h.max(*p));
+                counted_at.insert(header.hash(), height);
                 scene.see(header, height);
                 if bodies[i] {
                     scene.settle(header, height + settle_delay[i]);
@@ -1352,24 +1248,22 @@ mod tests {
     }
 
     proptest! {
-        // Reorgs from the height a pause stopped at (kind 6), and pauses for data statuses as well as verdicts, make
-        // the case of D-114 item 6 common: with this many cases, about 30 ms each, every run fails without that item
+        // Reorgs from the height a pause stopped at (kind 6) make the case of D-114 item 6 common: with this many
+        // cases, about 30 ms each, every run fails without that item
         #![proptest_config(ProptestConfig::with_cases(256))]
 
-        /// Incremental evaluation through pauses for missing verdicts (D-101) and for data whose status is not known
-        /// yet, and through BTC reorgs onto branches carrying the headers above the fork point at other heights and
-        /// shorter for a while or not, gives the same result as evaluating from scratch after every step, also when a
-        /// reorg replaces the height a pause stopped at (D-114); and no reorg of fewer than `BTC_FINALITY_CONFS` blocks
-        /// (below the highest tip yet) takes back the BTC-final tip reported. Deeper reorgs, down to the genesis
-        /// block's anchor, may take it back.
+        /// Incremental evaluation through pauses for missing verdicts (D-101), and through BTC reorgs onto branches
+        /// carrying the headers above the fork point at other heights and shorter for a while or not, gives the same
+        /// result as evaluating from scratch after every step, also when a reorg replaces the height a pause stopped at
+        /// (D-114); and no reorg of fewer than `BTC_FINALITY_CONFS` blocks (below the highest tip yet) takes back the
+        /// BTC-final tip reported. Deeper reorgs, down to the genesis block's anchor, may take it back.
         #[test]
         fn incremental_evaluation_through_pauses_and_reorgs_matches_evaluation_from_scratch(
             parents in proptest::collection::vec(0usize..4, 6..12),
             seen in proptest::collection::vec(0u32..8, 12),
             invalid in proptest::collection::vec(0u8..6, 12),
             unjudged in proptest::collection::vec(0u8..3, 12),
-            unknown in proptest::collection::vec(0u8..3, 12),
-            steps in proptest::collection::vec((0u8..9, 1u32..9, 0u32..3), 4..24),
+            steps in proptest::collection::vec((0u8..8, 1u32..9, 0u32..3), 4..24),
         ) {
             let mut scene = Scene::new();
             let g = scene.genesis.clone();
@@ -1388,29 +1282,24 @@ mod tests {
                 let header = scene.block(&ps, u8::try_from(i + 1).unwrap());
                 headers.push(header);
             }
-            // the BTC height at which each header appears on the current branch
-            let mut plan: BTreeMap<u32, Vec<Hash>> = BTreeMap::new();
+            // the BTC height at which each header is carried on the current branch
+            let mut plan: BTreeMap<Hash, u32> = BTreeMap::new();
             for (i, header) in headers.iter().enumerate().skip(1) {
-                plan.entry(BASE + 1 + seen[i]).or_default().push(header.hash());
+                plan.insert(header.hash(), BASE + 1 + seen[i]);
                 if invalid[i] == 0 {
                     scene.invalid.insert(header.hash());
                 }
                 if unjudged[i] == 0 {
                     scene.unjudged.insert(header.hash());
                 }
-                if unknown[i] == 0 {
-                    scene.unknown.insert(header.hash());
-                }
             }
-            let mine = |scene: &mut Scene, plan: &BTreeMap<u32, Vec<Hash>>, branch: u8, to: u32| {
+            let mine = |scene: &mut Scene, plan: &BTreeMap<Hash, u32>, branch: u8, to: u32| {
                 while scene.btc_tip() < to {
                     let next = scene.btc_tip() + 1;
                     scene
                         .snapshot
                         .push_block(branch_hash(next, branch), 1_790_000_000 + next * 600);
-                    for hash in plan.get(&next).into_iter().flatten() {
-                        scene.snapshot.see_header(*hash, next);
-                    }
+                    scene.count_planned(plan);
                 }
             };
             let mut f = Finality::new(CONFS, g.hash());
@@ -1442,18 +1331,15 @@ mod tests {
                         deep = fork + CONFS <= top;
                         scene.snapshot.truncate_for_test(fork);
                         branch += 1;
-                        let moved = plan.split_off(&(fork + 1));
-                        for (height, hashes) in moved {
-                            plan.entry(height + shift).or_default().extend(hashes);
+                        for at in plan.values_mut().filter(|at| **at > fork) {
+                            *at += shift;
                         }
                         if n % 2 == 0 {
                             mine(&mut scene, &plan, branch, tip);
                         }
                     }
                     // the verdicts arrive
-                    7 => scene.unjudged.clear(),
-                    // the data statuses become known
-                    _ => scene.unknown.clear(),
+                    _ => scene.unjudged.clear(),
                 }
                 scene.evaluate(&mut f);
                 let scratch = scene.evaluated_from_scratch();
@@ -1471,8 +1357,7 @@ mod tests {
                 reported = Some(now);
             }
             scene.unjudged.clear();
-            scene.unknown.clear();
-            let last = scene.btc_tip().max(plan.keys().last().copied().unwrap_or(BASE)) + 2 * CONFS;
+            let last = scene.btc_tip().max(plan.values().max().copied().unwrap_or(BASE)) + 2 * CONFS;
             mine(&mut scene, &plan, branch, last);
             scene.evaluate(&mut f);
             let scratch = scene.evaluated_from_scratch();
@@ -1529,8 +1414,6 @@ mod tests {
             consensus: scene.consensus.clone(),
             dag: full_dag,
             snapshot: scene.snapshot.clone(),
-            settles: BTreeSet::new(),
-            unknown: BTreeSet::new(),
             invalid: BTreeSet::new(),
             unjudged: BTreeSet::new(),
             asked: RefCell::new(Vec::new()),
@@ -1627,12 +1510,7 @@ mod tests {
         assert!(f.root_revoked(&scene.snapshot));
         let before = f.clone();
         let err = f
-            .evaluate(
-                &scene.dag,
-                &scene.snapshot,
-                &mut |h| scene.data(h),
-                &mut |h| scene.validity(h),
-            )
+            .evaluate(&scene.dag, &scene.snapshot, &mut |h| scene.validity(h))
             .unwrap_err();
         assert!(err.contains("finality root"), "{err}");
         assert_eq!(f, before);
@@ -1728,7 +1606,6 @@ mod tests {
         let outcome = scene.evaluate(&mut f);
         assert_eq!(final_chain(&f), hashes(&[&a1]));
         assert_eq!(outcome.validating, Some(a2.hash()));
-        assert_eq!(outcome.waiting_on, None);
         assert_eq!(f.evaluated_height(), Some(16));
         assert_eq!(scene.evaluate(&mut f).validating, Some(a2.hash()));
         // judged valid: decided at the height it was waiting at, then the rest
@@ -1831,8 +1708,8 @@ mod tests {
     }
 
     /// A block whose anchor names no block of the BTC chain (D-101, the review of the change): excluded as soon as the walk
-    /// reaches it, without asking for its landing status (it cannot be determined here) or its verdict, so the
-    /// decision does not wait on it; the next best candidate becomes final.
+    /// reaches it, without asking for its landing status or its verdict, so the decision does not wait on it; the next
+    /// best candidate becomes final. (Since D-135 the tracker never counts such a header; the check stays.)
     #[test]
     fn a_block_anchored_off_the_btc_chain_is_excluded_before_anything_is_asked() {
         let mut scene = Scene::new();
@@ -1849,7 +1726,6 @@ mod tests {
         scene.see(&x2, 13);
         scene.see(&x3, 13);
         scene.see(&b2, 14);
-        scene.unknown.insert(x2.hash());
         scene.unjudged.insert(x2.hash());
         let mut f = Finality::new(CONFS, g.hash());
         scene.mine_to(15);
@@ -1862,7 +1738,7 @@ mod tests {
             outcome.excluded,
             vec![(x2.hash(), Exclusion::Unanchored(x2.hash()))]
         );
-        assert_eq!((outcome.waiting_on, outcome.validating), (None, None));
+        assert_eq!(outcome.validating, None);
         assert_eq!(final_chain(&f), hashes(&[&a1]));
         assert_eq!(f.excluded_at(&x2.hash()), Some(16));
         assert_eq!(f.excluded_at(&x3.hash()), None, "excluded through x2");
@@ -1876,9 +1752,8 @@ mod tests {
         assert_eq!(scratch.excluded(), f.excluded());
     }
 
-    /// A block merging a block anchored off the BTC chain is excluded the same way, for the merged block's anchor: its
-    /// closure needs the merged block's landing status, which cannot be determined here; the merged block itself is
-    /// never a candidate (its selected chain does not pass through the finalized tip).
+    /// A block merging a block anchored off the BTC chain is excluded the same way, for the merged block's anchor; the
+    /// merged block itself is never a candidate (its selected chain does not pass through the finalized tip).
     #[test]
     fn a_block_merging_a_block_anchored_off_the_btc_chain_is_excluded() {
         let mut scene = Scene::new();
@@ -1909,7 +1784,6 @@ mod tests {
         scene.see(&y, 12);
         scene.see(&m3, 13);
         scene.see(&b3, 14);
-        scene.unknown.insert(y.hash());
         scene.mine_to(17);
         let mut f = Finality::new(CONFS, g.hash());
         let outcome = scene.evaluate(&mut f);
@@ -1917,7 +1791,6 @@ mod tests {
             outcome.excluded,
             vec![(m3.hash(), Exclusion::Unanchored(y.hash()))]
         );
-        assert_eq!(outcome.waiting_on, None);
         assert_eq!(final_chain(&f), hashes(&[&a1, &a2]));
         assert_eq!(f.excluded_at(&m3.hash()), Some(17));
         scene.mine_to(19);

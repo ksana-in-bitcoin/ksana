@@ -37,7 +37,7 @@ services:
         done
     environment:
       BTC_RPC_PASS: "${BTC_RPC_PASS}"
-      INTERVAL: "${KSANA_REHEARSAL_BTC_INTERVAL:-15}"
+      INTERVAL: "${KSANA_REHEARSAL_BTC_INTERVAL:-30}"
     depends_on:
       - bitcoind
     restart: unless-stopped

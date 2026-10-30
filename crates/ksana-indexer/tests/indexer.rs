@@ -56,6 +56,7 @@ use ksana_consensus::{Consensus, PowConsensus};
 use ksana_indexer::rpc::{IndexerApiClient, StateRootJson, StatusJson};
 use ksana_indexer::{Indexer, IndexerConfig};
 use ksana_node::chain::Accepted;
+use ksana_node::rescue::Rescuer;
 use ksana_node::NodeError;
 use ksana_primitives::{BlockHeader, BtcAnchor, Entry, SigScheme, BLOCK_VERSION};
 
@@ -264,10 +265,25 @@ fn header_gap_waits_for_a_headers_transaction() {
     );
     assert_matches_node(&ix, &a);
 
-    // advances again once the header republish transaction lands, up to SETTLEMENT_DEPTH blocks before the block with
-    // the settlement transaction
+    // the headers of the gap count once a header republish transaction lands; those of the settlement payload, which
+    // counted before them, do not count from it (D-135): the main chain stops at the end of the gap
     let missing: Vec<BlockHeader> = (2..first_carried).map(|h| a.block(h).header).collect();
     mock.mine_block(vec![headers_tx(&mock, missing)]).unwrap();
+    let progress = catch_up(&ix);
+    assert_eq!(progress.main_height, first_carried - 1);
+    assert_matches_node(&ix, &a);
+
+    // the node sends the settlement payload again (D-135); once it lands, the indexer advances up to SETTLEMENT_DEPTH
+    // blocks before the block with the settlement transaction
+    a.sync();
+    let rescuer = Rescuer::new(
+        a.chain.clone(),
+        a.funding.clone(),
+        Some(a.producer.producer),
+        None,
+    );
+    rescuer.run_once().unwrap();
+    mock.mine(1);
     let progress = catch_up(&ix);
     assert_eq!(progress.main_height, s.header.height);
     assert_eq!(progress.height, s.header.height - PARAMS.settlement_depth);

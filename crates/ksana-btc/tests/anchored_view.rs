@@ -34,12 +34,12 @@ use ksana_btc::data::data_script;
 use ksana_btc::mock::MockBtc;
 use ksana_btc::native::{native_op, outpoint_of, tx_outputs};
 use ksana_btc::tracker::{
-    AnchoredView, BlockData, BtcSnapshot, BtcTracker, KnownBlocks, MainChain, MainEntry,
-    TrackerError,
+    AnchoredView, BtcSnapshot, BtcTracker, KnownBlocks, MainChain, MainEntry, TrackerError,
 };
 use ksana_execution::BtcView;
 use ksana_primitives::{
-    Action, BtcAnchor, FeeMode, Payload, SigScheme, VmOp, DEVNET, KSA_ASSET_ID, VMOP_VERSION,
+    Action, BlockHeader, BtcAnchor, FeeMode, Payload, SigScheme, VmOp, DEVNET, KSA_ASSET_ID,
+    VMOP_VERSION,
 };
 
 /// A main chain holding only a genesis block (these tests involve no fast-lane blocks).
@@ -59,8 +59,8 @@ fn genesis_main() -> Arc<MainChain> {
 struct NoBlocks;
 
 impl KnownBlocks for NoBlocks {
-    fn block_data(&self, _block_hash: &[u8; 32]) -> Result<BlockData, TrackerError> {
-        Ok(BlockData::Unknown)
+    fn count(&self, _snapshot: &BtcSnapshot, _header: &BlockHeader) -> Result<bool, TrackerError> {
+        Ok(false)
     }
 }
 
@@ -178,11 +178,22 @@ fn txid(tx: &Transaction) -> [u8; 32] {
 
 /// A snapshot synced up to bitcoind's current tip (the genesis anchor is the regtest genesis block).
 fn snapshot(client: &Arc<dyn BtcClient>) -> Arc<BtcSnapshot> {
-    let genesis = BtcAnchor {
+    let genesis = BlockHeader {
+        version: 1,
         height: 0,
-        hash: client.block_hash(0).unwrap().unwrap(),
+        parents: Vec::new(),
+        btc_anchor: BtcAnchor {
+            height: 0,
+            hash: client.block_hash(0).unwrap().unwrap(),
+        },
+        entries_root: [0; 32],
+        state_root: [0; 32],
+        producer: [0; 32],
+        timestamp: 1_700_000_000,
+        bits: DEVNET.pow_limit_bits,
+        nonce: 0,
     };
-    let tracker = BtcTracker::new(Arc::clone(client), DEVNET, genesis).unwrap();
+    let tracker = BtcTracker::new(Arc::clone(client), DEVNET, &genesis).unwrap();
     tracker.sync(&NoBlocks).unwrap();
     tracker.snapshot().unwrap()
 }

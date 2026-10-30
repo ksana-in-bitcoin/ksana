@@ -282,7 +282,7 @@
       "header_borsh": "02000000010000000000000001000000080d460190acfa64a7193f6a819e47c9c1f9b03b5f774c7c4693b7e10ce5458064000000abababababababababababababababababababababababababababababababab11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333305f1536500000000ffff7f200000000000000000",
       "meets": true,
       "name": "signet-salt",
-      "note": "the same non-empty block header on signet (chain ID 1002): different salt, different value",
+      "note": "the same non-empty block header with signet's chain ID 1002: different salt, different value (judged against devnet's PoW limit, since its bits are above signet's, D-136)",
       "pow_hash": "cbd4b970705aa44242a3d4707bb4fedfcc40d75f8a2c9adffe540ea6baeab324",
       "pow_limit_bits": 545259519,
       "pow_value": "24b3eabaa60e54fedf9a2c8a5fd740ccdffeb47b70d4a34242a45a7070b9d4cb",

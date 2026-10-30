@@ -366,7 +366,7 @@ keeps what it credited: it closes the old chain and follows the new one, whose o
 ## Rehearsal
 
 `signet/rehearse.sh` runs this whole stack on the local machine, built from the sources (above), with bitcoind on a private signet that a miner service
-extends every 15 seconds (`rehearsal.yml`), and checks it through the page's own origin: keys and wallets, genesis, node1
+extends every 30 seconds (`rehearsal.yml`), and checks it through the page's own origin: keys and wallets, genesis, node1
 funding itself from its wallet, blocks settled on BTC, the indexer agreeing with the node, the page and `deployment.json`, the
 BTC proxy, a faucet transfer arriving, and the relay probe. It runs the contract playground's compile service too, at
 `/compile`: its health, a build of the counter's own source that must give the module the playground ships, byte for byte,

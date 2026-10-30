@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rehearsal of the hosted public signet (D-107) on this machine: builds the images, runs the whole stack of
-# signet/docker-compose.yml with signet/rehearsal.yml (a private signet mined every 15 seconds instead of Bitcoin's
+# signet/docker-compose.yml with signet/rehearsal.yml (a private signet mined every 30 seconds instead of Bitcoin's
 # public signet) and checks it through the page's origin, the way a visitor reaches it:
 #
 #   - the operator commands of signet/ksana-signet.sh: keys (with bitcoind's watch-only wallets), genesis, status;
@@ -34,7 +34,7 @@ cd "$(dirname "$0")/.."
 commits=$(signet/sources.sh commits --points)
 home=$(mktemp -d)
 port=${KSANA_REHEARSAL_PORT:-18080}
-timeout=${KSANA_REHEARSAL_TIMEOUT:-2700}
+timeout=${KSANA_REHEARSAL_TIMEOUT:-3600}
 base=http://127.0.0.1:$port
 compose=(docker compose -p ksana-signet-rehearsal --project-directory signet -f signet/docker-compose.yml
     -f signet/rehearsal.yml --env-file "$home/.env" --profile playground --profile points)
@@ -134,9 +134,12 @@ jq -n --arg faucet "$(jq -r '.faucet' <<<"$keys")" --arg operator "$(jq -r '.ope
     '{chain_id: 1002, faucets: [$faucet], exclude: {($faucet): "the faucet", ($operator): "the operator"}, chains: {}}' \
     >"$home/points.json"
 
-# The genesis difficulty of 250 Argon2id evaluations a block instead of 5 000: the private signet mines a block every
-# 15 seconds, and SETTLEMENT_TIMEOUT (6 BTC blocks) must leave node1 time for the 2 blocks a settlement waits for
-"${compose[@]}" run --rm -T -e KSANA_SIGNET_BITS=536938020 ops genesis | tail -1
+# The genesis difficulty is signet's PoW limit, 0x1f0fffff (D-136): about 4 096 Argon2id evaluations a block instead of
+# 5 000, the easiest a signet block can be. The private signet mines a block every 30 seconds (rehearsal.yml), so that
+# SETTLEMENT_TIMEOUT (6 BTC blocks, 3 minutes) leaves node1 time for the 2 blocks a settlement waits for: on an idle
+# chain they are empty blocks of weights 12 and 24 (D-090), about 2 minutes at the limit on one core (D-094); a
+# settlement later than that only holds path B back until its block's data lands (SPEC §6.4)
+"${compose[@]}" run --rm -T -e KSANA_SIGNET_BITS=521142271 ops genesis | tail -1
 "${compose[@]}" up -d btc-miner
 "${compose[@]}" up -d
 

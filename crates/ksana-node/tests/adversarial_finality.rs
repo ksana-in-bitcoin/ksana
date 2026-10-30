@@ -211,7 +211,7 @@ fn a_btc_reorg_past_the_finality_confirmations_undoes_finality_and_nodes_follow_
     assert_eq!(a.chain.tip().unwrap().hash, b6);
     // A's held settlement transaction never landed: its block's data is not on BTC
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&a1), None);
+    assert_eq!(snapshot.counted_at(&a1), None);
 
     // B receives A's old chain: only a side chain; both nodes continue on the same chain
     for block in &a_blocks {
@@ -272,8 +272,8 @@ fn a_header_only_empty_block_is_rebuilt_from_btc_and_finalized_over_the_heavier_
     settle(&a, &mock, 1);
     let landed = mock.tip_height();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&a1), Some(landed));
-    assert_eq!(snapshot.header_seen(&a3), None);
+    assert_eq!(snapshot.counted_at(&a1), Some(landed));
+    assert_eq!(snapshot.counted_at(&a3), None);
     attacker.post_headers(
         &mock,
         vec![
@@ -299,8 +299,8 @@ fn a_header_only_empty_block_is_rebuilt_from_btc_and_finalized_over_the_heavier_
     assert!(a.chain.missing_parents().unwrap().is_empty());
     assert!(!a.chain.contains(&x_hash).unwrap());
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&a3), Some(x_seen));
-    assert_eq!(snapshot.header_seen(&x_hash), Some(x_seen));
+    assert_eq!(snapshot.counted_at(&a3), Some(x_seen));
+    assert_eq!(snapshot.counted_at(&x_hash), Some(x_seen));
 
     // A, unaware of X, keeps producing on top of a3 (the first with a transfer and an unlock entry, the later empty
     // blocks with weights growing by streak) until heavier than X; none of these headers land on BTC
@@ -424,7 +424,7 @@ fn republishing_outweighs_a_header_only_attack_block_before_it_can_become_final(
     // X's header has just appeared: not a competing chain yet, no republish
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(snapshot.header_seen(&x_hash), Some(x_seen));
+    assert_eq!(snapshot.counted_at(&x_hash), Some(x_seen));
     assert_eq!(a.chain.btc_competitor(&snapshot, confs).unwrap(), None);
     rescuer.run_once().unwrap();
     assert!(mock.mempool().is_empty());
@@ -451,14 +451,8 @@ fn republishing_outweighs_a_header_only_attack_block_before_it_can_become_final(
     let republished_at = x_seen + 2;
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
-    assert_eq!(
-        snapshot.header_seen(&a4.header.hash()),
-        Some(republished_at)
-    );
-    assert_eq!(
-        snapshot.header_seen(&a5.header.hash()),
-        Some(republished_at)
-    );
+    assert_eq!(snapshot.counted_at(&a4.header.hash()), Some(republished_at));
+    assert_eq!(snapshot.counted_at(&a5.header.hash()), Some(republished_at));
     assert_eq!(a.chain.btc_competitor(&snapshot, confs).unwrap(), None);
 
     // X's header reaches the confirmations: the candidate is a5, a2 and a3 become final, X does not, and the decision

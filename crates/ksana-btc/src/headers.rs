@@ -14,8 +14,9 @@
 //! - The headers come only from payloads that count (D-100, [`crate::tracker`]): every header of such a payload
 //!   anchors below the payload's BTC height, so the anchored BTC block has been scanned and the timestamp bound above
 //!   is checked.
-//! - Headers with parents that have not appeared yet are held pending and processed in order of appearance once all
-//!   parents are connected (a republish transaction may land later than a subsequent settlement transaction).
+//! - A header joins only once all its parents are in the DAG: the tracker asks about a header only once its parents
+//!   have counted on BTC (D-135), so the headers arrive parents first, and a header whose parent is missing is not
+//!   added and not held ([`Insert::MissingParent`]).
 //! - The main chain is the same as the node's (D-063, D-104): the selected chain of the block with the largest
 //!   fork-choice key `(chain_work, hash)` (blue work plus the block's own work, D-100; with equal chain work the larger
 //!   hash wins) among the blocks whose selected chain passes through the finality floor and has no ineligible block
@@ -39,10 +40,10 @@
 //! best chain they stay in the DAG (the headers themselves are valid), but the corresponding blocks no longer have
 //! data landed, and the settled closure (D-038, D-063) excludes them from the processable range. Pruning keeps the
 //! pruning point (on the finalized chain) and its future, and the main chain from the pruning point up; a header that
-//! can never be in the future of the pruning point (its anchor is below the pruning point's) is dropped when pending
-//! and fails GHOSTDAG ([`ksana_consensus::GhostdagError::Pruned`] or an unknown parent) when it arrives.
+//! can never be in the future of the pruning point (its anchor is below the pruning point's, or it needs a pruned
+//! block) is not added ([`Insert::Pruned`], [`Insert::MissingParent`]).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use ksana_consensus::{
@@ -56,11 +57,12 @@ use crate::tracker::BtcSnapshot;
 /// The result of adding a header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Insert {
-    /// Already in the DAG or already pending.
+    /// Already in the DAG.
     Duplicate,
-    /// Some parent is unknown; held pending.
-    Pending,
-    /// Connected to the DAG: the number of blocks connected (including the pending headers connected as a result).
+    /// Some parent is not in the DAG: the header is not added (D-135: the tracker asks about a header only once its
+    /// parents have counted; after pruning, D-097, a parent may be below the pruning point).
+    MissingParent,
+    /// Added to the DAG: the number of blocks added (always 1).
     Connected(usize),
     /// The header is invalid and dropped (reason).
     Invalid(String),
@@ -104,74 +106,9 @@ impl From<ConsensusError> for Reject {
     }
 }
 
-/// Pending headers: some parent has not appeared yet. The Borsh encoding is only the local format of pruning
-/// checkpoints (D-097).
-#[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-struct Pending {
-    headers: BTreeMap<Hash, BlockHeader>,
-    /// Missing parent → the headers waiting for it (appearance number, hash).
-    waiting: BTreeMap<Hash, BTreeSet<(u64, Hash)>>,
-    next: u64,
-}
-
-impl Pending {
-    fn insert(&mut self, header: BlockHeader, missing: &[Hash]) {
-        let hash = header.hash();
-        let order = self.next;
-        self.next = self.next.saturating_add(1);
-        for parent in missing {
-            self.waiting
-                .entry(*parent)
-                .or_default()
-                .insert((order, hash));
-        }
-        self.headers.insert(hash, header);
-    }
-
-    /// Keeps only the pending headers for which `keep` is true.
-    fn retain(&mut self, keep: impl Fn(&BlockHeader) -> bool) {
-        let dropped: BTreeSet<Hash> = self
-            .headers
-            .iter()
-            .filter(|(_, header)| !keep(header))
-            .map(|(hash, _)| *hash)
-            .collect();
-        if dropped.is_empty() {
-            return;
-        }
-        self.headers.retain(|hash, _| !dropped.contains(hash));
-        for waiting in self.waiting.values_mut() {
-            waiting.retain(|(_, hash)| !dropped.contains(hash));
-        }
-        self.waiting.retain(|_, waiting| !waiting.is_empty());
-    }
-
-    /// Takes the headers waiting for `parent` (in order of appearance; they may still be missing other parents).
-    fn take_waiting_on(&mut self, parent: &Hash) -> Vec<BlockHeader> {
-        let waiting = self.waiting.remove(parent).unwrap_or_default();
-        let mut out = Vec::new();
-        for (_, hash) in waiting {
-            if let Some(header) = self.headers.remove(&hash) {
-                // remove it from the lists of the other parents it is waiting for
-                for p in &header.parents {
-                    if let Some(set) = self.waiting.get_mut(p) {
-                        set.retain(|(_, h)| *h != hash);
-                        if set.is_empty() {
-                            self.waiting.remove(p);
-                        }
-                    }
-                }
-                out.push(header);
-            }
-        }
-        out
-    }
-}
-
 /// The block DAG (headers only) and the main chain.
 pub struct HeaderDag {
     dag: BlockDag<BlockHeader>,
-    pending: Pending,
     /// Blocks that cannot land (found by the indexer during execution, D-063), with the basis of that verdict (D-101).
     disqualified: BTreeMap<Hash, Option<[u8; 32]>>,
     /// The main chain from height `main_base` (index = height − `main_base`): from the genesis block, or from the
@@ -187,7 +124,6 @@ pub struct HeaderDag {
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct HeaderDagRecord {
     dag: DagCheckpoint<BlockHeader>,
-    pending: Pending,
     disqualified: BTreeMap<Hash, Option<[u8; 32]>>,
     main: Vec<Hash>,
     main_base: u64,
@@ -207,7 +143,6 @@ impl HeaderDag {
             .map_err(|e| e.to_string())?;
         Ok(HeaderDag {
             dag: BlockDag::new(GhostdagParams::from_params(params), hash, work, genesis),
-            pending: Pending::default(),
             disqualified: BTreeMap::new(),
             main: vec![hash],
             main_base: 0,
@@ -219,7 +154,6 @@ impl HeaderDag {
     pub fn record(&self) -> Result<HeaderDagRecord, String> {
         Ok(HeaderDagRecord {
             dag: self.dag.checkpoint().map_err(|e| e.to_string())?,
-            pending: self.pending.clone(),
             disqualified: self.disqualified.clone(),
             main: self.main.clone(),
             main_base: self.main_base,
@@ -239,7 +173,6 @@ impl HeaderDag {
         }
         Ok(HeaderDag {
             dag,
-            pending: record.pending,
             disqualified: record.disqualified,
             main: record.main,
             main_base: record.main_base,
@@ -247,16 +180,15 @@ impl HeaderDag {
         })
     }
 
-    /// Prunes at `point` (D-097): keeps it and its future in the DAG ([`BlockDag::prune`]), the main chain from it up,
-    /// and drops the pending headers that can never be in its future (anchor below the pruning point's: anchors never
-    /// decrease along parent edges) and the marks of blocks no longer kept. `point` must be on the main chain at or
-    /// below the finality floor. Returns the number of blocks dropped from the DAG.
+    /// Prunes at `point` (D-097): keeps it and its future in the DAG ([`BlockDag::prune`]) and the main chain from it
+    /// up, and drops the marks of blocks no longer kept. `point` must be on the main chain at or below the finality
+    /// floor. Returns the number of blocks dropped from the DAG.
     pub fn prune(&mut self, point: &Hash) -> Result<usize, String> {
         let header = self
             .dag
             .payload(point)
             .ok_or("the pruning point is not in the header DAG")?;
-        let (height, anchor) = (header.height, header.btc_anchor.height);
+        let height = header.height;
         if !self.on_main(point) || height > self.floor_height() {
             return Err(
                 "the pruning point is not on the main chain at or below the finality floor".into(),
@@ -267,8 +199,6 @@ impl HeaderDag {
             .map_err(|_| "main-chain height overflow".to_string())?;
         self.main.drain(..skip.min(self.main.len()));
         self.main_base = height;
-        // the same test as `below_pruning_point`
-        self.pending.retain(|h| h.btc_anchor.height >= anchor);
         let dag = &self.dag;
         self.disqualified.retain(|h, _| dag.contains(h));
         Ok(dropped)
@@ -320,15 +250,9 @@ impl HeaderDag {
         self.main_base.saturating_add(len.saturating_sub(1))
     }
 
-    /// The number of pending headers (with unknown parents).
-    pub fn pending_count(&self) -> usize {
-        self.pending.headers.len()
-    }
-
-    /// Whether the block's header is held: in the DAG or pending. After pruning (D-097) these are the pruning point,
-    /// its future and the pending headers that can still join it.
+    /// Whether the block's header is in the DAG. After pruning (D-097) these are the pruning point and its future.
     pub fn holds(&self, hash: &Hash) -> bool {
-        self.dag.contains(hash) || self.pending.headers.contains_key(hash)
+        self.dag.contains(hash)
     }
 
     /// Whether the block is marked as unable to land.
@@ -464,70 +388,24 @@ impl HeaderDag {
         btc: &BtcSnapshot,
     ) -> Insert {
         let hash = header.hash();
-        if self.dag.contains(&hash) || self.pending.headers.contains_key(&hash) {
+        if self.dag.contains(&hash) {
             return Insert::Duplicate;
         }
         if self.below_pruning_point(&header) {
             return Insert::Pruned;
         }
-        let mut connected = 0usize;
-        let mut first_error = None;
-        let mut first_pending = false;
-        let mut first_pruned = false;
-        // connect level by level in order of appearance (breadth first)
-        let mut queue = VecDeque::from([header]);
-        while let Some(next) = queue.pop_front() {
-            let next_hash = next.hash();
-            let missing: Vec<Hash> = next
-                .parents
-                .iter()
-                .filter(|p| !self.dag.contains(p))
-                .copied()
-                .collect();
-            if !missing.is_empty() {
-                // some parent has not appeared yet: hold pending
-                first_pending |= next_hash == hash;
-                self.pending.insert(next, &missing);
-                continue;
+        if header.parents.iter().any(|p| !self.dag.contains(p)) {
+            return Insert::MissingParent;
+        }
+        match self.accept(consensus, header, btc) {
+            Ok(()) => {
+                self.update_main(btc);
+                Insert::Connected(1)
             }
-            match self.accept(consensus, next, btc) {
-                Ok(()) => {
-                    connected = connected.saturating_add(1);
-                    queue.extend(self.pending.take_waiting_on(&next_hash));
-                }
-                Err(Reject::Unavailable(reason)) => {
-                    // local fault: keep the blocks already connected, do not process the rest
-                    if connected > 0 {
-                        self.update_main(btc);
-                    }
-                    return Insert::Unavailable(reason);
-                }
-                Err(Reject::Invalid(reason)) => {
-                    if next_hash == hash {
-                        first_error = Some(reason);
-                    } else {
-                        eprintln!(
-                            "[ksana-btc] dropping invalid header {}: {reason}",
-                            hex::encode(next_hash)
-                        );
-                    }
-                }
-                // not in the future of the pruning point (D-097): dropped without a judgment
-                Err(Reject::Pruned) => first_pruned |= next_hash == hash,
-            }
-        }
-        if connected > 0 {
-            self.update_main(btc);
-        }
-        if first_pending {
-            return Insert::Pending;
-        }
-        if first_pruned {
-            return Insert::Pruned;
-        }
-        match first_error {
-            Some(reason) => Insert::Invalid(reason),
-            None => Insert::Connected(connected),
+            Err(Reject::Unavailable(reason)) => Insert::Unavailable(reason),
+            Err(Reject::Invalid(reason)) => Insert::Invalid(reason),
+            // not in the future of the pruning point (D-097): dropped without a judgment
+            Err(Reject::Pruned) => Insert::Pruned,
         }
     }
 
@@ -886,8 +764,10 @@ mod tests {
         assert_eq!(data.mergeset_ordered, vec![a1.hash().min(b1.hash())]);
     }
 
+    /// D-135: a header whose parents are not all in the DAG is not added, and nothing of it is held; it joins once it
+    /// is inserted again after them.
     #[test]
-    fn headers_wait_for_all_their_parents() {
+    fn a_header_joins_only_after_all_its_parents() {
         let (consensus, g) = genesis();
         // first make all headers on a scratch copy
         let mut scratch = new_dag(&consensus, &g);
@@ -900,31 +780,28 @@ mod tests {
         let h3 = block(&consensus, &scratch, &[&h2], 3);
 
         let mut dag = new_dag(&consensus, &g);
-        assert_eq!(
-            dag.insert(&consensus, h3.clone(), &no_btc()),
-            Insert::Pending
-        );
-        assert_eq!(
-            dag.insert(&consensus, h2.clone(), &no_btc()),
-            Insert::Pending
-        );
-        assert_eq!(
-            dag.insert(&consensus, h3.clone(), &no_btc()),
-            Insert::Duplicate
-        );
-        assert_eq!(dag.pending_count(), 2);
-        // h1 arrives: h2 is still missing side, keeps waiting
+        for header in [&h3, &h2] {
+            assert_eq!(
+                dag.insert(&consensus, header.clone(), &no_btc()),
+                Insert::MissingParent
+            );
+        }
         assert_eq!(
             dag.insert(&consensus, h1.clone(), &no_btc()),
             Insert::Connected(1)
         );
-        assert_eq!(dag.pending_count(), 2);
-        // after side arrives they connect in turn
+        // h2 is still missing side
         assert_eq!(
-            dag.insert(&consensus, side.clone(), &no_btc()),
-            Insert::Connected(3)
+            dag.insert(&consensus, h2.clone(), &no_btc()),
+            Insert::MissingParent
         );
-        assert_eq!(dag.pending_count(), 0);
+        assert!(!dag.holds(&h2.hash()) && !dag.holds(&h3.hash()));
+        for header in [&side, &h2, &h3] {
+            assert_eq!(
+                dag.insert(&consensus, header.clone(), &no_btc()),
+                Insert::Connected(1)
+            );
+        }
         assert_eq!(dag.main().last(), Some(&h3.hash()));
         assert_eq!(dag.main().len(), 4);
     }
@@ -1270,9 +1147,10 @@ mod tests {
         assert_eq!(dag.main(), &[g.hash(), b1.hash()]);
     }
 
-    /// D-104: the main chain is a function of the DAG and the BTC view alone. The same headers inserted in any order,
-    /// each under any of the BTC views and with `reselect` run at any point, end on the same main chain once
-    /// `reselect` runs under the final view, whatever main chain they had on the way.
+    /// D-104: the main chain is a function of the DAG and the BTC view alone. The same headers inserted in any order
+    /// their parents allow (a header joins only after its parents, D-135), each under any of the BTC views and with
+    /// `reselect` run at any point, end on the same main chain once `reselect` runs under the final view, whatever main
+    /// chain they had on the way.
     #[test]
     fn the_main_chain_depends_only_on_the_dag_and_the_btc_view() {
         use proptest::prelude::*;
@@ -1340,10 +1218,19 @@ mod tests {
         runner
             .run(
                 &(Just(headers.clone()).prop_shuffle(), steps, 0..views.len()),
-                |(order, steps, last)| {
+                |(mut order, steps, last)| {
                     let mut dag = new_dag(&consensus, &g);
-                    for (header, (view, reselect)) in order.into_iter().zip(steps) {
-                        dag.insert(&consensus, header, &views[view]);
+                    for (view, reselect) in steps {
+                        // the first header in the shuffled order whose parents have joined
+                        let next = order
+                            .iter()
+                            .position(|h| h.parents.iter().all(|p| dag.dag().contains(p)))
+                            .unwrap();
+                        let header = order.remove(next);
+                        prop_assert_eq!(
+                            dag.insert(&consensus, header, &views[view]),
+                            Insert::Connected(1)
+                        );
                         if reselect {
                             dag.reselect(&views[view]);
                         }
@@ -1357,8 +1244,8 @@ mod tests {
     }
 
     /// Pruning (D-097) keeps the pruning point, its future and the main chain from it up: the pruned DAG answers like
-    /// the full one for those blocks and takes the same new blocks, drops what is anchored below the pruning point
-    /// (pending or arriving), refuses a pruning point off the main chain or above the floor, and its checkpoint
+    /// the full one for those blocks and takes the same new blocks, does not add what is anchored below the pruning
+    /// point or needs a pruned block, refuses a pruning point off the main chain or above the floor, and its checkpoint
     /// restores the same DAG.
     #[test]
     fn pruning_keeps_the_future_of_the_pruning_point() {
@@ -1400,42 +1287,6 @@ mod tests {
             add(&mut dag, &header);
             a.push(header);
         }
-        // two headers waiting for an unknown parent, anchored below and at the pruning point's anchor (12)
-        let orphan = |height: u32, tag: u8| BlockHeader {
-            parents: vec![[0xee; 32]],
-            btc_anchor: BtcAnchor {
-                height,
-                hash: [tag; 32],
-            },
-            producer: [tag; 32],
-            ..a[5].clone()
-        };
-        assert_eq!(
-            dag.insert(&consensus, orphan(11, 1), &no_btc()),
-            Insert::Pending
-        );
-        assert_eq!(
-            dag.insert(&consensus, orphan(12, 2), &no_btc()),
-            Insert::Pending
-        );
-        // candidate bodies of the two pending headers, of a block below the pruning point and of one above it
-        let body = |tag: u8| ksana_primitives::Body {
-            header: u32::from(tag),
-            entries: vec![ksana_primitives::EntryData::Unlock {
-                height: u64::from(tag),
-                index: 0,
-            }],
-        };
-        let mut bodies = crate::bodies::Bodies::new(params.clone(), g.hash(), "[test]");
-        bodies.observe(
-            &ksana_primitives::Payload::Settlement {
-                headers: vec![orphan(11, 1), orphan(12, 2), a[5].clone(), a[20].clone()],
-                entries: body(3).entries,
-                bodies: vec![body(0), body(1), body(2)],
-            },
-            &|_| true,
-        );
-        assert_eq!(bodies.candidate_count(), 4);
         dag.set_floor(a[30].hash(), &no_btc()).unwrap();
         let point = a[10].hash();
         assert_eq!(dag.header(&point).unwrap().btc_anchor.height, 12);
@@ -1470,18 +1321,7 @@ mod tests {
                 assert_eq!(dag.ghostdag(&hash), full.ghostdag(&hash));
             }
         }
-        assert_eq!(
-            dag.pending_count(),
-            1,
-            "the orphan anchored at 11 is dropped"
-        );
-        assert!(dag.holds(&orphan(12, 2).hash()));
-        assert!(!dag.holds(&orphan(11, 1).hash()));
         assert!(dag.holds(&point) && !dag.holds(&a[9].hash()) && !dag.holds(&side.hash()));
-        // the bodies follow the headers held: the pending header anchored at 12 keeps its candidate (its payload is not
-        // scanned again), the one anchored at 11, a5 and the genesis block's conclusion go
-        assert_eq!(bodies.prune_to(&dag), 3);
-        assert_eq!(bodies.candidate_count(), 2);
         // a pruned DAG prunes again only upwards along the main chain
         assert_eq!(dag.prune(&point), Ok(0));
 
@@ -1505,6 +1345,13 @@ mod tests {
             Insert::Pruned
         );
         add(&mut full, &low);
+        // anchored at the pruning point's anchor on a pruned parent: not added either (D-135)
+        let stray = block_anchored(&consensus, &full, &[&a[9]], 203, Some(12));
+        assert_eq!(
+            dag.insert(&consensus, stray.clone(), &no_btc()),
+            Insert::MissingParent
+        );
+        add(&mut full, &stray);
 
         // the checkpoint of the pruned DAG restores it, and the restored DAG goes on the same way
         let record = dag.record().unwrap();

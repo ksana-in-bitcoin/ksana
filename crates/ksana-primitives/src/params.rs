@@ -1,8 +1,8 @@
 //! Protocol parameters (SPEC §13). All parameters are defined here in one place, per network.
 //!
 //! Three networks: devnet (BTC regtest), signet (the M6 browser wallet acceptance, D-055; differs from devnet only in
-//! `chain_id` and `ANCHOR_DEPTH`, D-056) and mainnet (the mainnet column of SPEC §13 and the parameter rationale of
-//! §13.1, D-096; see [`MAINNET`] for the differences from devnet).
+//! `chain_id`, `ANCHOR_DEPTH`, D-056, and the PoW limit, D-136) and mainnet (the mainnet column of SPEC §13 and the
+//! parameter rationale of §13.1, D-096; see [`MAINNET`] for the differences from devnet).
 //! Consensus parameters beyond the spec (PoW limit, mining algorithm, GHOSTDAG, block rewards, two-speed difficulty
 //! D-084 / D-090, upgrade table) have their source noted in the field docs of [`Params`].
 
@@ -707,10 +707,13 @@ pub const DEVNET: Params = Params {
 };
 
 /// The signet parameters (D-055, the M6 browser wallet acceptance): differ from [`DEVNET`] only in `chain_id`
-/// (preventing replay between devnet and signet) and `ANCHOR_DEPTH` (signet has real BTC reorgs, D-056).
+/// (preventing replay between devnet and signet), `ANCHOR_DEPTH` (signet has real BTC reorgs, D-056) and
+/// `pow_limit_bits` 0x1f0fffff (a target of about 2^244, about 4 096 Argon2id evaluations per block at the limit, so
+/// that a side branch whose difficulty fell to the limit still pays for each header it lands on BTC, D-136).
 pub const SIGNET: Params = Params {
     chain_id: 1002,
     anchor_depth: 1,
+    pow_limit_bits: 0x1f0f_ffff,
     ..DEVNET
 };
 
@@ -753,17 +756,19 @@ pub const MAINNET: Params = Params {
 mod tests {
     use super::*;
 
-    /// signet differs from devnet only in `chain_id` (D-055) and `ANCHOR_DEPTH` (D-056).
+    /// signet differs from devnet only in `chain_id` (D-055), `ANCHOR_DEPTH` (D-056) and the PoW limit (D-136).
     #[test]
-    fn signet_differs_from_devnet_only_in_chain_id_and_anchor_depth() {
+    fn signet_differs_from_devnet_only_in_chain_id_anchor_depth_and_pow_limit() {
         let signet = Network::Signet.params();
         assert_eq!(signet.chain_id, 1002);
         assert_eq!(signet.anchor_depth, 1);
+        assert_eq!(signet.pow_limit_bits, 0x1f0f_ffff);
         assert_eq!(DEVNET.anchor_depth, 0);
         assert_eq!(
             Params {
                 chain_id: DEVNET.chain_id,
                 anchor_depth: DEVNET.anchor_depth,
+                pow_limit_bits: DEVNET.pow_limit_bits,
                 ..signet.clone()
             },
             DEVNET

@@ -32,7 +32,7 @@ pub mod vmop;
 
 pub use account::{account_address, account_from_address, btc_network, parse_account};
 pub use bip322::account_script;
-pub use merkle::{entries_root, merkle_root};
+pub use merkle::{entries_root, entry_leaf, leaf_hash, merkle_root, root_of_leaf_hashes};
 pub use schnorr::{
     account_of, keypair_from_secret, schnorr_sign, schnorr_verify, tweaked_keypair, Keypair,
 };

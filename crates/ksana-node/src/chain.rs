@@ -62,9 +62,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuar
 use std::time::{Duration, Instant};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use ksana_btc::bodies::{check_stale_entries, Bodies, BodiesRecord, StaleEntries};
+use ksana_btc::bodies::{check_stale_entries, Bodies, StaleEntries};
 use ksana_btc::client::BtcClient;
-use ksana_btc::finality::{BtcFinal, DataStatus, Exclusion, Finality, Outcome, Validity};
+use ksana_btc::finality::{BtcFinal, Exclusion, Finality, Outcome, Validity};
 use ksana_btc::headers::{HeaderDag, HeaderDagRecord, Insert as HeaderInsert};
 use ksana_btc::payload::{bodies_in, check_body_fits, entry_data, settlement_belongs_to};
 pub use ksana_btc::prune::{Pruning, PRUNE_BTC_MARGIN, PRUNE_STEP};
@@ -87,9 +87,8 @@ use ksana_state::{DbMemory, StateDb, StateView, WriteSet};
 
 use crate::btc::{
     prefix_height, settled_height, settlement_backlog, unlock_cursor, unlock_segment,
-    unlock_target, AnchoredPrevouts, AnchoredView, BlockData, BlockSummary, BtcSnapshot,
-    BtcTracker, KnownBlocks, MainChain, MainEntry, MainHistory, SettlementContext, SnapshotRecord,
-    TrackerError,
+    unlock_target, AnchoredPrevouts, AnchoredView, BlockSummary, BtcSnapshot, BtcTracker,
+    KnownBlocks, MainChain, MainEntry, MainHistory, SnapshotRecord, TrackerError,
 };
 use crate::genesis::GenesisFile;
 use crate::ops::NativeAuth;
@@ -122,10 +121,11 @@ const PAYLOAD_BODY_SHARE: usize = 4;
 /// the backlog is at most twice the threshold, which fits exactly and does not push out the earliest bodies.
 pub const PAYLOAD_BODY_TRIGGER: usize = 8;
 /// In-flight settlement transaction: the anchor of the block carrying it lags the BTC tip by at most this many blocks
-/// and its header has not landed yet (producer's policy, D-077). One unconfirmed for longer (e.g. waiting in the mempool
-/// at too low a fee rate) no longer makes the new block's body wait for it; its producer bumps it through the reveal's
-/// P2A output, and other nodes rescue it once it pays less than their fee rate or has waited `CLAIM_PATIENCE` BTC
-/// blocks (D-102, [`crate::rescue`]).
+/// and its header has not counted yet (producer's policy, D-077, D-135). One unconfirmed for longer (e.g. waiting in the
+/// mempool at too low a fee rate) no longer makes the new block's body wait for it, and the new block's payload carries
+/// its header and the headers of its past that have not counted ([`Chain::payload_carry`]); its producer bumps it
+/// through the reveal's P2A output, and other nodes rescue it once it pays less than their fee rate or has waited
+/// `CLAIM_PATIENCE` BTC blocks (D-102, [`crate::rescue`]).
 const IN_FLIGHT_BTC_BLOCKS: u32 = 2;
 /// Capacity of the set of known invalid blocks: the earliest are forgotten first (a forgotten invalid block is only
 /// checked again).
@@ -141,20 +141,21 @@ const MAX_REFUSALS: usize = 4_096;
 pub const REMEMBERED: &str = "(remembered from an earlier delivery under the current BTC tip, M27)";
 /// The pruning checkpoint in the data directory (D-097).
 const CHECKPOINT_FILE: &str = "pruning.ckpt";
-/// The version of the checkpoint's local format (2: the finality decision's exclusions, D-101).
-const CHECKPOINT_VERSION: u32 = 2;
+/// The version of the checkpoint's local format (2: the finality decision's exclusions, D-101; 3: no pending headers,
+/// unresolved payloads or candidate bodies, the landed bodies kept as their transactions, D-135).
+const CHECKPOINT_VERSION: u32 = 3;
 
-/// Data the producer intends the new block's settlement payload to carry (D-063, D-075, D-077): the other block headers
-/// in this block's past that have not landed yet (by blue work, lowest first), and the bodies of those among them that
-/// carry no settlement transactions, need a body and whose body has not landed yet.
+/// Data the producer intends the new block's settlement payload to carry (D-063, D-075, D-077, D-135): the other block
+/// headers in this block's past that have not counted on BTC yet (by blue work, lowest first), and the bodies of those
+/// among them that carry no settlement transactions, need a body and whose body has not landed yet.
 #[derive(Clone, Debug, Default)]
 pub struct Carry {
     /// Other block headers, by blue work from lowest to highest.
     pub headers: Vec<BlockHeader>,
     /// Bodies of some of those blocks, in header order.
     pub bodies: Vec<CarriedBody>,
-    /// Among the most recent blocks in the past that carry settlement transactions, one has a settlement that has not
-    /// landed yet (an in-flight batch, from at most [`IN_FLIGHT_BTC_BLOCKS`] BTC blocks ago).
+    /// Among the most recent blocks in the past that carry settlement transactions, one has a settlement whose header
+    /// has not counted yet (an in-flight batch, from at most [`IN_FLIGHT_BTC_BLOCKS`] BTC blocks ago).
     pub in_flight: bool,
     /// Total bytes of the bodies waiting to be carried (before the earliest are dropped for the budget).
     pub pending_len: usize,
@@ -386,8 +387,6 @@ struct Checkpoint {
     headers: HeaderDagRecord,
     /// The finality decision.
     finality: Finality,
-    /// The candidate and determined bodies of blocks this node lacks.
-    bodies: BodiesRecord,
 }
 
 /// What a restart restores from a pruning checkpoint besides the DAG (D-097).
@@ -774,9 +773,9 @@ struct Lingering {
     inputs: Vec<([u8; 32], u32)>,
 }
 
-/// BTC finality (D-082): the DAG formed by the block headers that appeared on BTC, and the finalized chain decided
-/// block by block by BTC height; along with the candidate bodies, carried by BTC payloads, of blocks this node does not
-/// have yet (for rebuilding missing blocks from the data on BTC, D-093), and the verdicts the decision asks for (D-101).
+/// BTC finality (D-082): the DAG formed by the block headers that count on BTC (D-135), and the finalized chain decided
+/// block by block by BTC height; along with the decoder of the bodies landed on BTC (for rebuilding missing blocks from
+/// the data on BTC, D-093), and the verdicts the decision asks for (D-101).
 struct FinalityState {
     headers: HeaderDag,
     finality: Finality,
@@ -1117,8 +1116,15 @@ impl Chain {
                             .into(),
                     ));
                 }
-                let root = state.commit(0, &genesis_writes)?;
+                // The genesis block is built before the genesis state is written, as the indexer does: a config it
+                // cannot be built from (`bits` above the PoW limit, allocations above the supply) leaves nothing behind
+                let root = state.preview_root(&genesis_writes)?;
                 let header = genesis_file.header(&params, root)?;
+                if state.commit(0, &genesis_writes)? != root {
+                    return Err(NodeError::Storage(
+                        "the root of the genesis state does not match the precomputed one".into(),
+                    ));
+                }
                 let block = Block {
                     header,
                     entries: Vec::new(),
@@ -1238,12 +1244,7 @@ impl Chain {
                     r.snapshot.base()
                 );
                 (
-                    BtcTracker::with_snapshot(
-                        btc,
-                        params.clone(),
-                        genesis.btc_anchor.clone(),
-                        r.snapshot,
-                    )?,
+                    BtcTracker::with_snapshot(btc, params.clone(), &genesis, r.snapshot)?,
                     r.finality,
                     PruneState {
                         root: Some(r.root),
@@ -1252,12 +1253,12 @@ impl Chain {
                 )
             }
             None => (
-                BtcTracker::new(btc, params.clone(), genesis.btc_anchor.clone())?,
+                BtcTracker::new(btc, params.clone(), &genesis)?,
                 FinalityState::new(
                     HeaderDag::new(&params, &consensus, genesis.clone())
                         .map_err(NodeError::Internal)?,
                     Finality::new(params.btc_finality_confs, genesis_hash),
-                    Bodies::new(params.clone(), genesis_hash, "[ksana-node]"),
+                    Bodies::new(params.clone(), genesis_hash),
                 ),
                 PruneState::default(),
             ),
@@ -1488,12 +1489,11 @@ impl Chain {
     /// finalized tip, the main chain or the block DAG changed.
     pub fn sync_btc(&self) -> Result<bool, NodeError> {
         let changed = self.btc.sync(self)?;
-        let resolved = self.btc.resolve_all(self)?;
         let finalized = self.update_finality()?;
         let reselected = !changed && self.reselect()?;
         let rebuilt = self.rebuild_missing_from_btc()?;
         let pruned = self.maybe_prune()?;
-        Ok(changed || resolved || finalized || reselected || rebuilt || pruned)
+        Ok(changed || finalized || reselected || rebuilt || pruned)
     }
 
     /// Re-selects the main chain once per BTC tip, under the `process` lock (D-104): a BTC reorg may have taken the
@@ -1528,9 +1528,8 @@ impl Chain {
     /// the highest block decided BTC final at least the pruning margin of BTC blocks below the BTC tip, and must be on
     /// this node's main chain (its height becomes the lowest state version kept); the pruning point P is the block on
     /// R's selected chain `min_pruning_depth` blue score below it, pruned at only once it is at least the pruning step
-    /// above the current one. Prunes the header DAG, the finality decision (R becomes its root) and the candidate bodies,
-    /// then the block DAG at P, the main chain's window and the BTC snapshot, and writes the pruning checkpoint. Returns
-    /// whether it pruned.
+    /// above the current one. Prunes the header DAG and the finality decision (R becomes its root), then the block DAG
+    /// at P, the main chain's window and the BTC snapshot, and writes the pruning checkpoint. Returns whether it pruned.
     fn maybe_prune(&self) -> Result<bool, NodeError> {
         if !self.pruning.enabled {
             return Ok(false);
@@ -1628,15 +1627,12 @@ impl Chain {
                 .min(point_height),
         );
 
-        // The header DAG, the finality decision and the candidate bodies first: when they cannot be pruned, nothing is
-        let (headers_record, finality_record, bodies_record, header_hashes) = {
+        // The header DAG and the finality decision first: when they cannot be pruned, nothing is
+        let (headers_record, finality_record, header_hashes) = {
             let (fin, _) = self.finalized()?;
             let mut state = self.finality.lock().map_err(poisoned)?;
             let FinalityState {
-                headers,
-                finality,
-                bodies,
-                ..
+                headers, finality, ..
             } = &mut *state;
             let pruned = headers
                 .set_floor(fin, &snapshot)
@@ -1649,12 +1645,10 @@ impl Chain {
                 );
                 return Ok(false);
             }
-            bodies.prune_to(headers);
             let header_hashes: BTreeSet<Hash> = headers.dag().iter().map(|(h, _)| *h).collect();
             (
                 headers.record().map_err(NodeError::Internal)?,
                 finality.clone(),
-                bodies.record(),
                 header_hashes,
             )
         };
@@ -1709,7 +1703,6 @@ impl Chain {
             snapshot: self.btc.snapshot()?.record(),
             headers: headers_record,
             finality: finality_record,
-            bodies: bodies_record,
         };
         let written = write_checkpoint(&self.data_dir, &checkpoint);
         eprintln!(
@@ -1743,9 +1736,9 @@ impl Chain {
     }
 
     /// Rebuilds the blocks this node lacks from the data on BTC (D-093): among the block the finality decision is
-    /// waiting for and the parents the orphans are missing, those whose header has appeared in a BTC payload and whose
-    /// body can be determined by the rules of [`ksana_btc::bodies`] (no body needed, or a payload carrying its body has
-    /// landed) are assembled into blocks without settlement transactions (D-077: settlement transactions are not part
+    /// waiting for and the parents the orphans are missing, those whose header counts on BTC (D-135) and whose body is
+    /// known by the rules of [`ksana_btc::bodies`] (no body needed, or a payload carrying its body has landed) are
+    /// assembled into blocks without settlement transactions (D-077: settlement transactions are not part
     /// of a block's identity) and accepted under all the rules for receiving historical blocks; when the parents are
     /// missing too, it becomes an orphan first and the parents are rebuilt next round. When peers cannot supply these
     /// blocks (they are all on another chain, or this node has no peers), this node can still follow the finalized
@@ -1776,9 +1769,7 @@ impl Chain {
                     let Some(header) = headers.header(hash).cloned() else {
                         continue;
                     };
-                    let Some(body) = bodies
-                        .body(headers, hash, &snapshot)
-                        .map_err(NodeError::Internal)?
+                    let Some(body) = bodies.body(&snapshot, hash).map_err(NodeError::Internal)?
                     else {
                         continue;
                     };
@@ -1842,41 +1833,6 @@ impl Chain {
     /// check).
     pub fn anchor_time(&self, snapshot: &BtcSnapshot, anchor: &BtcAnchor) -> Option<u32> {
         snapshot.header_time_at(anchor.height)
-    }
-
-    /// Landing status of a block's data (for the finality decision, D-082): the same rules as the settled closure
-    /// (D-038, D-077). When this node has the block, whether it needs a body is judged by its entries; undetermined
-    /// while its payloads have not yet been resolved against this block (before
-    /// [`ksana_btc::tracker::BtcTracker::resolve_all`]).
-    ///
-    /// When this node does not have the block (it has not received it yet, or refused it as invalid), answer from the
-    /// data on BTC with exactly the rules of the indexer ([`Bodies::data_status`], D-093, D-101): whether it needs a
-    /// body can be determined when its header is in the header DAG, its anchor is on the current best chain and its
-    /// parents' headers are known; the body is determined from the payloads carrying it, and the tracker resolves
-    /// those payloads against it ([`KnownBlocks::block_data`] answers from the same bodies for blocks this node
-    /// lacks). When it needs a body and the current best chain has no payload carrying it, its data has **not landed**:
-    /// an attacker who puts only the header on BTC and withholds the body cannot stall this node's finality decision at
-    /// this block. A block that has landed is then judged ([`Chain::validity`]): an invalid one is excluded without this
-    /// node ever having it, and a valid one is decided final only once this node has it, rebuilt from the data on BTC
-    /// ([`Chain::rebuild_missing_from_btc`]) or supplied by a peer.
-    fn data_status(
-        &self,
-        headers: &HeaderDag,
-        bodies: &mut Bodies,
-        snapshot: &BtcSnapshot,
-        hash: &Hash,
-    ) -> Result<DataStatus, String> {
-        if let Some(block) = self.store.block(hash).map_err(|e| e.to_string())? {
-            if snapshot.has_unresolved(hash) {
-                return Ok(DataStatus::Undetermined);
-            }
-            let settles = settlement::needs_body(&block.entries);
-            return Ok(match snapshot.block_data_height(hash, settles) {
-                Some(height) => DataStatus::Landed(height),
-                None => DataStatus::NotLanded,
-            });
-        }
-        bodies.data_status(headers, hash, snapshot)
     }
 
     /// The verdict the finality decision asks for on block `hash` (D-101): the one recorded on the current BTC basis
@@ -1943,12 +1899,12 @@ impl Chain {
         followed
     }
 
-    /// The finality decision itself (does not change the main chain): decides by the current BTC snapshot and the
-    /// recorded verdicts ([`Chain::validity`], D-101), records the block being waited for (one whose data status is
-    /// undetermined, or one valid by the verdict that this node lacks) and logs. It runs on the BTC loop, on the p2p
-    /// handler and when a block arrives; the snapshot is read under the `finality` lock, and snapshots are published
-    /// in time order, so each decision sees a snapshot at least as new as the one before: an older one would look like
-    /// a BTC reorg to [`Finality::evaluate`] and undo the decisions made at the newer heights.
+    /// The finality decision itself (does not change the main chain): decides by the current BTC snapshot, whose landing
+    /// heights are those of the settled closure (D-038, D-077, D-135), and the recorded verdicts ([`Chain::validity`],
+    /// D-101), records the block being waited for (one valid by the verdict that this node lacks) and logs. It runs on
+    /// the BTC loop, on the p2p handler and when a block arrives; the snapshot is read under the `finality` lock, and
+    /// snapshots are published in time order, so each decision sees a snapshot at least as new as the one before: an
+    /// older one would look like a BTC reorg to [`Finality::evaluate`] and undo the decisions made at the newer heights.
     fn evaluate_finality(&self) -> Result<Outcome, NodeError> {
         let (outcome, tip, tip_height, reported, taken_back) = {
             let mut state = self.finality.lock().map_err(poisoned)?;
@@ -1956,7 +1912,6 @@ impl Chain {
             let FinalityState {
                 headers,
                 finality,
-                bodies,
                 verdicts,
                 reported,
                 ..
@@ -1964,12 +1919,9 @@ impl Chain {
             let headers: &HeaderDag = headers;
             let verdicts: &Verdicts = verdicts;
             let outcome = finality
-                .evaluate(
-                    headers,
-                    &snapshot,
-                    &mut |hash| self.data_status(headers, bodies, &snapshot, hash),
-                    &mut |hash| self.validity(headers, verdicts, &snapshot, hash),
-                )
+                .evaluate(headers, &snapshot, &mut |hash| {
+                    self.validity(headers, verdicts, &snapshot, hash)
+                })
                 .map_err(NodeError::Internal)?;
             let now = finality.btc_final(&snapshot, reported.as_ref());
             let before = reported
@@ -1984,11 +1936,10 @@ impl Chain {
                 taken_back,
             )
         };
-        let lacking = match outcome.validating {
+        let waiting = match outcome.validating {
             Some(hash) if self.store.dag_seq(&hash)?.is_none() => Some(hash),
             _ => None,
         };
-        let waiting = outcome.waiting_on.or(lacking);
         {
             let mut wanted = self.wanted.lock().map_err(poisoned)?;
             if waiting != *wanted {
@@ -1996,13 +1947,13 @@ impl Chain {
                     if self.is_invalid(&hash)? {
                         eprintln!(
                             "[ksana-node] the finality decision is waiting for block {}, which this node refused as invalid: it \
-                             is judged once its data can be determined from BTC, and excluded if invalid (D-101)",
+                             is judged from its data on BTC, and excluded if invalid (D-101)",
                             hex::encode(hash)
                         );
                     } else {
                         eprintln!(
-                            "[ksana-node] the finality decision is waiting for block {} (this node does not have it yet, or its \
-                             payload is not yet resolved); requesting it from peers or rebuilding it from the data on BTC (D-082, D-093)",
+                            "[ksana-node] the finality decision is waiting for block {} (this node does not have it yet); \
+                             requesting it from peers or rebuilding it from the data on BTC (D-082, D-093)",
                             hex::encode(hash)
                         );
                     }
@@ -2116,7 +2067,7 @@ impl Chain {
                 if let Some(block) = self.store.block(h).map_err(|e| e.to_string())? {
                     return Ok(Some(Arc::new(block.entries)));
                 }
-                bodies.body(headers, h, &snapshot)
+                bodies.body(&snapshot, h)
             })
             .map_err(NodeError::Internal)?;
             (header, basis, candidate)
@@ -2421,7 +2372,7 @@ impl Chain {
             .iter()
             .filter_map(|tip| {
                 let candidate = decidable(tip)?;
-                let age = btc_tip.saturating_sub(snapshot.header_seen(&candidate)?);
+                let age = btc_tip.saturating_sub(snapshot.counted_at(&candidate)?);
                 if age < Self::COMPETITOR_GRACE || age >= within {
                     return None;
                 }
@@ -2792,9 +2743,10 @@ impl Chain {
 
     /// Delayed broadcast and rebroadcast of settlement transactions (D-037, D-063): broadcast when the main-chain block
     /// that accepted the block has `SETTLEMENT_DEPTH` confirmations; rebroadcast those already broadcast but neither in
-    /// the mempool nor confirmed (e.g. evicted after a BTC reorg); close the record once the transaction that landed
-    /// the block's data has `BTC_FINALITY_CONFS` confirmations. First releases the lingering funding inputs of
-    /// transactions no longer in the mempool ([`Chain::linger`], D-104).
+    /// the mempool nor confirmed (e.g. evicted after a BTC reorg); close the record once all the data the settlement
+    /// carries has landed with `BTC_FINALITY_CONFS` confirmations. A settlement that confirmed and counted without
+    /// landing it (D-135) keeps its record open for the rescuer, which sends its payload again. First releases the
+    /// lingering funding inputs of transactions no longer in the mempool ([`Chain::linger`], D-104).
     pub fn process_settlements(&self) -> Result<(), NodeError> {
         self.release_lingering()?;
         let snapshot = self.btc.snapshot()?;
@@ -2809,18 +2761,20 @@ impl Chain {
                 self.open.lock().map_err(poisoned)?.remove(&block_hash);
                 continue;
             }
-            let confirmed = match snapshot.ksn1_height(&record.txid) {
-                Some(height) => Some(height),
-                None => match self.store.block(&block_hash)? {
-                    Some(block) => self.carried_on_chain(&block, &snapshot)?,
-                    None => None,
-                },
+            let landed = match self.store.block(&block_hash)? {
+                Some(block) => self.carried_on_chain(&block, &snapshot)?,
+                None => snapshot.ksn1_height(&record.txid),
             };
-            if let Some(height) = confirmed {
+            if let Some(height) = landed {
                 let confs = btc_tip.saturating_sub(height).saturating_add(1);
                 if confs >= self.params.btc_finality_confs {
                     self.open.lock().map_err(poisoned)?.remove(&block_hash);
                 }
+                continue;
+            }
+            // Confirmed and counted, but a header it needs from outside its payload had not counted, so it landed
+            // nothing: not broadcast again, the rescuer sends its payload again once those headers have counted (D-135)
+            if snapshot.ksn1_height(&record.txid).is_some() {
                 continue;
             }
             if tip_height < record.height.saturating_add(self.params.settlement_depth) {
@@ -2916,14 +2870,12 @@ impl Chain {
                     .into(),
             ));
         };
-        let mut highest = match snapshot
-            .block_data_height(&block.header.hash(), settlement::needs_body(&block.entries))
-        {
+        let mut highest = match snapshot.block_data_height(&block.header.hash()) {
             Some(h) => h,
             None => return Ok(None),
         };
         for header in &headers {
-            match snapshot.header_seen(&header.hash()) {
+            match snapshot.counted_at(&header.hash()) {
                 Some(h) => highest = highest.max(h),
                 None => return Ok(None),
             }
@@ -2985,10 +2937,7 @@ impl Chain {
                 let Ok(decoded) = Payload::decode(&payload, &self.params) else {
                     continue;
                 };
-                if ksana_btc::payload::bodies_in(&decoded)
-                    .iter()
-                    .any(|(h, _)| h == hash)
-                {
+                if bodies_in(&decoded).iter().any(|(h, _)| h == hash) {
                     return Ok(Some(block));
                 }
             }
@@ -3289,15 +3238,19 @@ impl Chain {
             .collect()
     }
 
-    /// Data the new block's settlement payload is to carry (producer's policy, D-063, D-075, D-077): starting from the
-    /// parents, examine the blocks in the past by blue work from highest to lowest, skipping blocks that carry
-    /// settlement transactions (their own settlement carries their data, and their past is not searched further), and
-    /// collect the blocks whose header has not appeared on BTC yet, plus the bodies (together with the headers) of
-    /// blocks that need a body whose body has not landed yet, at most `MAX_SETTLEMENT_HEADERS − 1` of them, ordered by
-    /// blue work from lowest to highest. When the compact encoding of the headers exceeds 1 / [`PAYLOAD_HEADER_SHARE`]
-    /// of `MAX_BLOCK_DATA_BYTES`, or the bodies exceed 1 / [`PAYLOAD_BODY_SHARE`], the earliest are dropped (they are
-    /// landed by republishing). Bodies are carried only for blocks in the future of the new block's merge-depth root
-    /// (or the root itself, D-097, see [`Chain::check_carried_bodies`]); `parents[0]` is the selected parent.
+    /// Data the new block's settlement payload is to carry (producer's policy, D-063, D-075, D-077, D-135): starting from
+    /// the parents, examine the blocks in the past by blue work from highest to lowest and collect the blocks whose
+    /// header has not counted on BTC yet, plus the bodies (together with the headers) of blocks that need a body whose
+    /// body has not landed yet, at most `MAX_SETTLEMENT_HEADERS − 1` of them, ordered by blue work from lowest to
+    /// highest. A block that carries settlement transactions stops the search when its header has counted, or while its
+    /// settlement may still confirm (its anchor at most [`IN_FLIGHT_BTC_BLOCKS`] behind the BTC tip): its own settlement
+    /// carries its data and that of its past not yet landed. Otherwise its settlement has not confirmed in time, or
+    /// confirmed while a header it needs had not counted: its header is carried, not its body, and its past is searched
+    /// for headers only, since a header counts only once its parents have (D-135). When the compact encoding of the
+    /// headers exceeds 1 / [`PAYLOAD_HEADER_SHARE`] of `MAX_BLOCK_DATA_BYTES`, or the bodies exceed 1 /
+    /// [`PAYLOAD_BODY_SHARE`], the earliest are dropped (they are landed by republishing). Bodies are carried only for
+    /// blocks in the future of the new block's merge-depth root (or the root itself, D-097, see
+    /// [`Chain::check_carried_bodies`]); `parents[0]` is the selected parent.
     pub fn payload_carry(
         &self,
         parents: &[Hash],
@@ -3316,10 +3269,14 @@ impl Chain {
         };
         let mut heap = BinaryHeap::new();
         let mut seen = BTreeSet::new();
+        // The blocks reached other than only through a settlement that did not confirm in time: their bodies are
+        // carried too. A block's children have more blue work, so all of them are examined before it is
+        let mut full = BTreeSet::new();
         for parent in parents {
             if seen.insert(*parent) {
                 heap.push(dag.sort_key(parent).map_err(dag_err)?);
             }
+            full.insert(*parent);
         }
         let mut found = Vec::new();
         let mut in_flight = false;
@@ -3334,38 +3291,55 @@ impl Chain {
             let block = dag
                 .get(&hash)
                 .ok_or_else(|| NodeError::Internal("block missing from the DAG".into()))?;
+            let counted = snapshot.counted_at(&hash).is_some();
+            let mut bodies = full.contains(&hash);
             if block.payload.carries {
-                // Its settlement payload carried the data of it and of its past not yet landed; its own header not
-                // having landed means that settlement transaction is still in flight
+                if counted {
+                    continue;
+                }
+                // Its own header not having counted means that settlement transaction is still in flight, or did not
+                // confirm in time, or confirmed before a header it needs counted
                 let recent = btc_tip.saturating_sub(block.payload.header.btc_anchor.height)
                     <= IN_FLIGHT_BTC_BLOCKS;
-                in_flight |= recent && snapshot.header_seen(&hash).is_none();
-                continue;
-            }
-            let body_needed = block.payload.settles && snapshot.settlement_of(&hash).is_none();
-            if body_needed || snapshot.header_seen(&hash).is_none() {
-                let carried = match &root {
-                    Some(root) => {
-                        body_needed && dag.in_closed_past(root, &hash).map_err(dag_err)?
-                    }
-                    None => body_needed,
-                };
-                let body = if carried {
-                    let stored = self.store.block(&hash)?.ok_or_else(|| {
-                        NodeError::Storage(
-                            "block in the DAG is missing from the block store".into(),
-                        )
-                    })?;
-                    Some(stored.entries)
-                } else {
-                    None
-                };
-                found.push((work, block.payload.header.clone(), body));
+                if recent {
+                    in_flight = true;
+                    continue;
+                }
+                found.push((work, block.payload.header.clone(), None));
+                bodies = false;
+            } else {
+                let body_needed =
+                    bodies && block.payload.settles && snapshot.settlement_of(&hash).is_none();
+                if body_needed || !counted {
+                    let carried = match &root {
+                        Some(root) => {
+                            body_needed && dag.in_closed_past(root, &hash).map_err(dag_err)?
+                        }
+                        None => body_needed,
+                    };
+                    let body = if carried {
+                        let stored = self.store.block(&hash)?.ok_or_else(|| {
+                            NodeError::Storage(
+                                "block in the DAG is missing from the block store".into(),
+                            )
+                        })?;
+                        Some(stored.entries)
+                    } else {
+                        None
+                    };
+                    found.push((work, block.payload.header.clone(), body));
+                }
             }
             for parent in &block.parents {
                 // A parent pruned from memory (D-097) landed long ago
-                if dag.contains(parent) && seen.insert(*parent) {
+                if !dag.contains(parent) {
+                    continue;
+                }
+                if seen.insert(*parent) {
                     heap.push(dag.sort_key(parent).map_err(dag_err)?);
+                }
+                if bodies {
+                    full.insert(*parent);
                 }
             }
         }
@@ -3426,15 +3400,11 @@ impl Chain {
                 }
             }
         }
-        // The block the finality decision was waiting for has arrived: resolve its payloads first (data landing
-        // height), advance the decision immediately and make the main chain pass through it (D-082); the main-chain
-        // changes are recorded in this report
+        // The block the finality decision was waiting for has arrived: advance the decision immediately and make the
+        // main chain pass through it (D-082); the main-chain changes are recorded in this report
         let wanted = *self.wanted.lock().map_err(poisoned)?;
         if let Some(wanted) = wanted {
-            if self.contains(&wanted)? && {
-                self.btc.resolve_all(self)?;
-                self.evaluate_finality()?.advanced
-            } {
+            if self.contains(&wanted)? && self.evaluate_finality()?.advanced {
                 if let Err(e) = self.follow_finality(&mut report) {
                     // Local fault midway through the switch: the main chain may already have changed; the report goes
                     // to the entry pool maintenance
@@ -3801,7 +3771,6 @@ impl Chain {
             Err(e) => return Err(e),
         };
         // Acceptance rules that depend on the local time and the BTC view
-        self.btc.resolve_all(self)?;
         let snapshot = self.btc.snapshot()?;
         if let Err(e) = self.check_anchor(&snapshot, parent_anchor.height, header, now) {
             return Err(self.refused(now, &snapshot, (hash, None), e)?);
@@ -3845,14 +3814,9 @@ impl Chain {
                 ));
             }
         }
-        // Now that this block is here, the candidate bodies collected for it from BTC payloads are no longer needed
-        // (D-093); whether forced inclusion was checked on its anchor chain is remembered for its verdict (D-101)
-        {
-            let mut state = self.finality.lock().map_err(poisoned)?;
-            state.bodies.forget(&hash);
-            if normal {
-                state.normal.insert(hash);
-            }
+        // Whether forced inclusion was checked on its anchor chain is remembered for its verdict (D-101)
+        if normal {
+            self.finality.lock().map_err(poisoned)?.normal.insert(hash);
         }
         let disconnected_before = report.disconnected.len();
         self.update_virtual(report)?;
@@ -4567,9 +4531,6 @@ impl Chain {
                     .ok_or_else(|| NodeError::Storage("merged block missing".into()))?,
             );
         }
-        // The ancestors' settlements may have confirmed on BTC before this node knew them (late join, catching up):
-        // count them first
-        self.btc.resolve_all(self)?;
         let (tip, view) = self.tip_and_view()?;
         if block.header.selected_parent() != Some(&tip.hash) {
             return Err(NodeError::Internal(
@@ -5012,121 +4973,59 @@ impl Chain {
 }
 
 impl KnownBlocks for Chain {
-    /// A block this node lacks (not received yet, or refused as invalid) is answered from its body determined from the
-    /// data on BTC, as the indexer answers, so that the finality decision sees the landing of its data the same way
-    /// (D-101); `Unknown` while that body cannot be determined.
-    fn block_data(&self, block_hash: &[u8; 32]) -> Result<BlockData, TrackerError> {
-        let known = |e: NodeError| TrackerError::Known(e.to_string());
-        let Some(block) = self.store.block(block_hash).map_err(known)? else {
-            let snapshot = self.btc.snapshot()?;
-            let mut state = self
-                .finality
-                .lock()
-                .map_err(|_| TrackerError::Internal("finality state lock poisoned".into()))?;
-            let FinalityState {
-                headers, bodies, ..
-            } = &mut *state;
-            let Some(body) = bodies
-                .body(headers, block_hash, &snapshot)
-                .map_err(TrackerError::Internal)?
-            else {
-                return Ok(BlockData::Unknown);
-            };
-            if !settlement::needs_body(&body) {
-                return Ok(BlockData::NoBody);
-            }
-            let Some(header) = headers.header(block_hash).cloned() else {
-                return Ok(BlockData::Unknown);
-            };
-            return Ok(BlockData::Body(Box::new(SettlementContext {
-                entries: entry_data(&body),
-                header,
-            })));
-        };
-        if !settlement::needs_body(&block.entries) {
-            return Ok(BlockData::NoBody);
-        }
-        Ok(BlockData::Body(Box::new(SettlementContext {
-            entries: entry_data(&block.entries),
-            header: block.header,
-        })))
-    }
-
-    /// Adds the headers in a BTC payload to the header DAG used by the finality decision (D-082), with the same rules
-    /// as the indexer; the bodies carried by the payload for blocks this node does not have yet become candidate bodies
-    /// (for rebuilding missing blocks from the data on BTC, D-093).
-    fn observe_payload(
-        &self,
-        snapshot: &BtcSnapshot,
-        _btc_height: u32,
-        _tx: &bitcoin::Transaction,
-        payload: &Payload,
-    ) -> Result<(), TrackerError> {
-        let headers = match payload {
-            Payload::Settlement { headers, .. } | Payload::Headers { headers, .. } => headers,
-            Payload::NativeOp { .. } => return Ok(()),
-        };
+    /// Adds a header that may count on BTC to the header DAG of the finality decision (D-082, D-135), with the same
+    /// rules as the indexer: it counts when the DAG takes it, or holds it already.
+    fn count(&self, snapshot: &BtcSnapshot, header: &BlockHeader) -> Result<bool, TrackerError> {
         let internal = |m: &str| TrackerError::Internal(m.into());
         let max_known = self.params.max_known_version();
-        // No candidate bodies are collected for blocks this node already has (look at the DAG before taking the
-        // finality state lock: never wait for the former while holding the latter)
-        let have: BTreeSet<Hash> = {
-            let dag = self
-                .dag()
-                .map_err(|_| internal("block DAG lock poisoned"))?;
-            bodies_in(payload)
-                .into_iter()
-                .map(|(hash, _)| hash)
-                .filter(|hash| dag.contains(hash))
-                .collect()
-        };
+        if header.version > max_known {
+            // An upgrade this node does not recognize (D-076): the header cannot be judged and does not count here;
+            // warn once, as when accepting blocks
+            if self
+                .warn_unknown_version(header.version)
+                .map_err(|_| internal("version warning lock poisoned"))?
+            {
+                eprintln!(
+                    "[ksana-node] alert (highest level): a BTC payload has a block header of protocol version {}, this node \
+                     only supports up to {max_known}: the network may have upgraded, the node software needs upgrading (D-076)",
+                    header.version
+                );
+            }
+            return Ok(false);
+        }
         let mut state = self
             .finality
             .lock()
             .map_err(|_| internal("finality state lock poisoned"))?;
-        for header in headers {
-            if header.version > max_known {
-                // An upgrade this node does not recognize (D-076): the header cannot be judged; warn once, as when
-                // accepting blocks
-                if self
-                    .warn_unknown_version(header.version)
-                    .map_err(|_| internal("version warning lock poisoned"))?
-                {
-                    eprintln!(
-                        "[ksana-node] alert (highest level): a BTC payload has a block header of protocol version {}, this node \
-                         only supports up to {max_known}: the network may have upgraded, the node software needs upgrading (D-076)",
-                        header.version
-                    );
-                }
-                continue;
-            }
-            // The timestamp bound takes the time of the block at the anchor height on the BTC chain being scanned (D-083,
-            // the same as `Chain::anchor_time`), and the main chain of the header DAG is chosen under it (D-104)
-            match state.headers.insert(&self.consensus, header.clone(), snapshot) {
-                HeaderInsert::Invalid(reason) => eprintln!(
-                    "[ksana-node] block header {} (height {}) in a BTC payload is invalid and takes no part in the finality decision: {reason}",
+        // The timestamp bound takes the time of the block at the anchor height on the BTC chain being scanned (D-083,
+        // the same as `Chain::anchor_time`), and the main chain of the header DAG is chosen under it (D-104)
+        match state
+            .headers
+            .insert(&self.consensus, header.clone(), snapshot)
+        {
+            HeaderInsert::Connected(_) | HeaderInsert::Duplicate => Ok(true),
+            HeaderInsert::Invalid(reason) => {
+                eprintln!(
+                    "[ksana-node] block header {} (height {}) in a BTC payload is invalid and does not count: {reason}",
                     hex::encode(header.hash()),
                     header.height
-                ),
-                // Local fault (e.g. the PoW value cannot be computed, D-094): this round of BTC sync fails with an
-                // alert; the header is not treated as invalid
-                HeaderInsert::Unavailable(reason) => {
-                    eprintln!(
-                        "[ksana-node] alert (highest level): cannot check block header {} (height {}) in a BTC payload: {reason}",
-                        hex::encode(header.hash()),
-                        header.height
-                    );
-                    return Err(internal(&format!("cannot check block header: {reason}")));
-                }
-                // Below the pruning point (D-097): it can no longer take part in the finality decision
-                HeaderInsert::Duplicate
-                | HeaderInsert::Pending
-                | HeaderInsert::Connected(_)
-                | HeaderInsert::Pruned => {}
+                );
+                Ok(false)
             }
+            // Local fault (e.g. the PoW value cannot be computed, D-094): this round of BTC sync fails with an alert;
+            // the header is not treated as invalid
+            HeaderInsert::Unavailable(reason) => {
+                eprintln!(
+                    "[ksana-node] alert (highest level): cannot check block header {} (height {}) in a BTC payload: {reason}",
+                    hex::encode(header.hash()),
+                    header.height
+                );
+                Err(internal(&format!("cannot check block header: {reason}")))
+            }
+            // Below the pruning point, or on a block pruned away (D-097): it can no longer take part in the finality
+            // decision
+            HeaderInsert::Pruned | HeaderInsert::MissingParent => Ok(false),
         }
-        state.bodies.observe(payload, &|hash| !have.contains(hash));
-        Ok(())
     }
 }
 
@@ -5275,8 +5174,8 @@ fn write_checkpoint(data_dir: &Path, checkpoint: &Checkpoint) -> Result<usize, N
 }
 
 /// Restores the block DAG and the BTC side from a pruning checkpoint (D-097): the checkpoint's DAG plus the blocks the
-/// block store inserted after it was written, the header DAG, the finality decision, the candidate bodies and the BTC
-/// snapshot. `Err` when it is inconsistent (the caller rebuilds from the whole history instead).
+/// block store inserted after it was written, the header DAG, the finality decision and the BTC snapshot. `Err` when it
+/// is inconsistent (the caller rebuilds from the whole history instead).
 fn restore(
     store: &ChainStore,
     params: &Params,
@@ -5284,6 +5183,7 @@ fn restore(
     checkpoint: Checkpoint,
 ) -> Result<(Dag, Restored), String> {
     let Checkpoint {
+        genesis,
         dag,
         dag_seq,
         root,
@@ -5292,7 +5192,6 @@ fn restore(
         snapshot,
         headers,
         finality,
-        bodies,
         ..
     } = checkpoint;
     let mut dag =
@@ -5304,7 +5203,7 @@ fn restore(
     let finality = FinalityState::new(
         HeaderDag::from_record(params, headers)?,
         finality,
-        Bodies::from_record(params.clone(), "[ksana-node]", bodies),
+        Bodies::new(params.clone(), genesis),
     );
     Ok((
         dag,

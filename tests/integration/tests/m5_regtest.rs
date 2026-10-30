@@ -496,9 +496,10 @@ fn indexer_rebuilds_the_state_roots_of_all_settled_heights() {
 /// settled block, so the later block carrying a settlement transaction has no room for the earlier headers; while the
 /// republish transaction the node sends for them is held back in the mempool (mining priority lowered), the indexer
 /// stops before the empty blocks (its main-chain tip is the block before the empty blocks, up to the block with
-/// `SETTLEMENT_DEPTH` confirmations, D-063), even though the later blocks' settlements have landed on BTC; once the
-/// republish transaction lands, the indexer passes the empty blocks and continues, with the `state_root` at every
-/// height agreeing with the node (§7.1, D-047).
+/// `SETTLEMENT_DEPTH` confirmations, D-063), even though the later block's settlement has confirmed on BTC: its headers
+/// do not count before the earlier ones have, so it lands nothing (D-135); once the republish transaction lands, the
+/// node sends that settlement's payload again, and the indexer passes the empty blocks and continues, with the
+/// `state_root` at every height agreeing with the node (§7.1, D-047).
 ///
 /// Since block rewards (D-074), every time a settlement lands and the block enters the settled closure, the next block
 /// writes an unlock entry (and thus carries a settlement transaction). So here the unlock block's settlement is first
@@ -571,7 +572,8 @@ fn indexer_continues_after_the_missing_headers_are_republished() {
     let covered = headers.last().unwrap().height;
 
     // The next unlock block after the empty blocks carries a settlement transaction (with only the most recent
-    // headers); it landed on BTC, but the earlier headers still have not
+    // headers); it confirms on BTC, but the earlier headers still have not counted, so its own do not either and it
+    // lands nothing (D-135)
     let after = wait("the next unlock block", Duration::from_secs(60), || {
         (gap_end + 1..=fast.tip_height()).find(|h| unlocks(*h))
     });
@@ -583,15 +585,25 @@ fn indexer_continues_after_the_missing_headers_are_republished() {
         after - (DEVNET.max_settlement_headers as u64 - 1) <= covered + 1,
         "no gap between the republish transaction and the settlement transaction"
     );
-    let s = wait(
-        "the settlement transaction to land on BTC",
+    let attached = fast
+        .settlement(after)
+        .txid
+        .expect("the block carries settlement transactions");
+    wait(
+        "the settlement transaction to confirm on BTC",
         Duration::from_secs(120),
         || {
             mine(&btc, 1);
             std::thread::sleep(Duration::from_millis(300));
-            let s = fast.settlement(after);
-            (s.status == SettlementState::Confirmed).then_some(s)
+            let snapshot = fast.node().chain().btc().snapshot().ok()?;
+            snapshot.ksn1_height(&attached).map(|_| ())
         },
+    );
+    let s = fast.settlement(after);
+    assert_eq!(
+        s.status,
+        SettlementState::Broadcast,
+        "the earlier headers have not counted; the settlement landed nothing"
     );
     assert!(
         !s.settled,
@@ -620,8 +632,9 @@ fn indexer_continues_after_the_missing_headers_are_republished() {
     );
     assert_eq!(stalled.hash, fast.block(confirmed).hash);
 
-    // Once the republish transaction lands, the indexer passes the empty blocks and continues, with the state_root
-    // agreeing with the node; the node's settled prefix resumes advancing as well
+    // Once the republish transaction lands, the node sends the waiting settlement's payload again and it lands; the
+    // indexer passes the empty blocks and continues, with the state_root agreeing with the node; the node's settled
+    // prefix resumes advancing as well
     btc.call(
         "prioritisetransaction",
         &[
