@@ -5039,3 +5039,16 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   and is judged against devnet's limit (`gen_pow_vectors`, the case's note in `tests/vectors/pow.json`); `ksana-node` (`Chain::open_with`: the genesis block built before the genesis state
   is written, `m18_rebuild`); the rehearsal (`signet/rehearse.sh`, `rehearsal.yml`, `signet/README.md`); SPEC (the preamble and its version history, §6.6, §13, §13.1, §16, §17.5); SIGNET;
   the site's pages on the parameters, the signet and mining; ksana-web's submodule.
+
+## D-137 An orphan received as new is held to the timestamp reception rule once its parents arrive (a code scan's finding, 2026-11-07; revises SPEC §6.3, §6.8; local policy, no consensus change, M52)
+
+- **Problem**: a block received as new (`now` given) whose parents the node lacks goes into the orphan pool, and once they arrive `Chain::accept_block` processed it with `now` as `None`,
+  as a historical block, which skips the timestamp reception rule (SPEC §6.3). That rule is the only lower bound on a timestamp: the consensus rule of D-083 bounds it only from above. A
+  producer of two blocks in a row could send the second before the first with a timestamp far in the past (or up to `MAX_TIMESTAMP_AHEAD_OF_ANCHOR` ahead of its anchor), and the node took
+  it on top of its main chain. The contracts reading `block_timestamp` then saw that time, and with an early enough timestamp ASERT gave its children a target of 1, so the nodes that took it
+  could produce no further block. `tests/timestamp_attack.rs` assumes backdating is bounded by the median rule.
+- **Decision**: the orphan pool remembers whether any copy of an orphan arrived as new. When its parents arrive, such an orphan is checked by the timestamp reception rule against the local
+  time then (the `now` of the call that brought the parent, or the clock when the parent came by sync); a failure refuses it for now, as for a new block. Every other rule still treats it as a
+  historical block (anchor-invalid mode, SPEC §6.8), as before. An orphan that came only by sync is processed as before.
+- **Rationale**: the block reached the node as a new block, and only the order of arrival made it historical. The median does not depend on the time of the check, and the local time only
+  grows, so checking later refuses no block the rule would have taken on arrival with its parents present. The anchor rules are left in anchor-invalid mode because an honest orphan's anchor
