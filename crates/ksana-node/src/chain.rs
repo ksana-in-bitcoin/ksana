@@ -6,8 +6,9 @@
 //!   parents'), the acceptance rules that depend on the local view (anchor, timestamp) and the body (entries root,
 //!   body size, settlement transactions, forced inclusion, then the state-independent entry rules with their
 //!   signatures); once passed, the block is stored and inserted into the DAG; a block with unknown parents goes into
-//!   the orphan pool and is processed once they arrive. A block delivered while syncing and refused for a reason that
-//!   is not objective is answered from memory while the BTC tip stays the same, for a while (local policy, M27).
+//!   the orphan pool and is processed once they arrive (as a historical block, though one that arrived as new is still
+//!   held to the timestamp rule). A block delivered while syncing and refused for a reason that is not objective is
+//!   answered from memory while the BTC tip stays the same, for a while (local policy, M27).
 //! - Main chain (virtual selected chain): the selected chain of the block with the largest fork-choice key
 //!   `(chain_work, hash)` (blue work plus the block's own work, D-100) in the DAG that is eligible for the main chain. Main-chain blocks are executed as merges per [`ksana_execution`] (first
 //!   the entries of the blocks it merges in lenient mode, then its own entries in strict mode) and the `state_root` is
@@ -551,8 +552,9 @@ fn copy_digest(block: &Block) -> Result<Hash, NodeError> {
 /// when that refusal is remembered (D-104 item j, [`Chain::remember`]).
 #[derive(Default)]
 struct Orphans {
-    /// Orphan → the block and its [`orphan_size`].
-    blocks: BTreeMap<Hash, (Block, usize)>,
+    /// Orphan → the block, its [`orphan_size`] and whether a copy arrived as a new block (so the timestamp reception
+    /// rule is checked once its parents are present, [`Chain::accept_block`]).
+    blocks: BTreeMap<Hash, (Block, usize, bool)>,
     /// Missing parent → the orphans waiting for it.
     waiting: BTreeMap<Hash, BTreeSet<Hash>>,
     order: VecDeque<Hash>,
@@ -595,10 +597,12 @@ fn check_parent_list(params: &Params, parents: &[Hash]) -> Result<(), NodeError>
 
 impl Orphans {
     /// Keeps a copy of `block`, first dropping the earliest orphans until it fits within both limits. Returns `false`,
-    /// keeping nothing, when the block alone exceeds [`MAX_ORPHAN_BYTES`].
-    fn insert(&mut self, block: &Block, missing: &[Hash]) -> bool {
+    /// keeping nothing, when the block alone exceeds [`MAX_ORPHAN_BYTES`]. `received` marks a copy that arrived as a
+    /// new block; it stays marked whatever copies arrive later.
+    fn insert(&mut self, block: &Block, missing: &[Hash], received: bool) -> bool {
         let hash = block.header.hash();
-        if self.blocks.contains_key(&hash) {
+        if let Some((_, _, kept)) = self.blocks.get_mut(&hash) {
+            *kept |= received;
             return true;
         }
         let size = orphan_size(block);
@@ -615,14 +619,14 @@ impl Orphans {
         for parent in missing {
             self.waiting.entry(*parent).or_default().insert(hash);
         }
-        self.blocks.insert(hash, (block.clone(), size));
+        self.blocks.insert(hash, (block.clone(), size, received));
         self.order.push_back(hash);
         self.bytes = self.bytes.saturating_add(size);
         true
     }
 
-    fn remove(&mut self, hash: &Hash) -> Option<Block> {
-        let (block, size) = self.blocks.remove(hash)?;
+    fn remove(&mut self, hash: &Hash) -> Option<(Block, bool)> {
+        let (block, size, received) = self.blocks.remove(hash)?;
         self.bytes = self.bytes.saturating_sub(size);
         for parent in &block.header.parents {
             if let Some(set) = self.waiting.get_mut(parent) {
@@ -633,11 +637,12 @@ impl Orphans {
             }
         }
         self.order.retain(|h| h != hash);
-        Some(block)
+        Some((block, received))
     }
 
-    /// Takes the orphans waiting for `parent` (they may still lack other parents, in which case they are put back).
-    fn take_waiting_on(&mut self, parent: &Hash) -> Vec<Block> {
+    /// Takes the orphans waiting for `parent`, each with whether it arrived as a new block (they may still lack other
+    /// parents, in which case they are put back).
+    fn take_waiting_on(&mut self, parent: &Hash) -> Vec<(Block, bool)> {
         let hashes = self.waiting.remove(parent).unwrap_or_default();
         hashes.iter().filter_map(|h| self.remove(h)).collect()
     }
@@ -647,7 +652,7 @@ impl Orphans {
         let mut dropped = 0usize;
         let mut queue = vec![*parent];
         while let Some(parent) = queue.pop() {
-            for block in self.take_waiting_on(&parent) {
+            for (block, _) in self.take_waiting_on(&parent) {
                 dropped = dropped.saturating_add(1);
                 queue.push(block.header.hash());
             }
@@ -3353,7 +3358,10 @@ impl Chain {
 
     /// Accepts a block (D-041, D-063): `now` as the local time means a newly received block (checked by the acceptance
     /// rules), `None` means syncing a historical block. Returns the outcome for that block, and the blocks the main
-    /// chain accepted and disconnected (including the orphans with it as parent processed afterwards). Returns
+    /// chain accepted and disconnected (including the orphans with it as parent processed afterwards). The orphans are
+    /// processed as historical blocks (anchor-invalid mode, SPEC §6.3), except that one that arrived as a new block is
+    /// still held to the timestamp reception rule, against the local time now: otherwise a block sent before its
+    /// parent would skip it, and with it the only lower bound on a timestamp. Returns
     /// `NodeError::InvalidBlock` when the block is invalid (objectively invalid ones are remembered); a local fault
     /// (storage, bitcoind) returns another error and does not judge the block invalid. The block may be passed by value
     /// or by reference (the caller need not copy it to retry, M26).
@@ -3369,7 +3377,7 @@ impl Chain {
             connected: Vec::new(),
             disconnected: Vec::new(),
         };
-        report.outcome = self.accept_one(block, now, &mut report)?;
+        report.outcome = self.accept_one(block, now, now, &mut report)?;
         if matches!(report.outcome, Accepted::Orphan | Accepted::Duplicate) {
             return Ok(report);
         }
@@ -3380,9 +3388,10 @@ impl Chain {
                 .lock()
                 .map_err(poisoned)?
                 .take_waiting_on(&parent);
-            for child in children {
+            for (child, received) in children {
                 let hash = child.header.hash();
-                match self.accept_one(&child, None, &mut report) {
+                let clock = received.then(|| now.unwrap_or_else(crate::unix_now));
+                match self.accept_one(&child, None, clock, &mut report) {
                     Ok(Accepted::Orphan | Accepted::Duplicate) => {}
                     Ok(_) => queue.push(hash),
                     Err(NodeError::InvalidBlock(m)) => {
@@ -3637,11 +3646,13 @@ impl Chain {
         Ok(seen.insert(version))
     }
 
-    /// Processes one block (the caller holds the `process` lock).
+    /// Processes one block (the caller holds the `process` lock). `now` is as for [`Chain::accept_block`]; `clock` is
+    /// the local time the timestamp reception rule is checked against, `None` for a block not received as new.
     fn accept_one(
         &self,
         block: &Block,
         now: Option<u64>,
+        clock: Option<u64>,
         report: &mut AcceptReport,
     ) -> Result<Accepted, NodeError> {
         let header = &block.header;
@@ -3745,7 +3756,7 @@ impl Chain {
                 .orphans
                 .lock()
                 .map_err(poisoned)?
-                .insert(block, &missing)
+                .insert(block, &missing, clock.is_some())
             {
                 return Err(NodeError::Rejected(format!(
                     "orphan of about {} bytes in memory exceeds the orphan pool's budget of {MAX_ORPHAN_BYTES} bytes",
@@ -3783,8 +3794,8 @@ impl Chain {
                 return Err(NodeError::InvalidBlock(e.to_string()));
             }
         }
-        if let Some(now) = now {
-            ksana_consensus::check_timestamp(&self.params, header, &recent, now)
+        if let Some(clock) = clock {
+            ksana_consensus::check_timestamp(&self.params, header, &recent, clock)
                 .map_err(|e| NodeError::Rejected(e.to_string()))?;
         }
         let normal = self.check_body(block, &snapshot, &parent_anchor, data.daa_score, now)?;

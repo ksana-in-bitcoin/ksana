@@ -6,6 +6,9 @@
 //!   parent, PoW not meeting its own `bits`, `bits` above the PoW limit, entries not matching `entries_root`, a body
 //!   too large for a payload) is rejected without being kept; the pool is capped by the memory its blocks take as well
 //!   as by their count; a legitimate orphan still connects once its parents arrive.
+//! - An orphan that arrived as a new block is held to the timestamp reception rule (SPEC §6.3) once its parents
+//!   arrive: a timestamp not after the median of the previous blocks, or too far ahead of local time, does not get in
+//!   by sending the block before its parent.
 //! - A block whose body does not fit in a payload carrying only its header and body is invalid (D-100, M27).
 //! - The bodies a settlement payload carries (D-077) must belong to blocks in the carrying block's past: checking a
 //!   body deep in the past costs about the same as checking a recent one, and the outcome of the check is unchanged
@@ -430,6 +433,67 @@ fn a_legitimate_orphan_still_connects() {
     assert_eq!(v.tip().unwrap().hash, last.header.hash());
     assert_eq!(v.orphan_count().unwrap(), 0);
     assert!(v.missing_parents().unwrap().is_empty());
+}
+
+/// `block` with another timestamp, its PoW solved again (its `bits` depend on its selected parent only).
+fn retimed(chain: &Chain, block: &Block, timestamp: u64) -> Block {
+    let mut block = block.clone();
+    block.header.timestamp = timestamp;
+    block.header.nonce = 0;
+    let streak = chain
+        .streak_of(&block.header.parents[0])
+        .unwrap()
+        .expect("the selected parent is in the DAG");
+    let weight = chain.consensus().weight(&block.header, streak);
+    assert!(chain
+        .consensus()
+        .solve(&mut block.header, weight, 0, 1 << 20)
+        .unwrap());
+    block
+}
+
+/// A block that arrives as new before its parent is checked by the timestamp reception rule once the parent arrives,
+/// against the local time then, whether the parent arrives as new or while syncing: a backdated or future-dated block
+/// is not taken, a block on time still connects.
+#[test]
+fn an_orphan_received_as_new_is_held_to_the_timestamp_rule() {
+    let (mock, genesis) = setup(&[]);
+    let a = sha_side(&mock, &genesis, "adversarial-orphan-time");
+    let parent = a.mine();
+    let child = a.mine();
+    assert_eq!(child.header.parents[0], parent.header.hash());
+    let t = parent.header.timestamp;
+    // Not after the median of the previous blocks (genesis and the parent: the parent's timestamp)
+    let backdated = retimed(&a.chain, &child, t);
+    // More than MAX_FUTURE_BLOCK_TIME (15 seconds) ahead of the local time `t`
+    let ahead = retimed(&a.chain, &child, t + 100);
+    let on_time = retimed(&a.chain, &child, t + 10);
+    let cases: [(&str, &Block, Option<u64>, bool); 5] = [
+        ("backdated, parent as new", &backdated, Some(t), false),
+        ("backdated, parent synced", &backdated, None, false),
+        ("ahead, parent as new", &ahead, Some(t), false),
+        ("on time, parent as new", &on_time, Some(t), true),
+        ("on time, parent synced", &on_time, None, true),
+    ];
+    for (name, block, parent_now, taken) in cases {
+        let (v, _dir) = sha_chain(&mock, &genesis);
+        let hash = block.header.hash();
+        let report = v.accept_block(block, Some(t)).unwrap();
+        assert_eq!(report.outcome, Accepted::Orphan, "{name}");
+        let report = v.accept_block(&parent, parent_now).unwrap();
+        assert!(
+            matches!(report.outcome, Accepted::Extended(_)),
+            "{name}: {:?}",
+            report.outcome
+        );
+        assert_eq!(v.contains(&hash).unwrap(), taken, "{name}");
+        assert_eq!(
+            report.connected.iter().any(|b| b.header.hash() == hash),
+            taken,
+            "{name}"
+        );
+        assert_eq!(v.orphan_count().unwrap(), 0, "{name}");
+    }
 }
 
 /// With all its parents present, a block's PoW is checked against its own `bits` before GHOSTDAG (second audit, P1-1):
