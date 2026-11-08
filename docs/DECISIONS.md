@@ -5052,3 +5052,30 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   historical block (anchor-invalid mode, SPEC §6.8), as before. An orphan that came only by sync is processed as before.
 - **Rationale**: the block reached the node as a new block, and only the order of arrival made it historical. The median does not depend on the time of the check, and the local time only
   grows, so checking later refuses no block the rule would have taken on arrival with its parents present. The anchor rules are left in anchor-invalid mode because an honest orphan's anchor
+
+## D-138 Bodies beyond the payload budget keep their headers, and one republish carries the bodies several carriers left (a load test of the public signet, 2026-11-08; revises D-077 item 6, D-047, D-135 item 7 and SPEC §7.5, §7.6; local policy, no consensus change, M53)
+
+- **Problem**: a two-hour load test joined 15 more producers, none of them funded, to the public signet. Only the two seed nodes could carry settlement transactions, so the bodies waiting for
+  the next funded block grew past the payload's body budget (a quarter of `MAX_BLOCK_DATA_BYTES`, 20 480 bytes), and `trim_carry` dropped the earliest items, header and body together. Since
+  D-135 a header counts only once its parents have, so the dropped header kept every later header of the payload from counting: the payload confirmed and landed nothing. Decoding the 31
+  payloads that confirmed together in one signet block (329925) showed a gap before each of them (for one: 18 798 bytes of bodies carried, 2 562 bytes dropped with the header of the block
+  before). Each gap then cost a republish after the carrier counted and a rescue after the republish counted, one gap per BTC block, while about 30 gaps came per BTC block; the earliest block
+  whose data had not landed fell `SETTLEMENT_TIMEOUT` behind and the backlog limit (D-046) paused the fast lane on every node. Republishing one run at a time (D-047) could never catch up.
+- **Decision**:
+  1. **Producer** (`trim_carry`, SPEC §7.5): headers are dropped only for the header budget; when the bodies exceed theirs, the earliest bodies are dropped and their headers kept, so the
+     payload stays closed (D-135) and the rest of it lands when it confirms. `own_payload`, when the whole payload exceeds the limit with this block's entries, drops the carried bodies before
+     the carried headers.
+  2. **Republishing** (`rescue.rs`, SPEC §7.6): when the first later carrier c whose past holds f has counted, the range extends up to the last of the following carriers whose settlements
+     have counted, stopping at the first that has not. In that range the payload skips the blocks whose data has landed and the carriers whose headers have counted (the rescue's), and holds
+     the header of every other block and the body of each that carries no settlement transactions and needs one. The blocks skipped have counted, so the payload stays closed; it is still
+     bounded by `MAX_SETTLEMENT_HEADERS` and `MAX_BLOCK_DATA_BYTES`.
+- **Rationale**: a body is worth nothing to the headers after it, a header is: with the header kept the payload lands everything but the dropped bodies, the gap costs one republish rather than
+  a republish and a rescue, and the republish carries bodies only, a few kilobytes each. Gathering every gap behind counted carriers into one payload lets one republish per BTC block keep up
+  with a carrier per few seconds.
+- **Costs and limitations**: the header budget still drops the earliest headers, as before (more than half of the payload limit in headers, a few hundred blocks). One republish carries at
+  most `MAX_BLOCK_DATA_BYTES` of bodies per BTC block, and the next goes out once it confirms. Running many unfunded producers still moves the cost of landing their bodies onto the funded ones
+  (D-095); the load test is the reason to fund producers, not something this fixes. The public signet's backlog left by the test is not cleared by this change alone.
+- **Impact**: `crates/ksana-node` (`chain.rs`: `trim_carry`, `PAYLOAD_BODY_SHARE` public; `producer.rs`: `own_payload`; `rescue.rs`: the republish range and payload); the test
+  `bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish` in `m12_batch.rs` (an unfunded producer backlogs bodies past the budget twice, the funded one carries every header
+  and drops the earliest bodies, both carriers' data lands, and one republish lands both dropped bodies); SPEC (the version history, §7.5, §7.6).
+
