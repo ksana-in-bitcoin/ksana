@@ -17,6 +17,11 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-07, an orphan received as new is held to the timestamp rule (M52, D-137)**: no consensus change, from a code scan's finding. A block received as new before its
+  parent waited in the orphan pool and was then connected as a historical block, so it skipped the timestamp reception rule, the only lower bound on a timestamp: a producer of two blocks in a
+  row could send the second, backdated or dated ahead, before the first, and put it on top of the main chain, handing a false time to the contracts that read `block_timestamp` and, with an
+  early enough timestamp, stopping block production on the nodes that took it. Such an orphan is now held to the timestamp rule once its parents arrive, against the local time then; the other
+  rules still treat it as a historical block (§6.3, §6.8).
 - **2026-10-29, signet's PoW limit raised (M51, D-136)**: a consensus change for signet only, decided by the project owner with D-135 and taking effect at the same restart from
   genesis. Signet's `POW_LIMIT_BITS` becomes `0x1f0fffff`, a target of about 2^244, so that a header at the limit takes about 4 096 Argon2id evaluations instead of the 2 or so of devnet's
   `0x207fffff`: a full BTC block of valid headers of a side branch forked from an old block, whose difficulty falls to the limit, then costs about 3.5 CPU-days instead of about 3 CPU-minutes
@@ -492,6 +497,7 @@ Body rules (depend on the entries and on the BTC data of the anchor chain):
 Reception rules (checked only against the local view when receiving a new block, not when syncing historical blocks; a violation only rejects this copy and does not penalize the peer that relayed it):
 
 - The timestamp is greater than the median of the timestamps of the previous 11 blocks on the selected chain (from `parents[0]` along selected parents) (index `len / 2` after sorting), and does not exceed local time by more than 15 seconds.
+  A block received as new before its parents is checked for this rule when they arrive, against the local time then, though it is connected as a historical block for every other rule (D-137).
 - `btc_anchor` is on the local BTC best chain, with height not exceeding `max(parent anchor height, local tip − ANCHOR_DEPTH)` (otherwise local BTC is considered behind, retry later),
   and not more than `MAX_ANCHOR_LAG + ANCHOR_DEPTH` behind the local tip. The height bound also applies when accepting historical blocks from peers or from BTC (D-101): a BTC reorg of at most
   `ANCHOR_DEPTH` blocks must not be able to orphan the anchor of a block that may still join the main chain (§6.4, §6.8).
@@ -694,7 +700,7 @@ BTC anchoring (D-035, D-056):
   the part of the anchor chain at heights not exceeding the anchor height, so the results are unchanged when syncing historical blocks; a data-source failure returns an error, which the execution layer treats as a local fault, never judging the block invalid on that basis.
   On the anchor chain the view also answers that a forced-inclusion entry's transaction ID names no native transaction carrying the entry's op: that is not a data-source failure, and the entry stands for no path C op,
   which makes the block invalid, and a block merging it too (§7.4, §9.6, D-100).
-- **Anchor-invalid mode** (historical blocks: P2P sync responses, orphans connected along with their parents, side chains connected during a reorg, crash recovery; and the indexer): a block whose anchor block is not on the current best chain but whose height does not exceed
+- **Anchor-invalid mode** (historical blocks: P2P sync responses, orphans connected along with their parents (one received as new still held to the timestamp reception rule, D-137), side chains connected during a reorg, crash recovery; and the indexer): a block whose anchor block is not on the current best chain but whose height does not exceed
   the local tip is processed as usual, except for the rules that can only be reproduced on the anchor chain: the forced-inclusion entries are checked against the current best chain instead of the window (§6.3, D-100), the settlement backlog limit is
   not checked, and the BTC view answers from the current best chain instead (headers are taken from the current chain by height; native transactions and the settled closure are looked up on the current chain by transaction ID / block hash,
   at any height; not finding them is a local fault). Contracts can only read headers below anchor height −
