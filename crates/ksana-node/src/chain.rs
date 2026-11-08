@@ -114,7 +114,7 @@ const PAYLOAD_HEADER_SEARCH: usize = 1_000;
 const PAYLOAD_HEADER_SHARE: usize = 2;
 /// The other block bodies carried by a settlement payload take at most `MAX_BLOCK_DATA_BYTES` divided by this; the
 /// earliest bodies that do not fit are landed by republishing (producer's policy, D-077).
-const PAYLOAD_BODY_SHARE: usize = 4;
+pub const PAYLOAD_BODY_SHARE: usize = 4;
 /// When a settlement transaction is already in flight and the bodies waiting to be carried in total, or the body of
 /// this block's entries, exceed `MAX_BLOCK_DATA_BYTES` divided by this, the new block stops waiting for it and carries
 /// settlement transactions as usual (producer's policy, D-077). This threshold is half the body budget
@@ -248,8 +248,10 @@ fn encode_err(e: std::io::Error) -> NodeError {
     NodeError::Internal(format!("block header encoding failed: {e}"))
 }
 
-/// Drops the earliest headers and bodies for the budget (D-075, D-077): the compact encoding of the remaining headers
-/// does not exceed `header_budget` and the bodies in total do not exceed `body_budget`. `items` is by blue work from
+/// Fits the carried data to the budget (D-075, D-077, D-138): drops the earliest headers until their compact encoding
+/// does not exceed `header_budget`, then the earliest bodies, keeping their headers, until the bodies in total do not
+/// exceed `body_budget`. A header counts only once its parents have (D-135), so a dropped header would leave every later
+/// header of the payload uncounted, while a dropped body only waits for a republish. `items` is by blue work from
 /// lowest to highest: (header, body when it needs to be carried).
 fn trim_carry(
     items: Vec<(BlockHeader, Option<Vec<Entry>>)>,
@@ -267,28 +269,22 @@ fn trim_carry(
     let pending_len = lens
         .iter()
         .fold(0usize, |sum, len| sum.saturating_add(*len));
-    let mut start = trim_start(&headers, header_budget)?;
-    loop {
-        let mut bodies: usize = lens
-            .iter()
-            .skip(start)
-            .fold(0usize, |sum, len| sum.saturating_add(*len));
-        while bodies > body_budget {
-            bodies = bodies.saturating_sub(lens.get(start).copied().unwrap_or(0));
-            start = start.saturating_add(1);
-        }
-        let fitted = fits_from(&headers, start, header_budget)?;
-        if fitted == start {
-            break;
-        }
-        start = fitted;
+    let start = trim_start(&headers, header_budget)?;
+    let mut first_body = start;
+    let mut bodies: usize = lens
+        .iter()
+        .skip(start)
+        .fold(0usize, |sum, len| sum.saturating_add(*len));
+    while bodies > body_budget {
+        bodies = bodies.saturating_sub(lens.get(first_body).copied().unwrap_or(0));
+        first_body = first_body.saturating_add(1);
     }
     let mut carry = Carry {
         pending_len,
         ..Carry::default()
     };
-    for ((header, body), len) in items.into_iter().zip(lens).skip(start) {
-        if let Some(entries) = body {
+    for (index, ((header, body), len)) in items.into_iter().zip(lens).enumerate().skip(start) {
+        if let Some(entries) = body.filter(|_| index >= first_body) {
             carry.bodies.push(CarriedBody {
                 header: carry.headers.len(),
                 entries,
@@ -3252,8 +3248,9 @@ impl Chain {
     /// carries its data and that of its past not yet landed. Otherwise its settlement has not confirmed in time, or
     /// confirmed while a header it needs had not counted: its header is carried, not its body, and its past is searched
     /// for headers only, since a header counts only once its parents have (D-135). When the compact encoding of the
-    /// headers exceeds 1 / [`PAYLOAD_HEADER_SHARE`] of `MAX_BLOCK_DATA_BYTES`, or the bodies exceed 1 /
-    /// [`PAYLOAD_BODY_SHARE`], the earliest are dropped (they are landed by republishing). Bodies are carried only for
+    /// headers exceeds 1 / [`PAYLOAD_HEADER_SHARE`] of `MAX_BLOCK_DATA_BYTES` the earliest headers are dropped, and
+    /// when the bodies exceed 1 / [`PAYLOAD_BODY_SHARE`] the earliest bodies are, keeping their headers (D-138); either
+    /// is landed by republishing. Bodies are carried only for
     /// blocks in the future of the new block's merge-depth root (or the root itself, D-097, see
     /// [`Chain::check_carried_bodies`]); `parents[0]` is the selected parent.
     pub fn payload_carry(

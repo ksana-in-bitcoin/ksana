@@ -57,6 +57,34 @@ impl Side {
         )
     }
 
+    /// Same as [`Side::batched`], with the given params.
+    pub fn batched_with_params(
+        mock: &Arc<MockBtc>,
+        genesis: &GenesisFile,
+        name: &str,
+        params: Params,
+    ) -> Side {
+        Side::open(mock, genesis, name, params, true)
+    }
+
+    /// Same as [`Side::unfunded`], with the given params.
+    pub fn unfunded_with_params(
+        mock: &Arc<MockBtc>,
+        genesis: &GenesisFile,
+        name: &str,
+        params: Params,
+    ) -> Side {
+        Side::open_with_funding(
+            mock,
+            genesis,
+            name,
+            params,
+            false,
+            false,
+            Pruning::default(),
+        )
+    }
+
     /// With the given params and pruning settings (D-097).
     pub fn pruned(
         mock: &Arc<MockBtc>,

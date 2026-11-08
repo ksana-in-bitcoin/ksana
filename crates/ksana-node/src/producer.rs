@@ -1047,8 +1047,8 @@ pub(crate) fn fund(
 
 /// This block's settlement payload within `MAX_BLOCK_DATA_BYTES` (§7.2). `headers` and `bodies` are the headers and
 /// bodies of other blocks waiting to be carried (D-063, D-077) followed by this block's header; when they do not fit
-/// together with this block's entries, they are cut down to this block's header (later payloads or a republish carry
-/// the rest, D-047). `None` when even that does not fit: only forced-inclusion entries can take that much room (§7.4;
+/// together with this block's entries, the bodies are dropped first, keeping the headers (D-138), and then the headers
+/// down to this block's (later payloads or a republish carry the rest, D-047). `None` when even that does not fit: only forced-inclusion entries can take that much room (§7.4;
 /// the producer adds other entries only while they fit), so the block needs no body and carries no settlement
 /// transactions (M26).
 fn own_payload(
@@ -1060,14 +1060,20 @@ fn own_payload(
     loop {
         match ksana_btc::payload::payload(params, headers.clone(), entries, bodies.clone()) {
             Ok(payload) => return Ok(Some(payload)),
-            Err(PayloadError::TooLarge(len)) if headers.len() > 1 => {
+            Err(PayloadError::TooLarge(len)) if !bodies.is_empty() => {
                 eprintln!(
-                    "[ksana-node] with the {} headers and {} bodies waiting to be carried the settlement payload would take {len} bytes, more than MAX_BLOCK_DATA_BYTES: carrying this block's data only",
+                    "[ksana-node] with the {} headers and {} bodies waiting to be carried the settlement payload would take {len} bytes, more than MAX_BLOCK_DATA_BYTES: carrying the headers and this block's data only (D-138)",
                     headers.len().saturating_sub(1),
                     bodies.len()
                 );
-                *headers = headers.split_off(headers.len().saturating_sub(1));
                 bodies.clear();
+            }
+            Err(PayloadError::TooLarge(len)) if headers.len() > 1 => {
+                eprintln!(
+                    "[ksana-node] with the {} headers waiting to be carried the settlement payload would take {len} bytes, more than MAX_BLOCK_DATA_BYTES: carrying this block's data only",
+                    headers.len().saturating_sub(1)
+                );
+                *headers = headers.split_off(headers.len().saturating_sub(1));
             }
             Err(PayloadError::TooLarge(len)) if !settlement::needs_body(entries) => {
                 eprintln!(
