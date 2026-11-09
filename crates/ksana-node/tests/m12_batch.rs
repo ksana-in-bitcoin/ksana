@@ -9,6 +9,9 @@
 //! - With batching off (`--no-settlement-batching`), every block that needs a body carries its own settlement
 //!   transaction.
 //! - Block validity: a body carried by a settlement payload must match that block's entries.
+//! - Bodies beyond the payload budget (unfunded producers backlogging them between funded blocks) are dropped while
+//!   their headers stay in the payload, so the rest of it lands; the bodies dropped by several carriers go out in one
+//!   republish (D-138).
 //! - Republish: when a side block parallel to empty blocks and carrying a settlement transaction lands on BTC first,
 //!   the empty blocks' headers are not republished (they are not in that side block's past).
 
@@ -25,10 +28,12 @@ use ksana_btc::client::BtcClient;
 use ksana_btc::mock::MockBtc;
 use ksana_btc::payload::{attached_payload, bodies_in, body_len, needs_body};
 use ksana_btc::settlement::{draft, finalize, ProducerUtxo, SettlementPair};
-use ksana_node::chain::PAYLOAD_BODY_TRIGGER;
+use ksana_node::chain::{PAYLOAD_BODY_SHARE, PAYLOAD_BODY_TRIGGER};
 use ksana_node::rescue::Rescuer;
 use ksana_node::NodeError;
-use ksana_primitives::{Block, BlockHeader, EntryData, FeeMode, Payload, SettlementTxs, DEVNET};
+use ksana_primitives::{
+    Block, BlockHeader, EntryData, FeeMode, Params, Payload, SettlementTxs, DEVNET,
+};
 use ksana_rpc::SettlementState;
 
 /// Whether the main-chain block at this height carries a settlement transaction.
@@ -424,4 +429,139 @@ fn a_parallel_carrier_landing_first_does_not_trigger_a_republish() {
     let snapshot = a.chain.btc().snapshot().unwrap();
     assert!(snapshot.counted_at(&e1.header.hash()).is_some());
     assert!(snapshot.counted_at(&e2.header.hash()).is_some());
+}
+
+/// Unfunded producer `u` produces blocks with transfers, each accepted by `a`, until their bodies exceed `budget`.
+fn backlog(
+    u: &Side,
+    a: &Side,
+    alice: &common::User,
+    to: [u8; 32],
+    nonce: &mut u64,
+    budget: usize,
+) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let mut total = 0usize;
+    while total <= budget {
+        for _ in 0..3 {
+            u.submit(transfer_op(alice, *nonce, 3, to, 1));
+            *nonce += 1;
+        }
+        let block = u.mine();
+        assert!(block.settlement.is_none() && needs_body(&block.entries));
+        a.accept(&block).unwrap();
+        total += body_len(&block.entries).unwrap();
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// The headers and the blocks whose bodies the payload of a block's settlement transactions carries.
+fn settlement_carry(block: &Block) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    let (_, payload) = decode(block.settlement.as_ref().unwrap());
+    let Payload::Settlement { headers, .. } = &payload else {
+        panic!("settlement payload: {payload:?}");
+    };
+    (
+        headers.iter().map(BlockHeader::hash).collect(),
+        carried(&payload),
+    )
+}
+
+/// With most blocks produced by an unfunded producer, the bodies waiting for the next funded block exceed the payload's
+/// body budget: the earliest bodies are dropped but their headers are carried, so the payload's other headers and bodies
+/// land when it confirms (dropping the headers too made it land nothing, D-135); and the bodies dropped by two
+/// carriers confirming in the same BTC block go out in one republish (D-138).
+#[test]
+fn bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish() {
+    let params = Params {
+        max_block_data_bytes: 4 * 1024,
+        ..DEVNET
+    };
+    let budget = params.max_block_data_bytes / PAYLOAD_BODY_SHARE;
+    let (alice, bob) = (user("m12/gaps/alice"), user("m12/gaps/bob"));
+    let (mock, genesis) = setup(&[(&alice, 100_000)]);
+    let a = Side::batched_with_params(&mock, &genesis, "m12gaps-a", params.clone());
+    let u = Side::unfunded_with_params(&mock, &genesis, "m12gaps-u", params.clone());
+    let mut nonce = 0u64;
+    let mut carriers = Vec::new();
+    let mut dropped = Vec::new();
+    for _ in 0..2 {
+        let blocks = backlog(&u, &a, &alice, bob.account, &mut nonce, budget);
+        let x = a.mine();
+        assert!(x.settlement.is_some(), "the funded producer carries them");
+        u.accept(&x).unwrap();
+        let (headers, bodies) = settlement_carry(&x);
+        for block in &blocks {
+            assert!(
+                headers.contains(&block.header.hash()),
+                "every header is carried, height {}",
+                block.header.height
+            );
+        }
+        assert!(
+            !bodies.contains(&blocks[0].header.hash()),
+            "the earliest body is dropped"
+        );
+        assert!(bodies.contains(&blocks.last().unwrap().header.hash()));
+        dropped.extend(
+            blocks
+                .iter()
+                .map(|b| b.header.hash())
+                .filter(|h| !bodies.contains(h)),
+        );
+        carriers.push((x, blocks));
+    }
+    for _ in 0..params.settlement_depth {
+        a.mine();
+    }
+    a.chain.process_settlements().unwrap();
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    for (x, blocks) in &carriers {
+        assert!(
+            snapshot.block_data_height(&x.header.hash()).is_some(),
+            "the carrier's data lands"
+        );
+        for block in blocks {
+            let hash = block.header.hash();
+            assert!(snapshot.counted_at(&hash).is_some());
+            assert_eq!(
+                snapshot.block_data_height(&hash).is_some(),
+                !dropped.contains(&hash),
+                "height {}",
+                block.header.height
+            );
+        }
+    }
+
+    // One republish carries every dropped body
+    let rescuer = Rescuer::new(
+        Arc::clone(&a.chain),
+        a.producer.funding.clone().unwrap(),
+        Some(a.producer.producer),
+        None,
+    );
+    rescuer.run_once().unwrap();
+    let republishes: Vec<Payload> = mock
+        .mempool()
+        .iter()
+        .filter_map(|tx| match ksana_btc::data::tx_payload(&params, tx) {
+            Some((_, p @ Payload::Headers { .. })) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(republishes.len(), 1);
+    let mut sent = carried(&republishes[0]);
+    sent.sort();
+    let mut expected = dropped.clone();
+    expected.sort();
+    assert_eq!(sent, expected);
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    for hash in &dropped {
+        assert!(snapshot.block_data_height(hash).is_some());
+    }
 }

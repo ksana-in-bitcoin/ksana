@@ -1364,7 +1364,22 @@ impl Rescuer {
             // c's settlement has confirmed and counted without carrying first (the producer carried fewer headers or
             // bodies because of the payload size, D-075, D-077): everything before c that has not landed needs
             // republishing, and c's own data may be waiting for those headers (D-135)
-            Some((c, settling)) if self.settlement_counted(&state, snapshot, &settling)? => c,
+            // The later carriers whose settlements have counted too left their earliest bodies to republishing in the
+            // same way (D-138): everything before the last of them that has not landed goes out in one payload, rather
+            // than one run per BTC block
+            Some((c, settling)) if self.settlement_counted(&state, snapshot, &settling)? => {
+                let mut end = c;
+                for (index, (_, b)) in accepted.iter().enumerate().skip(c.saturating_add(1)) {
+                    if !chain.carries_settlement(&b.hash)? {
+                        continue;
+                    }
+                    if !self.settlement_counted(&state, snapshot, b)? {
+                        break;
+                    }
+                    end = index;
+                }
+                end
+            }
             Some((c, _)) => c.saturating_sub(keep),
             None => {
                 let gap = accepted.len().saturating_sub(first) >= keep;
@@ -1411,20 +1426,26 @@ impl Rescuer {
             state.headers.remove(&key);
         }
 
-        // Consecutive headers from first (up to before end) that carry no settlement transactions and whose data has
-        // not landed, with the bodies of those among them that need one, at most MAX_SETTLEMENT_HEADERS headers (§7.1)
-        // and the payload within the limit: accumulate the lengths of the compact encoding and the bodies one by one
-        // (an upper bound of the payload's length, the payee included, D-095)
+        // From first (up to before end), the blocks whose data has not landed: the header of each that has not counted,
+        // and the header and body of each that carries no settlement transactions and needs a body (D-138); the blocks
+        // skipped have counted, so every parent of a header in the payload has counted or is in it (D-135). A carrier
+        // whose header has counted is left to the rescue. At most MAX_SETTLEMENT_HEADERS headers (§7.1) and the payload
+        // within the limit: accumulate the lengths of the compact encoding and the bodies one by one (an upper bound of
+        // the payload's length, the payee included, D-095)
         let mut headers = Vec::new();
         let mut bodies = Vec::new();
         let mut encoder = compact::HeaderEncoder::default();
         let mut len = headers_payload_fixed_len(std::iter::empty());
         for (_, b) in accepted.iter().take(end).skip(first) {
-            if headers.len() >= params.max_settlement_headers
-                || chain.carries_settlement(&b.hash)?
-                || snapshot.data_height(b).is_some()
-            {
+            if headers.len() >= params.max_settlement_headers {
                 break;
+            }
+            if snapshot.data_height(b).is_some() {
+                continue;
+            }
+            let body = b.settles && !chain.carries_settlement(&b.hash)?;
+            if !body && snapshot.counted_at(&b.hash).is_some() {
+                continue;
             }
             let block = chain.store().block(&b.hash)?.ok_or_else(|| {
                 NodeError::Storage("block accepted by the main chain is missing".into())
@@ -1433,13 +1454,13 @@ impl Rescuer {
                 .encode(&block.header)
                 .map_err(|e| NodeError::Internal(format!("block header encoding failed: {e}")))?;
             len = len.saturating_add(encoded.len());
-            if b.settles {
+            if body {
                 len = len.saturating_add(settlement::body_len(&block.entries)?);
             }
             if len > params.max_block_data_bytes {
                 break;
             }
-            if b.settles {
+            if body {
                 bodies.push(Body {
                     header: u32::try_from(headers.len())
                         .map_err(|_| NodeError::Internal("body index overflow".into()))?,

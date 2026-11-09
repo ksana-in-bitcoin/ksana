@@ -17,6 +17,11 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-08, bodies beyond the payload budget keep their headers, and one republish carries the bodies several carriers left (M53, D-138)**: no consensus change, from a load
+  test of the public signet. With most blocks produced by unfunded producers, the bodies waiting for the next funded block exceeded the payload's body budget, and the producer dropped the
+  earliest blocks' headers with their bodies; every later header in the payload then could not count (§6.5 item 1), so the payload confirmed and landed nothing, and the republish and rescue
+  that followed landed about one such gap per BTC block until the settlement backlog limit paused the fast lane. The producer now drops only the bodies, keeping their headers, and a republish
+  carries the bodies left by every carrier whose settlement has counted, not one run per BTC block (§7.5, §7.6).
 - **2026-11-07, an orphan received as new is held to the timestamp rule (M52, D-137)**: no consensus change, from a code scan's finding. A block received as new before its
   parent waited in the orphan pool and was then connected as a historical block, so it skipped the timestamp reception rule, the only lower bound on a timestamp: a producer of two blocks in a
   row could send the second, backdated or dated ahead, before the first, and put it on top of the main chain, handing a false time to the contracts that read `block_timestamp` and, with an
@@ -986,7 +991,8 @@ The producer's strategy (local, D-063, D-075, D-077):
   (§6.5 item 1), so leaving it out would make this block's own header wait for that settlement.
 - Bodies carried: among them, the bodies (together with the headers) of blocks that carry no settlement transaction, need a body, whose data has not landed on-chain yet and that are reached
   without passing a block that carries settlement transactions; they share the remaining space with this block's entries, with bodies taking at most
-  a quarter of the payload limit, dropping the earliest when they do not fit (republishing fills them in later). Block production and republishing pack by the entries' upper bound (every key other than KSA counted as written in full), so any block's body fits later when
+  a quarter of the payload limit, dropping the earliest bodies when they do not fit while keeping their headers, since a header left out would keep every later header in the payload from
+  counting (republishing fills the bodies in later, D-138); when the payload still exceeds the limit with this block's entries, the bodies are dropped before the headers. Block production and republishing pack by the entries' upper bound (every key other than KSA counted as written in full), so any block's body fits later when
   carried by any payload; §6.3 makes that bound a validity rule (D-100).
 - **When to carry settlement transactions (settlement batching, on by default)**: carry them when there is a body to carry (this block's or backlogged) and no settlement transaction is in flight. "In flight" means the most recent block in this block's past that carries settlement
   transactions has a header that has not counted yet and its anchor is at most 2 blocks behind the BTC tip (one waiting in the mempool longer is not waited for anymore: its producer bumps it and other nodes rescue it, §7.3, §7.7). In addition, carry them also when the backlogged bodies
@@ -1005,7 +1011,7 @@ The producer's strategy (local, D-063, D-075, D-077):
 Local policy (D-047, D-075, D-077). A settlement payload carries at most `MAX_SETTLEMENT_HEADERS` headers; when consecutive blocks without settlement transactions exceed this number, or the chain has had no
 block with settlement transactions for a long time, the settled closure stalls and path C ops cannot become BTC-final either. After each round of BTC sync, the node, in the main chain's acceptance order (each main-chain block preceded by the blocks it merges), finds
 the first block f whose data is not on-chain. If f carries no settlement transaction and no later settlement payload will include it anymore: the first later block with settlement transactions whose past contains f is more than
-`MAX_SETTLEMENT_HEADERS − 1` away from f, or that block's settlement transaction has already confirmed and counted (§7.1) without carrying f (the producer carried fewer headers or bodies because of the payload size; that block's own data may then be waiting for f's headers, D-135); or there is no such block after it yet, but there are already
+`MAX_SETTLEMENT_HEADERS − 1` away from f, or that block's settlement transaction has already confirmed and counted (§7.1) without carrying f (the producer carried fewer headers or bodies because of the payload size; that block's own data may then be waiting for f's headers, D-135; the run then extends up to the last of the following blocks with settlement transactions whose settlements have counted too, D-138); or there is no such block after it yet, but there are already
 at least `MAX_SETTLEMENT_HEADERS − 1` blocks, or f's anchor is more than `4 × SETTLEMENT_TIMEOUT` blocks behind the BTC tip (no block with settlement transactions for a long time), or a block of a competing chain has
 counted on BTC and one BTC block has passed but fewer than `BTC_FINALITY_CONFS` (D-091: among the tips of the header DAG, a block not on this node's main chain whose fork-choice key `(chain_work, hash)`
 is below this node's main-chain tip but above the highest block of this node's main chain that has counted (§6.5 item 1); of a tip whose selected chain holds a block anchored, or merging a block anchored, off the BTC best chain,
@@ -1013,7 +1019,8 @@ or one the finality determination excluded, only the part below the lowest such 
 landing on-chain first is normal, and this node's next block with settlement transactions usually carries its own headers right away) -- then it sends a
 `Headers { headers, bodies }` transaction (a commit / reveal pair, funded by this node; while such a competing chain is on BTC, this node's BTC transactions pay the next-block fee rate, §7.7, D-102): containing only the headers that settlement payload cannot fit (from f on, those whose accepting main-chain block is `SETTLEMENT_DEPTH` deep, consecutive,
 without settlement transactions and whose data has not landed; when republishing because of a competing chain the depth is not waited for, up to the main-chain tip), plus the bodies of those among them that need a body, truncated to `MAX_BLOCK_DATA_BYTES`.
-Such a run starts at the first block whose data has not landed and stops at the first one that carries settlement transactions or whose data has landed, so every parent of a header in it has counted
+Such a run starts at the first block whose data has not landed and skips the blocks whose data has landed and those with settlement transactions whose headers have counted (left to the
+rescue); of the others it holds the header, and the body of one without settlement transactions that needs a body (D-138). The blocks skipped have counted, so every parent of a header in it has counted
 or is in the same payload, and its headers count as soon as it confirms (D-135). A block with settlement transactions parallel to f (which may come
 after it in acceptance order) will not carry it and is not counted. The same run of headers (distinguished by the starting hash) is not sent again until the transaction is confirmed or evicted; several nodes may each send one, and duplicates are
 ignored by the indexer. The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
