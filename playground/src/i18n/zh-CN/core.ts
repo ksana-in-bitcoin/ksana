@@ -17,7 +17,7 @@ const core: Messages['core'] = {
   },
   home: {
     eyebrow: '测试网 · 只用测试 KSA',
-    headline: 'Ksana 合约，打开就能跑',
+    headline: 'Ksana 合约，准备就绪',
     lead: '选一个示例，填好参数，一笔操作就能部署。然后直接使用它，修改 Rust 源码，在这里编译你自己的版本。每一步都由你自己的钱包签名。',
     benchLabel: '示例合约',
     settings: '参数',
@@ -43,7 +43,7 @@ const core: Messages['core'] = {
       deploy: { title: '部署示例', body: '每个示例一笔操作就能部署，也可以打开别人部署好的合约直接使用。' },
       edit: { title: '修改代码', body: '在“代码”页编辑合约，在这里编译，部署你的版本，表单会跟着它的 ABI 变化。' },
     },
-    ai: '用 AI 助手写合约',
+    ai: '使用 AI 助手',
     aiBody: '让 ChatGPT、Claude 或 Gemini 写 Ksana 合约之前，先把这份资料给它。',
     contract: '任意合约',
     contractBody: '从浏览器拿到了合约 ID？在这里打开它，读取视图、调用方法。',
