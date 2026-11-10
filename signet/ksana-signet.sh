@@ -47,7 +47,7 @@ KSA_UNIT=100000000
 # evaluations per producer: 2^256 / 5 000 is 0x1f0d1b71, 2^256 / 10 000 is 0x1f068db8 (ASERT corrects from there, D-026)
 BITS_ONE_PRODUCER=520952689
 BITS_TWO_PRODUCERS=520523192
-# A seed node's funding (D-109): status sets top_up below TOP_UP_SATS or three outputs (TOP_UP_SATS is about six days
+# A seed node's funding (D-109): status sets top_up below TOP_UP_SATS or three outputs (TOP_UP_SATS is about eight days
 # of half an idle network's settlement pairs at the seed nodes' floor of 2 sat/vB), and warns when no seed node holds
 # PAIR_SATS confirmed, about the most one pair needs at 2 sat/vB (its fees and the change)
 TOP_UP_SATS=200000
