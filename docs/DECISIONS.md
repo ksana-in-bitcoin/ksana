@@ -5087,7 +5087,9 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   waste.
 - **Decision**: `republish` in `rescue.rs` keeps every republish of this node's alive, in acceptance order of its first header, and while fewer than `MAX_CHAINED_REPUBLISHES` (4) are in flight
   and the last one's commit change is unspent, sends the next run: the blocks of the range D-138 defines that the republishes in flight do not carry, funded by that change first (other funding
-  UTXOs added when it is short). It is keyed by its first header, like the others. A chain whose last change is spent waits for its pairs to confirm.
+  UTXOs added when it is short). It is keyed by its first header, like the others. A chain whose last change is spent waits for its pairs to confirm. A republish's change always returns
+  to the funding address, never to the revenue address of D-060 (`fund_chainable` in `producer.rs`), and only change at the funding address links the chain: the next republish signs
+  for it with the funding key.
 - **Rationale**: a commit spending an unconfirmed commit's change cannot confirm before it, so the parents a payload needs from an earlier payload of the chain have counted by the time it
   confirms. Four full payloads, about 84 kvB with their commits, stay below Bitcoin Core's default 101 kvB cluster limit and the 25-transaction ancestor limit.
 - **Costs and limitations**: the order holds between commits; a reveal depends only on its own commit, so a miner could still include a later reveal without an earlier one. Miners select by
@@ -5095,6 +5097,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   output of the node's to spend. Pairs of different nodes, and a block's own settlement transactions (which must not spend each other, SPEC §7.2), are still ordered by the miner. A CPFP bump
   (D-102) spends a reveal's P2A output and leaves the chain as it is; a pinned link sent again (D-131) goes out as a pair of its own, outside the chain, while the links after it stay chained on
   the old one.
-- **Impact**: `crates/ksana-node` (`rescue.rs`: `MAX_CHAINED_REPUBLISHES`, `republish`); the test `republishes_chain_on_the_change_of_the_one_before` in `m12_batch.rs` (a backlog of
-  more than four payloads: four republishes in flight, each commit spending the change of the one before, no block carried twice, all landing in one BTC block, and a new chain once they
+- **Impact**: `crates/ksana-node` (`rescue.rs`: `MAX_CHAINED_REPUBLISHES`, `republish`; `producer.rs`: `fund_chainable`); the test `republishes_chain_on_the_change_of_the_one_before` in
+  `m12_batch.rs` (a backlog of more than four payloads with a revenue address set: four republishes in flight, each commit paying its change to the funding address and spending the change
+  of the one before, no block carried twice, all landing in one BTC block, and a new chain once they
   confirm); SPEC (the version history, §7.6).

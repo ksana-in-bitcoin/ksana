@@ -84,7 +84,7 @@ use ksana_btc::tracker::{BlockSummary, BtcSnapshot};
 use ksana_primitives::{compact, Block, BlockHeader, Body, Payload};
 
 use crate::chain::{test_settlement, Chain};
-use crate::producer::{fund, Funding};
+use crate::producer::{fund, fund_chainable, Funding};
 use crate::{settlement, NodeError};
 
 /// Window of the rescue order (D-057): when the k-th block after the block (k ≤ this value) was produced by this node,
@@ -1458,7 +1458,12 @@ impl Rescuer {
                     txid: commit.compute_txid(),
                     vout: 0,
                 };
-                if let Some(txout) = commit.output.first() {
+                // Only change the funding key signs links the chain (pairs this node sent before always pay it there)
+                if let Some(txout) = commit
+                    .output
+                    .first()
+                    .filter(|txout| txout.script_pubkey == self.funding.script)
+                {
                     if client.utxo(&change, true).map_err(btc)?.is_some() {
                         tail = Some(ProducerUtxo {
                             outpoint: change,
@@ -1547,7 +1552,7 @@ impl Rescuer {
             .into_iter()
             .chain(self.available_utxos(btc_tip)?)
             .collect();
-        let draft = match fund(params, &utxos, &self.funding, &payload, feerate)? {
+        let draft = match fund_chainable(params, &utxos, &self.funding, &payload, feerate)? {
             Ok(draft) => draft,
             Err(why) => {
                 eprintln!(
