@@ -97,12 +97,13 @@ function Bench({ def }: { def: ExampleDef }) {
     }
   }, [abi, params, values, ready]);
   const deploy = () => {
+    // an argument that holds no value yet is left out, and the dialog starts it empty (the request is exact)
     const presets: Record<string, Value> = {};
     params.forEach((p, i) => {
       const v = values[i];
       if (v !== undefined) presets[p.name] = v;
     });
-    requestDeploy(def.id, presets);
+    requestDeploy(def.id, presets, true);
   };
   const methods = abi ? [...(abi.init ? [abi.init] : []), ...abi.methods] : [];
   const lines = useMemo(() => def.source.split('\n').length, [def]);

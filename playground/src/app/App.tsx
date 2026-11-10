@@ -210,6 +210,7 @@ function ExamplePage({ def, tab, contract: asked }: { def: ExampleDef; tab: Tab;
   const { list, current } = useInstances(conn, def.id);
   const [deploying, setDeploying] = useState(false);
   const [presets, setPresets] = useState<Record<string, Value> | null>(null);
+  const [exact, setExact] = useState(false);
   const [opening, setOpening] = useState(false);
 
   // another page asked for a deployment of this example with some arguments filled in
@@ -218,10 +219,12 @@ function ExamplePage({ def, tab, contract: asked }: { def: ExampleDef; tab: Tab;
     if (!request || request.example !== def.id) return;
     deployRequestStore.set(null);
     setPresets(request.presets);
+    setExact(request.exact);
     setDeploying(true);
   }, [request, def.id]);
   const deployNew = () => {
     setPresets(null);
+    setExact(false);
     setDeploying(true);
   };
 
@@ -265,7 +268,7 @@ function ExamplePage({ def, tab, contract: asked }: { def: ExampleDef; tab: Tab;
         : <NoContract onDeploy={deployNew} onOpen={() => setOpening(true)} />)}
       {tab === 'activity' && <ActivityList />}
     </div>
-    {deploying && <DeployDialog def={def} open={deploying} presets={presets} onClose={() => setDeploying(false)} />}
+    {deploying && <DeployDialog def={def} open={deploying} presets={presets} exact={exact} onClose={() => setDeploying(false)} />}
     <OpenDialog def={def} open={opening} onClose={() => setOpening(false)} />
   </div>;
 }

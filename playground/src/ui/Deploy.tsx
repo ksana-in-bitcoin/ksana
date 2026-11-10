@@ -27,9 +27,11 @@ import { FundsEditor, ValueEditor, fundsOf, type FundsDraft } from './values';
 
 type Choice = 'example' | 'build';
 
-export function initialDrafts(def: ExampleDef, abi: Abi | null, me: Uint8Array | null, network: BtcNetwork | null, asked: Record<string, Value> | null): Draft[] {
+export function initialDrafts(
+  def: ExampleDef, abi: Abi | null, me: Uint8Array | null, network: BtcNetwork | null, asked: Record<string, Value> | null, exact = false,
+): Draft[] {
   const params = abi?.init?.params ?? [];
-  const presets = { ...def.presets?.({ me, network }), ...asked };
+  const presets = exact && asked ? asked : { ...def.presets?.({ me, network }), ...asked };
   return params.map((p) => (p.name in presets ? draftOf(abi!, p.type, presets[p.name]!) : emptyDraft(abi!, p.type)));
 }
 
@@ -73,8 +75,10 @@ function useInitCheck(conn: Connection | null, def: ExampleDef, abi: Abi | null,
   return { problems: settled ? state.problems : [], settled, run };
 }
 
-export function DeployDialog({ def, open, onClose, presets = null }: {
+export function DeployDialog({ def, open, onClose, presets = null, exact = false }: {
   def: ExampleDef; open: boolean; onClose: () => void; presets?: Record<string, Value> | null;
+  /** `presets` are all that was set, against the published module: start on it, and an argument they leave out starts empty */
+  exact?: boolean;
 }) {
   const t = useT();
   const m = t.core.deploy;
@@ -94,19 +98,19 @@ export function DeployDialog({ def, open, onClose, presets = null }: {
     }
   }, [using, def]);
   const me = wallet ? fromHex(wallet.account.account, 32) : null;
-  const [drafts, setDrafts] = useState<Draft[]>(() => initialDrafts(def, abi, me, conn?.network ?? null, presets));
+  const [drafts, setDrafts] = useState<Draft[]>(() => initialDrafts(def, abi, me, conn?.network ?? null, presets, exact));
   const [funds, setFunds] = useState<FundsDraft[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const sender = useSend();
 
   // a new ABI (another build) or a new wallet starts the form again
   useEffect(() => {
-    setDrafts(initialDrafts(def, abi, wallet ? fromHex(wallet.account.account, 32) : null, conn?.network ?? null, presets));
+    setDrafts(initialDrafts(def, abi, wallet ? fromHex(wallet.account.account, 32) : null, conn?.network ?? null, presets, exact));
     setFunds([]);
-  }, [abi, def, wallet, conn, presets]);
+  }, [abi, def, wallet, conn, presets, exact]);
   useEffect(() => {
     // only when the dialog opens: a build made while it is open does not change the choice
-    if (open) setChoice(build ? 'build' : 'example');
+    if (open) setChoice(build && !exact ? 'build' : 'example');
   }, [open]);
 
   const params = abi?.init?.params ?? [];
