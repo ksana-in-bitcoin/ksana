@@ -1,4 +1,7 @@
-/** The source editor: CodeMirror 6 with Rust highlighting and the compiler's diagnostics underlined in place. */
+/**
+ * The source editor: CodeMirror 6 with Rust highlighting and the compiler's diagnostics underlined in place, and the same
+ * highlighting over source that is only read (the first page's workbench).
+ */
 import { useEffect, useRef } from 'react';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
@@ -6,9 +9,9 @@ import { rust } from '@codemirror/lang-rust';
 import { HighlightStyle, bracketMatching, foldGutter, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { lintGutter, setDiagnostics, type Diagnostic as CmDiagnostic } from '@codemirror/lint';
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
-import { Compartment, EditorState, type Text } from '@codemirror/state';
+import { Compartment, EditorState, StateEffect, StateField, Text } from '@codemirror/state';
 import {
-  EditorView, crosshairCursor, drawSelection, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap,
+  Decoration, EditorView, crosshairCursor, drawSelection, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap,
   lineNumbers, rectangularSelection,
 } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
@@ -137,4 +140,75 @@ export function Editor({ value, onChange, diagnostics, readOnly = false, goto, l
   }, [goto]);
 
   return <div className="editor" ref={host} />;
+}
+
+const markLine = StateEffect.define<number | null>();
+const markedLine = StateField.define({
+  create: () => Decoration.none,
+  update(marks, tr) {
+    for (const e of tr.effects) {
+      if (e.is(markLine)) return e.value === null ? Decoration.none : Decoration.set([Decoration.line({ class: 'cm-marked' }).range(e.value)]);
+    }
+    return marks.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+const viewTheme = EditorView.theme({
+  '.cm-marked': { backgroundColor: 'var(--qing-soft)', boxShadow: 'inset 2px 0 0 var(--qing)' },
+  '.cm-gutters': { backgroundColor: 'transparent', borderRight: '0' },
+  '.cm-content': { padding: '12px 0' },
+});
+
+/**
+ * Source to read: highlighted, with line numbers. It opens with line `start` (1-based) at the top, and `line` is scrolled into
+ * view and marked when it is given.
+ */
+export function CodeView({ value, start = 1, line = null, label }: { value: string; start?: number; line?: { line: number; n: number } | null; label: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  const view = useRef<EditorView | null>(null);
+
+  useEffect(() => {
+    if (!host.current) return;
+    const v = new EditorView({
+      parent: host.current,
+      state: EditorState.create({
+        doc: value,
+        extensions: [
+          lineNumbers(), syntaxHighlighting(highlight), rust(), theme, viewTheme, markedLine, EditorState.tabSize.of(4),
+          EditorState.readOnly.of(true), EditorView.editable.of(false),
+          EditorView.contentAttributes.of({ 'aria-label': label, tabindex: '0' }),
+        ],
+      }),
+    });
+    view.current = v;
+    return () => {
+      v.destroy();
+      view.current = null;
+    };
+    // created once; another source is applied below
+  }, []);
+
+  useEffect(() => {
+    const v = view.current;
+    if (!v) return;
+    const current = v.state.doc.toString();
+    v.dispatch({
+      ...(current === value ? {} : { changes: { from: 0, to: current.length, insert: value } }),
+      effects: [markLine.of(null), EditorView.scrollIntoView(offsetOf(Text.of(value.split('\n')), start, 1), { y: 'start' })],
+    });
+  }, [value, start]);
+
+  useEffect(() => {
+    const v = view.current;
+    if (!v) return;
+    if (!line) {
+      v.dispatch({ effects: markLine.of(null) });
+      return;
+    }
+    const pos = offsetOf(v.state.doc, line.line, 1);
+    v.dispatch({ effects: [markLine.of(pos), EditorView.scrollIntoView(pos, { y: 'center' })] });
+  }, [line, value]);
+
+  return <div className="editor editor--view" ref={host} />;
 }
