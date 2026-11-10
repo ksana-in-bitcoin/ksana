@@ -17,8 +17,9 @@ use common::*;
 use ksana_btc::data::{data_script, tx_data, tx_payload, Carrier, TxData};
 use ksana_btc::envelope::{commitment, envelope_script, parse_envelope};
 use ksana_btc::settlement::{
-    cpfp_child, decode_tx, draft, finalize, validate_attached, Checked, PrevoutSource,
-    SettlementError, SettlementPair, COMMITMENT_OUTPUT, MAX_SETTLEMENT_TX_BYTES, PRODUCER_SEQUENCE,
+    cpfp_child, decode_tx, draft, finalize, sweep_revenue, validate_attached, Checked,
+    PrevoutSource, SettlementError, SettlementPair, COMMITMENT_OUTPUT, MAX_SETTLEMENT_TX_BYTES,
+    PRODUCER_SEQUENCE,
 };
 use ksana_btc::spend::{taproot_signature, verify_taproot_key_spend};
 use ksana_primitives::{Params, Payload, SettlementTxs, DEVNET};
@@ -987,4 +988,63 @@ fn a_cpfp_child_pays_for_the_pair_through_the_reveal_change() {
     // only a change of the funding key
     let other = Keypair::from_secret_key(&Secp256k1::new(), &secret("someone else"));
     assert!(is_invalid(child(&s.pair.reveal, 20, 0, &other)));
+}
+
+/// The revenue sweep (D-142) pays `amount` less its fee to the revenue script and the rest back to the funding key; a
+/// rest below the funding script's dust floor is raised to it out of the amount, so a sweep never returns less than
+/// the rest (the hot wallet keeps its cap however small the cap is), and there is no funding output without a rest.
+#[test]
+fn a_revenue_sweep_never_returns_less_than_the_rest() {
+    let key = producer_key();
+    let funding = producer_script(&key);
+    let revenue = p2wpkh_script(&secret("sweep/revenue"));
+    let dust = funding.minimal_non_dust().to_sat();
+    let outputs = |values: &[u64], amount: u64| {
+        let utxos = producer_utxos(&key, values);
+        let tx = sweep_revenue(&utxos, amount, revenue.clone(), 2, &key)
+            .unwrap()
+            .expect("a sweep");
+        let prevouts: Vec<TxOut> = utxos.iter().map(|u| u.txout.clone()).collect();
+        verify_in_place(&tx, &prevouts).unwrap();
+        let fee =
+            values.iter().sum::<u64>() - tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+        assert_eq!(fee, tx.weight().to_vbytes_ceil() * 2);
+        assert_eq!(tx.output[0].script_pubkey, revenue);
+        let rest = tx.output.get(1).map(|o| {
+            assert_eq!(o.script_pubkey, funding);
+            o.value.to_sat()
+        });
+        assert!(tx.output.len() <= 2);
+        (tx.output[0].value.to_sat() + fee, rest)
+    };
+    // An ordinary rest returns as it is
+    assert_eq!(
+        outputs(&[500_000, 500_000], 600_000),
+        (600_000, Some(400_000))
+    );
+    // A rest of 100 sats (a cap below the dust floor) is raised to the dust floor, never paid to the revenue script
+    assert_eq!(outputs(&[100_100], 100_000), (100_100 - dust, Some(dust)));
+    assert_eq!(
+        outputs(&[500_000], 500_000 - dust + 1),
+        (500_000 - dust, Some(dust))
+    );
+    // No rest, no funding output
+    assert_eq!(outputs(&[300_000, 200_000], 500_000), (500_000, None));
+
+    // Nothing to send: no inputs, inputs below the amount, or a revenue output below its dust floor after the fee
+    let utxos = producer_utxos(&key, &[100_000]);
+    assert!(sweep_revenue(&[], 1, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(sweep_revenue(&utxos, 100_001, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(sweep_revenue(&utxos, 300, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(
+        sweep_revenue(&producer_utxos(&key, &[dust - 1]), 1, revenue, 2, &key)
+            .unwrap()
+            .is_none()
+    );
 }

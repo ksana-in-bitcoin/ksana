@@ -466,9 +466,10 @@ pub fn split_funding(
 
 /// The revenue sweep transaction (D-142, the node's local policy for the hot wallet cap of D-060, not a settlement
 /// transaction): spends `utxos`, P2TR UTXOs of the producer's funding key, paying `amount_sat` less the fee to `revenue`
-/// and the rest back to the funding key's script (no such output when the rest is below its dust floor: it goes to
-/// `revenue` as well); fee = `⌈weight / 4⌉ × feerate_sat_vb`, out of the revenue output. Returns `None` without inputs,
-/// when they do not cover `amount_sat`, or when the revenue output would be below its dust floor. v2, `nLockTime = 0`,
+/// and the rest back to the funding key's script (a rest below that script's dust floor is raised to it out of the
+/// amount, so the funding key never gets back less than the rest; no such output when there is no rest); fee =
+/// `⌈weight / 4⌉ × feerate_sat_vb`, out of the revenue output. Returns `None` without inputs, when they do not cover
+/// `amount_sat`, or when the revenue output would be below its dust floor. v2, `nLockTime = 0`,
 /// the inputs' `nSequence` is [`PRODUCER_SEQUENCE`] (replaceable).
 pub fn sweep_revenue(
     utxos: &[ProducerUtxo],
@@ -485,10 +486,14 @@ pub fn sweep_revenue(
         .iter()
         .try_fold(0u64, |sum, u| sum.checked_add(u.txout.value.to_sat()))
         .ok_or_else(|| invalid("amount overflow"))?;
-    let Some(rest) = total.checked_sub(amount_sat) else {
+    let rest = match total.checked_sub(amount_sat) {
+        None => return Ok(None),
+        Some(0) => 0,
+        Some(rest) => rest.max(script.minimal_non_dust().to_sat()),
+    };
+    let Some(gross) = total.checked_sub(rest) else {
         return Ok(None);
     };
-    let keeps_rest = rest >= script.minimal_non_dust().to_sat();
     let revenue_dust = revenue.minimal_non_dust().to_sat();
     let mut tx = Transaction {
         version: transaction::Version::TWO,
@@ -508,7 +513,7 @@ pub fn sweep_revenue(
             script_pubkey: revenue,
         }],
     };
-    if keeps_rest {
+    if rest > 0 {
         tx.output.push(TxOut {
             value: Amount::from_sat(rest),
             script_pubkey: script,
@@ -519,7 +524,6 @@ pub fn sweep_revenue(
         .to_vbytes_ceil()
         .checked_mul(feerate_sat_vb)
         .ok_or_else(|| invalid("fee overflow"))?;
-    let gross = if keeps_rest { amount_sat } else { total };
     let Some(paid) = gross.checked_sub(fee).filter(|&paid| paid >= revenue_dust) else {
         return Ok(None);
     };
