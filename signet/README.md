@@ -56,17 +56,17 @@ for it. Each producing seed node keeps one core busy. Nothing caps the seed node
 monthly traffic package, set the provider's traffic alarm (`status` prints the traffic since the server booted).
 
 Settling costs signet BTC, paid by the seed node that produced the block carrying the settlement. Even an idle network
-sends a settlement pair about every two signet blocks (each block that unlocks rewards has a body, D-109), 316 to 383 vB
-plus a 240-sat anchor output each: about 0.0007 sBTC a day for the network at 2 sat/vB, the seed nodes' floor, up to
+sends a settlement pair about every two signet blocks (each block that unlocks rewards has a body, D-109), about 300 to 360 vB
+each (D-140): about 0.0005 sBTC a day for the network at 2 sat/vB, the seed nodes' floor, up to
 twice that while there is traffic. The nodes pay the floor while signet's mempool holds at most half a block, and
 bitcoind's fee estimate when it holds more; a pair left waiting two blocks is bumped to the estimate, or to twice its
-own rate and more while the mempool has room (D-117), up to the seed nodes' cap of 5 sat/vB: about 0.0015 sBTC a day for
+own rate and more while the mempool has room (D-117), up to the seed nodes' cap of 5 sat/vB: about 0.0012 sBTC a day for
 the network when every pair pays it. The floor is not signet's minimum of 1 sat/vB: on 2026-10-13 signet's blocks took
 nothing below 2 while a backlog at 1 sat/vB waited (D-107). The cap is not the node's default of 100: from 2026-10-16,
 before D-117, the server's bitcoind estimated 100.03 sat/vB for every target up to 24 blocks while signet's blocks took
 transactions at 1 sat/vB, and every pair paid 100, about 0.022 sBTC a day (D-107). Fund each producing seed node's
-address with at least three outputs: 0.006 sBTC in all to start, 17 to 20 days of an idle network when two seed nodes
-share it (about nine days for one alone), and 0.02 recommended, four weeks with traffic. The nodes never split their
+address with at least three outputs: 0.006 sBTC in all to start, 24 to 28 days of an idle network when two seed nodes
+share it (about twelve days for one alone), and 0.02 recommended, six weeks with traffic. The nodes never split their
 outputs, and every settlement returns its change to the address.
 
 ## First deploy
@@ -301,7 +301,7 @@ network with them (`signet/deploy.sh <newhost> restore <file>`, then `signet/dep
 repository; git ignores `ksana-signet-*.tar.gz` in case one lands there.
 
 Top up a seed node's address before it runs dry. `status` lists each seed node's funds from its wallet (`confirmed_sats`,
-`pending_sats` of change still in the mempool, `outputs`) and sets `top_up` below 0.002 sBTC or three outputs: about six
+`pending_sats` of change still in the mempool, `outputs`) and sets `top_up` below 0.002 sBTC or three outputs: about eight
 days of an idle network's pairs at 2 sat/vB for one of two seed nodes, fewer with traffic. A seed node without funds keeps
 producing, and the other one carries its blocks' data; with both dry nothing lands on signet, so finality and the indexer
 stop while blocks go on, and `status` prints a `warning` saying so.
