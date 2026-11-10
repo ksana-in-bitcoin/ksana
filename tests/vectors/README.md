@@ -3,7 +3,8 @@
 Fixed test vectors shared by Rust and the TypeScript SDK (SPEC §11.3, §14 M0). All hex is lowercase.
 Once committed, the vectors are the reference: they are only regenerated with
 `cargo run -p ksana-crypto --example gen_vectors` when the encoding is changed on purpose (a consensus change)
-(`pow.json` with `cargo run -p ksana-consensus --example gen_pow_vectors`), and the change is recorded in
+(`pow.json` with `cargo run -p ksana-consensus --example gen_pow_vectors`, `compress.json` with
+`cargo run -p ksana-btc --example gen_compress_vectors`), and the change is recorded in
 `docs/DECISIONS.md`. `standards.json` holds the token standards' encodings (D-120), conventions between contracts,
 wallets and indexers rather than consensus, fixed all the same once contracts use them: it is regenerated with
 `cargo run -p ksana-contract-sdk --example gen_standard_vectors` only when a standard changes on purpose, recorded in
@@ -19,6 +20,7 @@ BTC transaction IDs and block hashes are in Bitcoin internal byte order (D-001).
 | `signing.json` | `tagged_hash` samples; `cases`: secret key, `aux_rand`, account (the Taproot output key of the secret key tweaked per BIP86, D-092), signing message content `unsigned_borsh`, `sighash`, the signed VmOp with its encoding and `op_id`; `tampered`: VmOps tampered field by field that must fail verification; `bip322`: BIP322 simple signatures of the account's Taproot address (P2TR key-path; message, `message_hash`, `to_spend` / `to_sign` transaction IDs, witness, D-052, D-092) | `crates/ksana-crypto/tests/vectors.rs` |
 | `merkle.json` | RFC 6962 reference roots; `entries_root` samples (D-004) | `crates/ksana-crypto/tests/vectors.rs` |
 | `pow.json` | PoW (D-094): for each case the header (JSON and Borsh), chain ID and Argon2id parameters, salt, block hash, the 32-byte Argon2id output `pow_hash`, `pow_value` interpreted as little-endian, weight, effective target and whether it is met | `crates/ksana-consensus/tests/argon2id.rs` |
+| `compress.json` | Envelope data (D-141): for each case the data of a KSN1 envelope, the bound `max` on the payload's length and the payload read from it (the data itself, or the content of its zstd frame), `null` when the envelope is malformed: frames as the node writes them, padding, the content size and checksum, dictionaries, the bound, and frames at the edges of what the node's decoder takes. The TS SDK reads a payload from `matches-before-the-start`, which the node rejects (D-141) | `crates/ksana-btc/tests/compress.rs` |
 | `standards.json` | The token standards KS-20 and KS-721 (`docs/STANDARDS.md`, D-120) as the contract SDK's reference implementation encodes them: `calls`, the Borsh arguments of every method (`value` names them as the standard does); `answers`, the `Ok` bytes of every view's answer and of `transfer_and_call`'s; `events`, the events of both standards (externally tagged), each parsed back to itself; `invalid_events`, bytes that are no event of the standard (a byte more or less, the other standard's event, an option tag or a boolean of 2, a name or a declaration that is not UTF-8); `token_ids`, KS-721 IDs from serial numbers (big-endian in the last 16 bytes) and IDs without one; `asset_refs`, the `AssetRef` of a token or a built-in asset and bytes that are neither | `crates/ksana-contract-sdk/tests/standard_vectors.rs` (the committed file is what the generator writes) |
 
 A BIP340 signature is determined by `(secret_key, sighash, aux_rand)` (the signing key is `secret_key` tweaked per

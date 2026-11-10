@@ -17,6 +17,12 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-10, the revenue moves in a sweep transaction (M55, D-142)**: local policy. The change of every settlement, rescue and republish returns to the funding address, so the producer
+  can bump any pair through it (D-140); what the funding wallet holds above the hot-wallet cap goes to the revenue address in a transaction of its own (§7.7).
+- **2026-11-08, the reveal returns the change, and envelope data may be zstd-compressed (M55, D-140, D-141)**: consensus change, devnet / signet restart from genesis. The commit
+  transaction's only output is the commitment and the reveal's only output is the producer's change: the 240-sat P2A output and the empty `OP_RETURN` are gone, the producer bumps a pair
+  through the change, and no other party can pin it (§7.2, §7.7). A republish chains on the change of the reveal before it, which orders the reveals and not only the commits (§7.6). The
+  data of a KSN1 envelope may be one zstd frame of the payload padded with `0x00` bytes; validation compares the decompressed payload, and budgets stay on decompressed bytes (§7.1, §7.2).
 - **2026-11-08, republishes chain on the change of the one before (M54, D-139)**: no consensus change. A node keeps up to four republishes in flight at once, each
   commit transaction spending the change of the last one's, so BTC confirms them in order and a backlog larger than one payload drains several payloads per BTC block rather than
   one (§7.6).
@@ -107,7 +113,7 @@ Version history:
   an anchor naming no BTC block cannot stop the determination either (corrected after the review of D-101); the block template never merges such a block, the main-chain selection never takes one, and a
   historical block taken from a peer is bound by the same anchor height limit as a new block, so that a block handed over through sync cannot stop it either (the second review of D-101, §6.2, §6.3, §6.4);
   nodes and indexers keep the states from the finalized tip on (§10.2, §10.3). The local policy that goes with it (D-102): the node's BTC
-  fee rate follows `estimatesmartfee` within a floor and a cap, its waiting settlements, rescues and republishes are bumped through the P2A output, a block's own settlement waiting in the mempool holds a rescue back
+  fee rate follows `estimatesmartfee` within a floor and a cap, its waiting settlements, rescues and republishes are bumped through the reveal's change, a block's own settlement waiting in the mempool holds a rescue back
   only as a claim does, and the next-block rate is paid while a competing chain is on BTC (§7.2, §7.3, §7.5–§7.7). The encodings, the shared vectors and the golden state roots are unchanged; devnet and signet
   restart from genesis.
 - **2026-10-06, consensus fixes (M27, D-100)**: a consensus change, adopted by the project owner from the fixes the security audit proposed: the fork choice counts a tip's own work, `chain_work = blue_work + work`
@@ -789,6 +795,12 @@ Two data carriers, both identified by the 4-byte magic `KSN1`:
   (at least 2 elements and the last one starts with `0x50`), still has at least 2 elements, the second to last is the leaf script; a leaf starting with `OP_PUSHBYTES_32 <32 bytes> OP_CHECKSIG
   OP_FALSE OP_IF` immediately followed by a push whose data is exactly the magic carries a KSN1 envelope; after that only data pushes may follow (same rules as above), and the format is correct only when the last element is exactly `OP_ENDIF` and the script
   ends there. Each witness byte counts as only 1 weight unit (0.25 vB); in an OP_RETURN it is 1 vB.
+- **Compressed envelope data** (D-141): the envelope's data (its chunks concatenated) is the payload itself, or, when it starts with the zstd magic number `28 b5 2f fd` (no payload does:
+  its first byte is the variant tag), one zstd frame (RFC 8878, no dictionary) of the payload followed by zero or more `0x00` bytes. A frame that is malformed, needs a dictionary,
+  decompresses to nothing or to more than 400 000 bytes, or is followed by anything other than `0x00`, makes the envelope malformed; whether a frame is malformed is what the node's decoder
+  (libzstd 1.5.7 decoding the whole frame at once) says, and `tests/vectors/compress.json` holds the cases at its edges. The payload is the decompressed frame; every rule below
+  (including `MAX_BLOCK_DATA_BYTES`) applies to it. The node sends a frame (level 19) only when it is at least 32 bytes shorter than the payload, padded by those 32 bytes (§7.2).
+  `NativeOp` in an OP_RETURN output is never compressed.
 - The payload is taken only when a transaction's KSN1 outputs and inputs carrying a KSN1 envelope **together number exactly one** and that one is well-formed; the payload's length is checked against `MAX_BLOCK_DATA_BYTES` before it is fully
   decoded (complete consumption required), and the data carrier must match the payload kind; otherwise it is not recognized (neither a native transaction nor a settlement / republish transaction).
 - A settlement or republish payload confirmed at BTC height h **counts** only when every header it carries anchors below h (`btc_anchor.height < h`, D-100); one that does not count is ignored as a whole: none of its headers counts
@@ -885,28 +897,26 @@ Commit transaction:
 | Position | Content |
 | --- | --- |
 | Inputs | at least one producer input: P2TR key-path (witness is a 64-byte signature, or 65 bytes with last byte `0x01`) or P2WPKH (`[strict DER low-S signature ‖ 0x01, 33-byte compressed public key]`), empty scriptSig, the signature covers all inputs and outputs and is verified against all prevouts; the prevouts are confirmed in blocks at height ≤ `anchor.height` on the anchor chain; all inputs are distinct |
-| Output 0 | producer change: P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not below that script's dust limit, not a KSN1 output |
-| Output 1 | commitment output: a P2TR output containing only the envelope leaf, the internal key is the public key in the leaf, the control block is 33 bytes; amount = the reveal transaction's fee + 240 sat |
+| Output 0 | the only one (D-140): the commitment output, a P2TR output containing only the envelope leaf, the internal key is the public key in the leaf, the control block is 33 bytes; amount = the reveal transaction's fee + the change |
 
 Reveal transaction:
 
 | Position | Content |
 | --- | --- |
-| Input | exactly one: output 1 of the commit transaction, empty scriptSig, the witness is exactly `[signature, envelope leaf, control block]`, the signature is `SIGHASH_DEFAULT` or `SIGHASH_ALL`, verified by the script path |
-| Output 0 | a 240 sat P2A anchor output (`OP_1 <0x4e73>`, Bitcoin Core 28's dust limit): anyone can use it for CPFP, accelerating both transactions at once |
-| Output 1 | an `OP_RETURN` with amount 0 and no data: with only one input and the P2A output, the non-witness part is 64 bytes, below Bitcoin Core's minimum of 65 bytes |
+| Input | exactly one: output 0 of the commit transaction, empty scriptSig, the witness is exactly `[signature, envelope leaf, control block]`, the signature is `SIGHASH_DEFAULT` or `SIGHASH_ALL`, verified by the script path |
+| Output 0 | the only one (D-140): producer change, P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not below that script's dust limit, not a KSN1 output; only the producer can spend it, so only the producer can CPFP the pair (§7.7). With one input and this output the non-witness part is at least 82 bytes, above Bitcoin Core's minimum of 65 |
 
 Validation rules (the settlement transactions a block carries, D-034, D-081):
 
 - The serialized length and the weight of both transactions do not exceed 400 000 (BTC's standard transaction limit); when decoding, the length is checked first and complete consumption is required.
 - Every input of both transactions has `nSequence = 0xFFFFFFFD` (D-100): with another value BIP68 could put a relative time lock on an input, and the block's settlement could not land on BTC until it expired.
-- The envelope leaf must be the canonical construction of the payload generated from the block's contents (compared byte for byte); the control block and the commitment output are both recomputed from the public key in the leaf and the leaf, and compared byte for byte.
+- The envelope's data must decompress (§7.1, D-141) to exactly the payload generated from the block's contents, and the leaf must be the canonical construction of that data (compared byte for byte); the control block and the commitment output are both recomputed from the public key in the leaf and the leaf, and compared byte for byte.
 - Payload (§7.1): the last header is this block and `entries` is all of this block's entries; the header each item in `bodies` points at must be a block in this block's past, and its `entries` must equal
   all entries of that block; the remaining headers may be any headers (self-certified by PoW); every header anchors at or below this block's anchor height (D-100): the reveal transaction commits to this block's anchor
   and so confirms above it, and the payload then always counts (§7.1).
 - Fees: each transaction's own fee (sum of prevout amounts − sum of output amounts) ≥ `vsize × MIN_SETTLEMENT_FEERATE`, `vsize = ⌈weight / 4⌉`; without relying on package relay
   each can still enter the mempool on its own; above that, the node pays the rate of its fee policy (§7.7: the floor while the next BTC block has room, otherwise `estimatesmartfee` within a floor and a cap,
-  D-117) and bumps a pair left waiting in the mempool through the P2A output (D-102), or sends its payload again in a new pair when another party's transaction holds that output (D-131).
+  D-117) and bumps a pair left waiting in the mempool through the reveal's change (D-102, D-140).
 - **Settlement transactions may not spend one another**: guaranteed by "producer inputs must be confirmed before the anchor height"; settlement transactions in the mempool have no parent-child relationships, which avoids the BTC mempool's
   limit of 25 unconfirmed ancestors. The producer's change can be used for funding again once the settlement it belongs to is confirmed.
 - When receiving a new block (and before the producer submits its own block), additionally check: all inputs of the commit transaction are unspent in bitcoind's UTXO set, and the two transactions, as one package, pass
@@ -946,8 +956,8 @@ Local policy (D-045, D-057, D-077, D-081):
 - **Claims in the mempool** (D-098): a mempool transaction claiming to settle the block counts only when it is a commit / reveal pair carrying exactly the block's own payload, its commit spends confirmed outputs only and it pays at least
   this node's fee rate, and only for `RESCUE_ORDER_WINDOW + RESCUE_DELAY` BTC blocks after this node first saw it; otherwise anyone could suppress every rescue of a stuck block with a cheap claim that never confirms.
 - **The block's own settlement waiting in the mempool** (D-102): it holds the rescue back on the same terms as a claim, only while it pays at least this node's fee rate and for `RESCUE_ORDER_WINDOW + RESCUE_DELAY`
-  BTC blocks after this node first saw it waiting; then the block counts as stuck and the order above starts. Its producer does not rescue it but bumps it through the P2A output, or sends its payload
-  again in a new pair when another party's transaction holds that output (§7.7, D-131); a CPFP child is not counted in the pair's fee rate, so another node may still rescue a bumped settlement in its turn.
+  BTC blocks after this node first saw it waiting; then the block counts as stuck and the order above starts. Its producer does not rescue it but bumps it through the reveal's change
+  (§7.7, D-140); a CPFP child is not counted in the pair's fee rate, so another node may still rescue a bumped settlement in its turn.
 - **Reserving funding inputs**: transactions of this node that are in flight at the same time (the settlement transactions blocks carry, rescues, republishes, split transactions of funding UTXOs) may not spend the same funding output; after choosing the funding and
   before broadcasting, "check and reserve" atomically, and release when rejected or abandoned. A pair whose record is dropped or closed (its block left the main chain, or its data landed through another
   transaction) keeps its inputs reserved while any of its transactions is in the BTC mempool, where a BTC reorg can also put it back (D-104).
@@ -1027,7 +1037,7 @@ rescue); of the others it holds the header, and the body of one without settleme
 or is in the same payload, and its headers count as soon as it confirms (D-135). A block with settlement transactions parallel to f (which may come
 after it in acceptance order) will not carry it and is not counted. The same run of headers (distinguished by the starting hash) is not sent again until the transaction is confirmed or evicted; several nodes may each send one, and duplicates are
 ignored by the indexer. While a node's republishes wait in the mempool, it sends the next run (the blocks above not carried by them) chained on them: the commit transaction spends the change of the last one's
-commit transaction first, so BTC confirms them in order and every parent of a header in it has counted or confirms before it; at most four (`MAX_CHAINED_REPUBLISHES`, within Bitcoin Core's
+reveal transaction first (D-140), so BTC confirms them, reveals included, in order and every parent of a header in it has counted or confirms before it; at most four (`MAX_CHAINED_REPUBLISHES`, within Bitcoin Core's
 default 101 kvB limit on a cluster of unconfirmed transactions) are in flight, and none is added once the last one's change is spent (D-139); a republish's change always returns to the funding address, whose key signs for it in the next one. The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
 `CARRIER_REPOST_DELAY` (2) BTC blocks, the payee takes that block's carrier reward (§8.6); an earlier republish (typically D-091's republish of this node's own headers)
 gets no reward, and the producer share of those blocks is not deducted.
@@ -1051,17 +1061,16 @@ Local policy (D-037, D-060, D-075, D-109):
   transaction pays the floor instead, or the mempool's minimum (`mempoolminfee`) when that is higher, up to the cap (D-117). While a lighter competing chain is on BTC (§7.6) the target is the next block, whatever
   room the mempool has, so that this node's data lands before the other side's is final (a split transaction keeps the confirmation target: it does not race).
   A commit / reveal pair this node sent (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for 2 BTC blocks (at once during such a race) and pays less than the
-  estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's P2A output and one funding UTXO, lifting the package to the rate. Once it has waited 2 BTC blocks while the mempool
+  estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's change, lifting the package to the rate; once a later republish chained on the pair spends the change (§7.6), only that one's child can lift it. Once it has waited 2 BTC blocks while the mempool
   had room (outside a race), the rate is at least the pair's own rate doubled, and doubled again for every further such block, up to the cap, whatever the estimate (D-117). When the rate rises again, a child
   paying more replaces it (full RBF). A child that left the mempool is sent again only while its pair still waits there and is still one this node settles (its block has not left the main chain, D-104).
-  Anyone can attach a large low-rate child to the P2A output first, which a child of this node's would have to out-pay in full (BIP125 rule 3: pinning). When bitcoind refuses this node's first
-  child of a pair while the reveal waits in the mempool and another party's transaction spends its P2A output, the pair's payload goes out again, byte for byte, in a new pair funded by this node at
-  the bump's rate: it spends nothing of the old pair's, takes its place as the block's rescue or as the republish, and is bumped in turn (D-131). Nothing more is spent on a pair whose block's
+  Only the producer's key spends the change, so no other party can attach a child and pin the pair (D-140). Nothing more is spent on a pair whose block's
   carried data has all landed.
-- **Revenue address and hot-wallet cap**: the change is only required to be a standard output script; where it is paid is the producer's choice. When `--revenue-address` (an address on this chain's BTC network, not the funding
-  address itself) and `--hot-wallet-cap-sat` (default 1 000 000) are configured, then while assembling this block's settlement transaction, if the total of the hot wallet's UTXOs available for funding, minus the funding inputs selected this time, is still
-  not below the cap, the change is paid to the revenue address, otherwise it goes back to the hot wallet; a rescue settlement pays its change by the same rule to this node's own scripts (never to the original producer's), and the change of a republish transaction returns to the hot wallet. The hot wallet's balance therefore stays near the cap,
-  and the excess moves to the revenue address (which can be a cold wallet) along with the settlement transactions.
+- **Revenue address and hot-wallet cap** (D-060, D-142): the change of every pair this node sends (settlements, rescues, republishes) returns to the hot wallet, so the producer can bump any of them
+  through it (D-140). When `--revenue-address` (an address on this chain's BTC network, not the funding address itself) and `--hot-wallet-cap-sat` (default 1 000 000) are configured, and the hot
+  wallet's UTXOs available for funding hold more than the cap by at least 100 000 sats (`REVENUE_SWEEP_MIN_SAT`) and a tenth of the cap, a sweep transaction spends the largest of them that
+  cover the excess, pays the excess less its fee to the revenue address (which can be a cold wallet) and the rest back to the hot wallet (a rest below the dust floor is raised to it out of
+  the excess, so the hot wallet never keeps less than the cap); at most one sweep is unconfirmed at a time, and it pays the rate of a split transaction. The hot wallet's balance therefore stays near the cap.
 
 ## 8. Fees, incentives and unlocking
 
@@ -1563,7 +1572,7 @@ nonce on the node; results are always printed as JSON. There is also `ksana-keyt
 ## 12. Tech stack and repository layout
 
 The core is in Rust (toolchain pinned by `rust-toolchain.toml`: 1.98.1, edition 2021, with the wasm32-unknown-unknown target), organized as a Cargo workspace; the SDK is in
-TypeScript; the development and CI environment is Ubuntu 22.04. bitcoind must be Bitcoin Core 28.0 or later (P2A outputs and package `testmempoolaccept` are needed), with txindex enabled;
+TypeScript; the development and CI environment is Ubuntu 22.04. bitcoind must be Bitcoin Core 28.0 or later (package `testmempoolaccept` is needed), with txindex enabled;
 devnet uses 28.4. Build and test commands are collected in `CONTRIBUTING.md` at the repository root.
 
 ```text
@@ -1614,7 +1623,7 @@ ksana/
 | Network and RPC | `libp2p` 0.57, `jsonrpsee` 0.26, `tower-http` (CORS) |
 | Async, CLI and errors | `tokio` 1, `clap` 4, `thiserror`, `anyhow` |
 | Testing | `proptest`, `cargo-fuzz` (`libfuzzer-sys`), `tempfile`, `wat` |
-| TS SDK | `@noble/curves` 2.4, `@noble/hashes` 2.4, `@scure/base` 2.4, `@scure/btc-signer` 2.4, `borsh` 2.0; dev dependencies `typescript` 5.9, `esbuild`, `playwright-core` |
+| TS SDK | `@noble/curves` 2.4, `@noble/hashes` 2.4, `@scure/base` 2.4, `@scure/btc-signer` 2.4, `borsh` 2.0, `fzstd` 0.1 (D-141); dev dependencies `typescript` 5.9, `esbuild`, `playwright-core` |
 
 When introducing a dependency outside the table above, record the reason in `docs/DECISIONS.md` (D-008 and later entries record the existing additions).
 
@@ -1679,7 +1688,7 @@ status of each value are in §13.1. Node, indexer and CLI select the network wit
 | `UPGRADES` | empty | same | same | Upgrade schedule (§6.9); none of the three networks has a scheduled upgrade |
 
 Consensus constants outside the parameters: `VMOP_VERSION` 2; `BLOCK_VERSION` 2; `MAX_CALL_FUNDS` 16; the empty root of `entries_root` is `sha256("")`; KSN1 data chunks ≤ 520 bytes;
-each settlement transaction's length and weight ≤ 400 000; P2A output 240 sats; `Bip322Simple` signature ≤ 1 024 bytes; VM: `STACK_BUDGET` 256 KiB, stack frame `64 + 16 × value slots`,
+each settlement transaction's length and weight ≤ 400 000; a compressed envelope's data decompresses to at most 400 000 bytes, compression slack 32 bytes; `Bip322Simple` signature ≤ 1 024 bytes; VM: `STACK_BUDGET` 256 KiB, stack frame `64 + 16 × value slots`,
 tables ≤ 4 096 elements, storage keys ≤ 256 bytes, storage values / call inputs / return values ≤ 65 536 bytes, events ≤ 16 384 bytes, `asset_issue` / `asset_create` meta ≤ 1 024 bytes,
 asset names 1–64 bytes, symbols 1–16 bytes, decimals ≤ 18 (D-121),
 ≤ 64 instances per op, linear memory ≤ 256 MiB in total; see `docs/ABI.md` for the gas table.
@@ -1746,7 +1755,7 @@ acceptance details of each milestone were kept in a development log that is not 
 | M0 Project skeleton | workspace, CI (fmt / clippy / test), docker-compose for devnet; `ksana-primitives` and `ksana-crypto`; shared vectors | Done |
 | M1 VM and state | `ksana-vm`, `ksana-state`, `ksana-execution`, the built-in Account / Asset modules, contract SDK, example token contract, `docs/ABI.md`; two-process determinism test | Done |
 | M2 Single-node fast lane | `ksana-consensus` (PoW, ASERT), `ksana-mempool`, single-node `ksana-node`, basic RPC; path B; restart recovery | Done |
-| M3 BTC integration and settlement | `ksana-btc`: anchoring, construction / signing / verification of settlement transactions and delayed broadcast, P2A, scanning and forced inclusion for path C, unlock entries | Done |
+| M3 BTC integration and settlement | `ksana-btc`: anchoring, construction / signing / verification of settlement transactions and delayed broadcast, P2A (removed, D-140), scanning and forced inclusion for path C, unlock entries | Done |
 | M4 Multi-node network | `ksana-p2p`, 3-node devnet, block and op broadcast, fork choice and reorg rollback | Done |
 | M5 Indexer and exception handling | `ksana-indexer`, rescue settlement, settlement backlog limit, header republishing | Done |
 | M6 SDK and wallet | TypeScript SDK, BIP322 simple, Unisat / Xverse adapters, `ksana_estimateFee`, signet parameters and demo page, CLI | Done (the path A acceptance with real wallets on signet became void with the deletion of path A) |
@@ -1848,7 +1857,7 @@ Testing focuses on determinism and exception paths: any problem that makes state
 | The producer goes offline after broadcasting a block | Other nodes broadcast the settlement transaction on its behalf, or initiate a rescue settlement in order |
 | The producer's funding input is spent | The rescue settlement rebuilds it with new funding, the payload unchanged; the indexer goes by the first one confirmed |
 | Two producers produce blocks at the same time | Both are merged; no settlement is broadcast before the depth is reached; the lighter side's settlement lands on BTC as usual after the merge, and no two transactions spend the same output |
-| BTC fee rates spike and the settlement transaction is stuck in the mempool | Its producer bumps it through the P2A output (CPFP) after 2 BTC blocks and it lands on BTC with the child; other nodes rescue it in their turn when it pays less than their rate or has waited `CLAIM_PATIENCE` BTC blocks (D-102); when another party's large low-rate child holds the P2A output first (pinning), the payload goes out again in a new pair at the bump's rate (D-131); a settlement in flight for more than 2 BTC blocks no longer blocks the next batch |
+| BTC fee rates spike and the settlement transaction is stuck in the mempool | Its producer bumps it through the reveal's change (CPFP) after 2 BTC blocks and it lands on BTC with the child; other nodes rescue it in their turn when it pays less than their rate or has waited `CLAIM_PATIENCE` BTC blocks (D-102); no other party can spend the change, so none can pin the pair (D-140); a settlement in flight for more than 2 BTC blocks no longer blocks the next batch |
 | A BTC reorg takes out the BTC block that confirmed a settlement | The settlement transactions land on BTC again, and the block they settle, anchored below, keeps its place and state; a reorg of at most `ANCHOR_DEPTH` blocks moves no fast-lane block at all; the finality determination is recomputed on the new branch |
 | A BTC reorg of more than `ANCHOR_DEPTH` blocks orphans anchors: with empty blocks, a path B op, a path C op whose native transaction confirms again or is double-spent, settlement transactions waiting in the BTC mempool or landed on the old branch, and BTC going back to the old branch | The main chain retreats below the blocks anchored on the orphaned BTC blocks (or merging such a block) and grows again on the new branch: the path B op is included again, the path C op again or not at all, and the waiting transactions keep their funding inputs; the nodes that had the blocks, a node syncing afterwards and the indexer choose the same main chain, and finality passes the retreat; no final block leaves the main chain for a reorg of at most `BTC_FINALITY_CONFS` blocks whose new branch carries no heavier chain; when BTC goes back, so do the blocks (D-104) |
 | A contract reads a BTC block header of insufficient depth | The call fails and the state is rolled back |
@@ -1899,7 +1908,7 @@ or for BTC finality.
 | Advantage of GPUs / dedicated hardware on Argon2id | Hashrate concentrates in those with dedicated hardware | The 2 MiB memory hardness keeps the GPU advantage to roughly the multiple of its GPU memory bandwidth (an estimated 10–30×, far less than SHA-256 ASICs); hardware with more on-chip memory still has an advantage; the parameters are fixed per network and can be retuned with a network upgrade (D-094) |
 | A heavier chain withheld for a long time | Published afterwards, it reorgs blocks already regarded as final and splits nodes and the indexer | Finality only recognizes data that lands on BTC in time, and a heavier but late chain is ignored; the main chain must pass through the finalized blocks |
 | A heavier chain together with a reorg of the BTC block that determined a block final (the review of 2026-10-14) | A determination rests on no heavier chain having connected by the BTC block that made it: a BTC reorg of that block alone, its new branch confirming the headers of a heavier chain forking below the final block, revoked the determination for good, one BTC block right after it and one more for each block since, while the docs promised at least `BTC_FINALITY_CONFS`; within reach of a large BTC pool, or one paid to do it, together with a rented fast-lane majority | A block is reported BTC-final only once the BTC block of its determination has `BTC_FINALITY_CONFS` confirmations: taking it back then takes a reorg of at least `BTC_FINALITY_CONFS` BTC blocks, which takes it off the finalized chain only with a heavier chain on its new branch or when it is at least `2 × BTC_FINALITY_CONFS − 1` blocks and removes the block's data, and nodes and indexers alert when a block they reported is taken back; BTC-final comes after about 110 minutes instead of 60 (§6.5 item 7, D-114) |
-| Rushing a lighter chain onto BTC first while idle, or while honest settlements wait behind a fee spike | The honest chain's headers have not landed yet, the other side's blocks reach the confirmation count first and become final, and the heavier honest chain is void; with a fixed honest fee rate, a spike above it (natural, or bought by filling BTC blocks) was enough | As soon as a node sees a competing chain appear on BTC it republishes its own headers up to the main-chain tip (§7.6, D-091), paying the next-block fee rate up to its cap; waiting settlements are bumped through the P2A output (§7.7, D-102); once the honest chain is connected on BTC, the candidate with more chain work is taken (§6.5, D-100). What remains is the accepted case: honest data that no operator pays to land for `BTC_FINALITY_CONFS` BTC blocks |
+| Rushing a lighter chain onto BTC first while idle, or while honest settlements wait behind a fee spike | The honest chain's headers have not landed yet, the other side's blocks reach the confirmation count first and become final, and the heavier honest chain is void; with a fixed honest fee rate, a spike above it (natural, or bought by filling BTC blocks) was enough | As soon as a node sees a competing chain appear on BTC it republishes its own headers up to the main-chain tip (§7.6, D-091), paying the next-block fee rate up to its cap; waiting settlements are bumped through the reveal's change (§7.7, D-102); once the honest chain is connected on BTC, the candidate with more chain work is taken (§6.5, D-100). What remains is the accepted case: honest data that no operator pays to land for `BTC_FINALITY_CONFS` BTC blocks |
 | Timestamp attack | Pushing timestamps into the future to lower the difficulty | Consensus rule: the timestamp does not exceed the anchor BTC block time plus 4 hours, and it cannot accumulate across anchors |
 | Spamming empty blocks | Many headers land on BTC, driving up BTC costs or grabbing rewards | Empty blocks are w times as hard, have weight w and are rewarded per slot (w doubles with the number of consecutive empty blocks from N to N_MAX, D-090), so the reward per unit of time equals that of non-empty blocks; the idle header interval doubles to about 10 minutes; empty blocks do not change the state root and are 14 bytes compressed |
 | Withholding weight-1 blocks in idle periods (selfish mining against heavy empty blocks) | A miner hides more than `GHOSTDAG_K` cheap blocks while an honest heavy empty block is being found, then publishes them: the heavy block turns red and gets no reward. Before D-100 a 5% / 10% / 20% miner took 30% / 45% / 56% of the honest reward slots at no cost to itself | The fork choice counts a tip's own work (§6.4, D-100): the heavy block wins as soon as it is published, and the withheld blocks arrive too late and turn red. Simulated, the honest loss falls to 0 / 0 / 0.03% / 1.2% (α = 5% / 10% / 20% / 30%), and the attacker loses a tenth to almost half of its own income |

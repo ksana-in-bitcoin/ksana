@@ -8,16 +8,14 @@
 //! | Position | Content |
 //! | --- | --- |
 //! | Inputs | At least one producer input, P2TR key-path or P2WPKH, all `SIGHASH_ALL` (or `SIGHASH_DEFAULT` for P2TR) |
-//! | Output 0 | Producer change (P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not below the dust floor, not a KSN1 output) |
-//! | Output 1 | Commitment output: a P2TR output with only the envelope leaf, the internal key is the key in the leaf; amount = the reveal transaction's fee + [`P2A_AMOUNT_SAT`] |
+//! | Output 0 | The only one: the commitment output, a P2TR output with only the envelope leaf, the internal key is the key in the leaf |
 //!
 //! Reveal transaction:
 //!
 //! | Position | Content |
 //! | --- | --- |
 //! | Input | Exactly one: output 1 of the commit transaction, empty scriptSig, witness exactly `[signature, envelope leaf, control block]` (signature `SIGHASH_DEFAULT` or `SIGHASH_ALL`) |
-//! | Output 0 | P2A anchor output of [`P2A_AMOUNT_SAT`] sats: anyone can CPFP it to speed up both transactions |
-//! | Output 1 | An empty `OP_RETURN` with amount 0: with only one input and the P2A output, the non-witness part of the transaction would be only 64 bytes, below Bitcoin Core's floor of 65 bytes |
+//! | Output 0 | The only one: producer change (P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not below the dust floor, not a KSN1 output); only the producer can spend it, so only the producer can CPFP the pair ([`cpfp_child`], D-140) |
 //!
 //! Both are v2 with `nLockTime = 0` and every input's `nSequence` [`PRODUCER_SEQUENCE`] (no relative time lock,
 //! D-100), neither the serialized length nor the weight exceeds [`MAX_SETTLEMENT_TX_BYTES`], and all inputs are
@@ -42,7 +40,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::key::{Keypair, Secp256k1, XOnlyPublicKey};
-use bitcoin::opcodes::all::OP_RETURN;
 use bitcoin::secp256k1::{schnorr, Message};
 use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
 use bitcoin::taproot::TapLeafHash;
@@ -52,15 +49,13 @@ use bitcoin::{
 };
 use ksana_primitives::{Params, SettlementTxs};
 
+use crate::compress;
 use crate::data::is_ksn1_output;
 use crate::envelope::{commitment, envelope_script, parse_envelope};
 use crate::spend::{
     self, bip86_keypair, expect_tap_sighash, taproot_signature, verify_p2wpkh_spend,
     verify_taproot_key_spend, SpendError,
 };
-
-/// The amount of the P2A anchor output (sats): Bitcoin Core 28's dust floor for P2A outputs.
-pub const P2A_AMOUNT_SAT: u64 = 240;
 
 /// The upper limit on the serialized length of a settlement transaction (commit and reveal each) (bytes, the BTC
 /// standard transaction limit); the weight must not exceed this number either ([`MAX_SETTLEMENT_WEIGHT`]).
@@ -77,24 +72,11 @@ pub const PRODUCER_SEQUENCE: u32 = 0xFFFF_FFFD;
 /// The signature length (bytes) when signing with `SIGHASH_DEFAULT`.
 const SIG_LEN: usize = 64;
 
-/// The index of the change output in the commit transaction.
-const CHANGE_OUTPUT: usize = 0;
+/// The index of the change output, the only output of the reveal transaction (D-140).
+pub const CHANGE_OUTPUT: u32 = 0;
 
-/// The index of the commitment output in the commit transaction (the reveal transaction spends it).
-pub const COMMITMENT_OUTPUT: u32 = 1;
-
-/// [`COMMITMENT_OUTPUT`] as an index.
-const COMMITMENT_INDEX: usize = 1;
-
-/// The locking script of the P2A anchor output: `OP_1 <0x4e73>`.
-pub fn p2a_script() -> ScriptBuf {
-    ScriptBuf::new_p2a()
-}
-
-/// The locking script of the reveal transaction's second output: only `OP_RETURN` (no data, not a KSN1 output).
-pub fn empty_op_return() -> ScriptBuf {
-    ScriptBuf::from_bytes(vec![OP_RETURN.to_u8()])
-}
+/// The index of the commitment output, the only output of the commit transaction (the reveal transaction spends it).
+pub const COMMITMENT_OUTPUT: u32 = 0;
 
 /// The producer's funding and change address: the P2TR locking script of its x-only internal key tweaked per BIP86
 /// (no script tree).
@@ -168,10 +150,12 @@ pub struct Draft {
     pub prevouts: Vec<TxOut>,
     /// The payload length: [`finalize`] requires the final payload to have the same length.
     pub payload_len: usize,
+    /// The length of the envelope's data ([`compress::pack`], D-141): [`finalize`] fits the final payload to it.
+    pub data_len: usize,
     /// The sum of the two transactions' fees (sats): each is the minimum `⌈weight / 4⌉ × fee rate` computed from
     /// the signed weight.
     pub fee: u64,
-    /// The reveal transaction's fee (sats); the commitment output's amount is this plus [`P2A_AMOUNT_SAT`].
+    /// The reveal transaction's fee (sats); the commitment output's amount is this plus the change.
     pub reveal_fee: u64,
     /// The change amount (sats).
     pub change: u64,
@@ -231,13 +215,13 @@ pub struct Checked {
 
 /// Assembles a settlement transaction draft per §7.2 and D-081.
 ///
-/// Commit transaction: the inputs are `producer` (`nSequence` is [`PRODUCER_SEQUENCE`], must be P2TR), output 0 is the
-/// change to `change_script`, output 1 is the P2TR output committing to the envelope leaf of `key` (payload
-/// `payload`). Reveal transaction: spends output 1, with a 240-sat P2A and an empty `OP_RETURN` as outputs.
+/// Commit transaction: the inputs are `producer` (`nSequence` is [`PRODUCER_SEQUENCE`], must be P2TR), the only output
+/// is the P2TR output committing to the envelope leaf of `key` (payload `payload`, compressed by [`compress::pack`],
+/// D-141). Reveal transaction: spends it, with the change to `change_script` as its only output (D-140).
 ///
 /// The reveal transaction's fee = `⌈weight / 4⌉ × feerate_sat_vb` (by the final witness: 64-byte signature, leaf,
-/// 33-byte control block), the commitment amount = it + 240; the commit transaction's fee is computed with 64-byte
-/// key-path signatures; change = sum of inputs − commitment amount − commit transaction's fee, and when it is below
+/// 33-byte control block); the commit transaction's fee is computed with 64-byte key-path signatures; change = sum of
+/// inputs − both fees, the commitment amount = change + the reveal's fee, and when the change is below
 /// the dust floor of `change_script`, [`SettlementError::InsufficientFunds`] is returned (likewise when `producer` is
 /// empty).
 pub fn draft(
@@ -271,7 +255,8 @@ pub fn draft(
             utxo.outpoint
         )));
     }
-    let leaf = envelope_script(key, &params.magic, payload).map_err(|e| invalid(e.to_string()))?;
+    let data = compress::pack(payload);
+    let leaf = envelope_script(key, &params.magic, &data).map_err(|e| invalid(e.to_string()))?;
     let committed = commitment(key, &leaf).map_err(SettlementError::Fatal)?;
 
     let input: Vec<TxIn> = producer
@@ -288,20 +273,14 @@ pub fn draft(
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
         input,
-        output: vec![
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: change_script,
-            },
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: committed.script_pubkey,
-            },
-        ],
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: committed.script_pubkey,
+        }],
     };
     check_distinct_inputs(&commit)?;
 
-    let reveal = Transaction {
+    let mut reveal = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
         input: vec![TxIn {
@@ -318,7 +297,10 @@ pub fn draft(
                 committed.control_block,
             ]),
         }],
-        output: reveal_outputs(),
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: change_script,
+        }],
     };
     check_size(&reveal, "reveal transaction")?;
     let reveal_fee = reveal
@@ -326,12 +308,13 @@ pub fn draft(
         .to_vbytes_ceil()
         .checked_mul(feerate_sat_vb)
         .ok_or_else(|| invalid("fee overflow"))?;
-    let committed_value = reveal_fee
-        .checked_add(P2A_AMOUNT_SAT)
+    let (commit_fee, change) =
+        fee_and_change(&commit, &reveal, &prevouts, reveal_fee, feerate_sat_vb)?;
+    let committed_value = change
+        .checked_add(reveal_fee)
         .ok_or_else(|| invalid("commitment amount overflow"))?;
-    set_output(&mut commit, COMMITMENT_INDEX, committed_value)?;
-    let (commit_fee, change) = fee_and_change(&commit, &prevouts, feerate_sat_vb)?;
-    set_output(&mut commit, CHANGE_OUTPUT, change)?;
+    set_output(&mut commit, 0, committed_value)?;
+    set_output(&mut reveal, 0, change)?;
     let fee = commit_fee
         .checked_add(reveal_fee)
         .ok_or_else(|| invalid("fee overflow"))?;
@@ -340,6 +323,7 @@ pub fn draft(
         reveal,
         prevouts,
         payload_len: payload.len(),
+        data_len: data.len(),
         fee,
         reveal_fee,
         change,
@@ -365,6 +349,7 @@ pub fn finalize(
         mut reveal,
         prevouts,
         payload_len,
+        data_len,
         ..
     } = draft;
     if payload.len() != payload_len {
@@ -374,13 +359,17 @@ pub fn finalize(
         )));
     }
     let xonly = key.x_only_public_key().0;
-    let leaf =
-        envelope_script(&xonly, &params.magic, payload).map_err(|e| invalid(e.to_string()))?;
+    let data = compress::fit(payload, data_len).ok_or_else(|| {
+        invalid(format!(
+            "the compressed final payload does not fit the draft's {data_len} bytes"
+        ))
+    })?;
+    let leaf = envelope_script(&xonly, &params.magic, &data).map_err(|e| invalid(e.to_string()))?;
     let committed = commitment(&xonly, &leaf).map_err(SettlementError::Fatal)?;
     let committed_out = {
         let out = commit
             .output
-            .get_mut(COMMITMENT_INDEX)
+            .first_mut()
             .ok_or_else(|| invalid("the draft has no commitment output"))?;
         out.script_pubkey = committed.script_pubkey;
         out.clone()
@@ -475,61 +464,115 @@ pub fn split_funding(
     Ok(Some(tx))
 }
 
-/// The output index of the P2A anchor in the reveal transaction.
-const ANCHOR_OUTPUT: u32 = 0;
+/// The revenue sweep transaction (D-142, the node's local policy for the hot wallet cap of D-060, not a settlement
+/// transaction): spends `utxos`, P2TR UTXOs of the producer's funding key, paying `amount_sat` less the fee to `revenue`
+/// and the rest back to the funding key's script (a rest below that script's dust floor is raised to it out of the
+/// amount, so the funding key never gets back less than the rest; no such output when there is no rest); fee =
+/// `⌈weight / 4⌉ × feerate_sat_vb`, out of the revenue output. Returns `None` without inputs, when they do not cover
+/// `amount_sat`, or when the revenue output would be below its dust floor. v2, `nLockTime = 0`,
+/// the inputs' `nSequence` is [`PRODUCER_SEQUENCE`] (replaceable).
+pub fn sweep_revenue(
+    utxos: &[ProducerUtxo],
+    amount_sat: u64,
+    revenue: ScriptBuf,
+    feerate_sat_vb: u64,
+    key: &Keypair,
+) -> Result<Option<Transaction>, SettlementError> {
+    if utxos.is_empty() {
+        return Ok(None);
+    }
+    let script = producer_script(&key.x_only_public_key().0);
+    let total = utxos
+        .iter()
+        .try_fold(0u64, |sum, u| sum.checked_add(u.txout.value.to_sat()))
+        .ok_or_else(|| invalid("amount overflow"))?;
+    let rest = match total.checked_sub(amount_sat) {
+        None => return Ok(None),
+        Some(0) => 0,
+        Some(rest) => rest.max(script.minimal_non_dust().to_sat()),
+    };
+    let Some(gross) = total.checked_sub(rest) else {
+        return Ok(None);
+    };
+    let revenue_dust = revenue.minimal_non_dust().to_sat();
+    let mut tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: utxos
+            .iter()
+            .map(|u| TxIn {
+                previous_output: u.outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(PRODUCER_SEQUENCE),
+                // compute the weight by the final witness (64-byte key-path signature)
+                witness: Witness::from_slice(&[[0u8; SIG_LEN]]),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: revenue,
+        }],
+    };
+    if rest > 0 {
+        tx.output.push(TxOut {
+            value: Amount::from_sat(rest),
+            script_pubkey: script,
+        });
+    }
+    let fee = tx
+        .weight()
+        .to_vbytes_ceil()
+        .checked_mul(feerate_sat_vb)
+        .ok_or_else(|| invalid("fee overflow"))?;
+    let Some(paid) = gross.checked_sub(fee).filter(|&paid| paid >= revenue_dust) else {
+        return Ok(None);
+    };
+    if let Some(out) = tx.output.first_mut() {
+        out.value = Amount::from_sat(paid);
+    }
+    let prevouts: Vec<TxOut> = utxos.iter().map(|u| u.txout.clone()).collect();
+    sign_producer_inputs(&mut tx, &prevouts, key)?;
+    Ok(Some(tx))
+}
 
-/// A child transaction bumping a settlement or republish pair by CPFP through the reveal transaction's P2A output (the
-/// node's local fee policy, D-102; not a settlement transaction): spends the P2A output (empty witness) and one P2TR
-/// UTXO `utxo` of the funding key `key`, and pays the change back to the same script. Its fee makes the package (the
-/// pair, `pair_fee` sats over `pair_vsize` vB, and the child) pay `feerate_sat_vb`, and is at least `min_fee` (when it
-/// replaces an earlier child: that one's fee plus the relay increment) and the child's own
-/// `vsize × MIN_SETTLEMENT_FEERATE`. Returns the child and its fee; `None` when `utxo` cannot pay that with a change
-/// above the dust floor. v2, `nLockTime = 0`, every `nSequence` [`PRODUCER_SEQUENCE`] (replaceable by a later bump).
-#[allow(clippy::too_many_arguments)]
+/// A child transaction bumping a settlement or republish pair by CPFP through the reveal transaction's change, its only
+/// output (the node's local fee policy, D-102, D-140; not a settlement transaction): spends the change, which must be
+/// a P2TR output of the funding key `key`, and pays what is left back to the same script. Its fee makes the package
+/// (the pair, `pair_fee` sats over `pair_vsize` vB, and the child) pay `feerate_sat_vb`, and is at least `min_fee`
+/// (when it replaces an earlier child: that one's fee plus the relay increment) and the child's own
+/// `vsize × MIN_SETTLEMENT_FEERATE`. Returns the child and its fee; `None` when the change cannot pay that and stay
+/// above the dust floor. v2, `nLockTime = 0`, `nSequence` [`PRODUCER_SEQUENCE`] (replaceable by a later bump).
 pub fn cpfp_child(
     params: &Params,
     reveal: &Transaction,
     pair_fee: u64,
     pair_vsize: u64,
-    utxo: &ProducerUtxo,
     feerate_sat_vb: u64,
     min_fee: u64,
     key: &Keypair,
 ) -> Result<Option<(Transaction, u64)>, SettlementError> {
-    let anchor = reveal
+    let script = producer_script(&key.x_only_public_key().0);
+    let change = reveal
         .output
         .first()
-        .filter(|out| out.script_pubkey == p2a_script())
+        .filter(|out| out.script_pubkey == script)
         .cloned()
-        .ok_or_else(|| invalid("output 0 of the reveal transaction is not a P2A output"))?;
-    let script = utxo.txout.script_pubkey.clone();
-    if script != producer_script(&key.x_only_public_key().0) {
-        return Err(invalid(format!(
-            "UTXO {} is not a P2TR output of the funding key",
-            utxo.outpoint
-        )));
-    }
+        .ok_or_else(|| {
+            invalid("the reveal transaction's change is not a P2TR output of the funding key")
+        })?;
     let mut tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
-        input: vec![
-            TxIn {
-                previous_output: OutPoint {
-                    txid: reveal.compute_txid(),
-                    vout: ANCHOR_OUTPUT,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence(PRODUCER_SEQUENCE),
-                witness: Witness::new(),
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: reveal.compute_txid(),
+                vout: CHANGE_OUTPUT,
             },
-            TxIn {
-                previous_output: utxo.outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence(PRODUCER_SEQUENCE),
-                // compute the weight by the final witness (64-byte key-path signature)
-                witness: Witness::from_slice(&[[0u8; SIG_LEN]]),
-            },
-        ],
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence(PRODUCER_SEQUENCE),
+            // compute the weight by the final witness (64-byte key-path signature)
+            witness: Witness::from_slice(&[[0u8; SIG_LEN]]),
+        }],
         output: vec![TxOut {
             value: Amount::ZERO,
             script_pubkey: script.clone(),
@@ -545,33 +588,18 @@ pub fn cpfp_child(
         .ok_or_else(|| invalid("fee overflow"))?;
     let fee = package.saturating_sub(pair_fee).max(min_fee).max(own);
     let dust = script.minimal_non_dust().to_sat();
-    let Some(change) = utxo
-        .txout
+    let Some(rest) = change
         .value
         .to_sat()
-        .checked_add(anchor.value.to_sat())
-        .and_then(|total| total.checked_sub(fee))
-        .filter(|&change| change >= dust)
+        .checked_sub(fee)
+        .filter(|&rest| rest >= dust)
     else {
         return Ok(None);
     };
     if let Some(out) = tx.output.first_mut() {
-        out.value = Amount::from_sat(change);
+        out.value = Amount::from_sat(rest);
     }
-    let prevouts = [anchor, utxo.txout.clone()];
-    let secp = Secp256k1::new();
-    let tweaked = bip86_keypair(&secp, key).map_err(SettlementError::Fatal)?;
-    let sighash = SighashCache::new(&tx)
-        .taproot_key_spend_signature_hash(
-            1,
-            &Prevouts::All(prevouts.as_slice()),
-            TapSighashType::Default,
-        )
-        .map_err(|e| SettlementError::Fatal(format!("sighash computation failed: {e}")))?;
-    let signature = secp.sign_schnorr_no_aux_rand(&Message::from(sighash), &tweaked);
-    if let Some(txin) = tx.input.get_mut(1) {
-        txin.witness = Witness::from_slice(&[signature.serialize()]);
-    }
+    sign_producer_inputs(&mut tx, std::slice::from_ref(&change), key)?;
     Ok(Some((tx, fee)))
 }
 
@@ -596,13 +624,13 @@ pub fn decode_tx(bytes: &[u8]) -> Result<Transaction, SettlementError> {
 /// - Commit transaction: at least one input, all P2TR key-path (the witness is a 64-byte signature, or 65 bytes with
 ///   the last byte `0x01`) or P2WPKH (`[DER signature ‖ 0x01, 33-byte compressed public key]`), empty scriptSig, the
 ///   signatures are verified against all previous outputs; all inputs are distinct, and all previous outputs can be
-///   obtained from `source` (`None` means not confirmed before the anchor height, judged invalid); exactly two
-///   outputs, the change and the commitment (see the module docs);
+///   obtained from `source` (`None` means not confirmed before the anchor height, judged invalid); exactly one
+///   output, the commitment (see the module docs);
 /// - Reveal transaction: exactly one input, spending output 1 of the commit transaction, empty scriptSig, the witness
-///   is exactly `[signature, envelope leaf, control block]`: the leaf is the canonical envelope of `expected_payload`,
+///   is exactly `[signature, envelope leaf, control block]`: the leaf is the canonical envelope of its data,
 ///   the control block and the commitment output are both derived from the key in the leaf (the internal key) and
-///   this leaf, and the signature is verified by the script path; exactly two outputs, the P2A and the empty
-///   `OP_RETURN`;
+///   this leaf, and the signature is verified by the script path; the envelope's data decompresses (D-141) to
+///   `expected_payload`; exactly one output, the change (D-140);
 /// - Each transaction's own fee is ≥ `vsize × MIN_SETTLEMENT_FEERATE`.
 ///
 /// The structure and payload rules are checked before the data source is queried.
@@ -633,7 +661,7 @@ pub fn validate_attached(
             "the scriptSig of input {index} of the commit transaction must be empty"
         )));
     }
-    let committed = check_commit_outputs(params, commit)?;
+    let committed = check_commit_outputs(commit)?;
 
     // structure, envelope and signature of the reveal transaction
     check_header(reveal, "reveal transaction")?;
@@ -659,7 +687,7 @@ pub fn validate_attached(
         ));
     }
     check_sequences(reveal, "reveal transaction")?;
-    check_reveal_outputs(reveal)?;
+    check_reveal_outputs(params, reveal)?;
     let envelope = check_envelope(params, txin, committed, expected_payload)?;
     verify_reveal_signature(reveal, committed, &envelope)?;
 
@@ -680,9 +708,9 @@ pub fn validate_attached(
         committed.value.to_sat(),
         "reveal transaction",
     )?;
-    let change = commit
+    let change = reveal
         .output
-        .get(CHANGE_OUTPUT)
+        .first()
         .map(|out| out.value.to_sat())
         .ok_or_else(|| invalid("no change output"))?;
     let fee = commit_fee
@@ -748,16 +776,30 @@ fn check_distinct_inputs(tx: &Transaction) -> Result<(), SettlementError> {
     Ok(())
 }
 
-/// The change and commitment outputs of the commit transaction (exactly outputs 0 and 1); returns the commitment
-/// output. Whether the commitment output commits to the right leaf is checked in [`check_envelope`].
-fn check_commit_outputs<'a>(
-    params: &Params,
-    commit: &'a Transaction,
-) -> Result<&'a TxOut, SettlementError> {
-    let [change, committed] = commit.output.as_slice() else {
+/// The commit transaction's only output, the commitment (D-140), returned. Whether it commits to the right leaf is
+/// checked in [`check_envelope`].
+fn check_commit_outputs(commit: &Transaction) -> Result<&TxOut, SettlementError> {
+    let [committed] = commit.output.as_slice() else {
         return Err(invalid(format!(
-            "the commit transaction must have exactly two outputs, the change and the commitment, got {}",
+            "the commit transaction must have exactly one output, the commitment, got {}",
             commit.output.len()
+        )));
+    };
+    if !committed.script_pubkey.is_p2tr() {
+        return Err(invalid(
+            "the commit transaction's output must be a P2TR commitment output",
+        ));
+    }
+    Ok(committed)
+}
+
+/// The reveal transaction's only output, the producer's change (D-140): P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not a KSN1
+/// output, not below its dust floor.
+fn check_reveal_outputs(params: &Params, reveal: &Transaction) -> Result<(), SettlementError> {
+    let [change] = reveal.output.as_slice() else {
+        return Err(invalid(format!(
+            "the reveal transaction must have exactly one output, the change, got {}",
+            reveal.output.len()
         )));
     };
     if is_ksn1_output(&params.magic, &change.script_pubkey) {
@@ -775,32 +817,6 @@ fn check_commit_outputs<'a>(
             change.value.to_sat()
         )));
     }
-    if !committed.script_pubkey.is_p2tr() {
-        return Err(invalid(
-            "output 1 of the commit transaction must be a P2TR commitment output",
-        ));
-    }
-    Ok(committed)
-}
-
-/// The reveal transaction's outputs: exactly a 240-sat P2A and an empty `OP_RETURN` with amount 0.
-fn check_reveal_outputs(reveal: &Transaction) -> Result<(), SettlementError> {
-    let [anchor, filler] = reveal.output.as_slice() else {
-        return Err(invalid(format!(
-            "the reveal transaction must have exactly two outputs, the P2A and the empty OP_RETURN, got {}",
-            reveal.output.len()
-        )));
-    };
-    if anchor.script_pubkey != p2a_script() || anchor.value.to_sat() != P2A_AMOUNT_SAT {
-        return Err(invalid(format!(
-            "output 0 of the reveal transaction must be a P2A output of {P2A_AMOUNT_SAT} sats"
-        )));
-    }
-    if filler.script_pubkey != empty_op_return() || filler.value != Amount::ZERO {
-        return Err(invalid(
-            "output 1 of the reveal transaction must be an OP_RETURN with amount 0 and no data",
-        ));
-    }
     Ok(())
 }
 
@@ -813,7 +829,7 @@ struct Envelope {
 }
 
 /// The reveal transaction's witness is exactly `[signature, envelope leaf, control block]`: the leaf is the canonical
-/// envelope of `expected_payload` ([`envelope_script`]), the control block and the locking script of `committed` are
+/// envelope of its data ([`envelope_script`]), which decompresses to `expected_payload` (D-141), the control block and the locking script of `committed` are
 /// both derived from the key in the leaf (the internal key) and this leaf; the signature is a BIP340 signature with
 /// `SIGHASH_DEFAULT` (64 bytes) or `SIGHASH_ALL` (65 bytes).
 fn check_envelope(
@@ -830,18 +846,19 @@ fn check_envelope(
         )));
     };
     let leaf = Script::from_bytes(leaf);
-    let (key, payload) = parse_envelope(&params.magic, leaf).ok_or_else(|| {
+    let (key, data) = parse_envelope(&params.magic, leaf).ok_or_else(|| {
         invalid("the reveal transaction's witness has no well-formed KSN1 envelope")
     })?;
-    if payload != expected_payload {
+    // Compared decompressed (D-141): the compressed bytes depend on the compressor
+    if compress::unpack(&data, params.max_block_data_bytes).as_deref() != Some(expected_payload) {
         return Err(invalid(
             "the payload in the envelope does not match the block contents",
         ));
     }
     let key = XOnlyPublicKey::from_slice(&key)
         .map_err(|_| invalid("the public key in the envelope is invalid"))?;
-    let canonical = envelope_script(&key, &params.magic, expected_payload)
-        .map_err(|e| invalid(e.to_string()))?;
+    let canonical =
+        envelope_script(&key, &params.magic, &data).map_err(|e| invalid(e.to_string()))?;
     if leaf != canonical.as_script() {
         return Err(invalid(
             "the envelope leaf is not the canonical construction of the payload",
@@ -1032,28 +1049,17 @@ fn sign_producer_inputs(
     Ok(())
 }
 
-/// The reveal transaction's two outputs: a 240-sat P2A and an empty `OP_RETURN` with amount 0.
-fn reveal_outputs() -> Vec<TxOut> {
-    vec![
-        TxOut {
-            value: Amount::from_sat(P2A_AMOUNT_SAT),
-            script_pubkey: p2a_script(),
-        },
-        TxOut {
-            value: Amount::ZERO,
-            script_pubkey: empty_op_return(),
-        },
-    ]
-}
-
-/// Computes the commit transaction's fee and change (output 0) by fee rate; the weight is computed with 64-byte
-/// signatures on the producer inputs. Change below its dust floor means insufficient funds.
+/// Computes the commit transaction's fee by fee rate (the weight with 64-byte signatures on the producer inputs) and
+/// the change, the reveal transaction's only output: sum of inputs − both fees. Change below its dust floor means
+/// insufficient funds.
 fn fee_and_change(
-    tx: &Transaction,
+    commit: &Transaction,
+    reveal: &Transaction,
     prevouts: &[TxOut],
+    reveal_fee: u64,
     feerate_sat_vb: u64,
 ) -> Result<(u64, u64), SettlementError> {
-    let mut sized = tx.clone();
+    let mut sized = commit.clone();
     for txin in sized.input.iter_mut() {
         txin.witness = Witness::from_slice(&[[0u8; SIG_LEN]]);
     }
@@ -1063,27 +1069,19 @@ fn fee_and_change(
         .checked_mul(feerate_sat_vb)
         .ok_or_else(|| invalid("fee overflow"))?;
     let total_in = sum_sat(prevouts).ok_or_else(|| invalid("sum of input amounts overflow"))?;
-    let other_out = sum_sat(
-        tx.output
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != CHANGE_OUTPUT)
-            .map(|(_, out)| out),
-    )
-    .ok_or_else(|| invalid("sum of output amounts overflow"))?;
-    let change_script = &tx
+    let change_script = &reveal
         .output
-        .get(CHANGE_OUTPUT)
+        .first()
         .ok_or_else(|| invalid("no change output"))?
         .script_pubkey;
     let dust = change_script.minimal_non_dust().to_sat();
     let change = total_in
-        .checked_sub(other_out)
-        .and_then(|rest| rest.checked_sub(fee))
+        .checked_sub(fee)
+        .and_then(|rest| rest.checked_sub(reveal_fee))
         .filter(|&change| change >= dust)
         .ok_or_else(|| {
             SettlementError::InsufficientFunds(format!(
-                "inputs of {total_in} sats cannot pay the commitment amount of {other_out} sats, the fee of {fee} sats ({vsize} vB × {feerate_sat_vb} sat/vB) and a change of at least {dust} sats"
+                "inputs of {total_in} sats cannot pay the fees of {fee} + {reveal_fee} sats ({feerate_sat_vb} sat/vB) and a change of at least {dust} sats"
             ))
         })?;
     Ok((fee, change))
@@ -1139,18 +1137,6 @@ fn sum_sat<'a>(outputs: impl IntoIterator<Item = &'a TxOut>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn p2a_script_bytes() {
-        assert_eq!(p2a_script().as_bytes(), &[0x51, 0x02, 0x4e, 0x73]);
-        assert_eq!(p2a_script().minimal_non_dust().to_sat(), P2A_AMOUNT_SAT);
-    }
-
-    #[test]
-    fn empty_op_return_is_a_bare_op_return() {
-        assert_eq!(empty_op_return().as_bytes(), &[0x6a]);
-        assert!(empty_op_return().is_op_return());
-    }
 
     #[test]
     fn producer_sequence_disables_bip68_and_signals_rbf() {

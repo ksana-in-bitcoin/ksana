@@ -41,6 +41,7 @@ hex = "0.4.3"
 # Tests only: decodes the base64 signatures in the official BIP322 vectors (D-052).
 base64 = "0.22.1"
 thiserror = "2.0.21"
+zstd = { version = "0.13.3", default-features = false }
 anyhow = "1.0.104"
 proptest = "1.11.0"
 bitcoin = "0.32.102"

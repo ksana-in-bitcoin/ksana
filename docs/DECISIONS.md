@@ -4681,7 +4681,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `crates/ksana-node` (`producer.rs`: `POOL_REFRESH_RATIO` and the nonces kept by tip; `ops::admit`; a test in `tests/adversarial_liveness.rs`); SPEC §6.2,
   §8.2, §14; the second audit's report (A2-08, F-12); the site's pages on sending operations and the CLI; CLAUDE.md; PROGRESS M47.
 
-## D-131 A pair whose P2A output another party's child holds goes out again in a new pair of this node's (the pinning residual of the second internal audit's A2-09, 2026-10-28; revises D-102 items c and d and its limitations, D-117's limitations and SPEC §7.2, §7.3, §7.7, §14, §15; local policy, no consensus change, M48)
+## D-131 A pair whose P2A output another party's child holds goes out again in a new pair of this node's (superseded: no P2A output, D-140; the pinning residual of the second internal audit's A2-09, 2026-10-28; revises D-102 items c and d and its limitations, D-117's limitations and SPEC §7.2, §7.3, §7.7, §14, §15; local policy, no consensus change, M48)
 
 - **Problem**: D-102 left P2A pinning open, and D-117 found that it holds a pair the room misjudged too. A reveal is a version 2 transaction whose P2A output anyone can spend, so anyone can
   attach a large child at a low rate first (up to the mempool's descendant limits, about 100 kvB). A child of this node's must then pay more than that child's whole fee to replace it (BIP125
@@ -5088,8 +5088,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
 - **Decision**: `republish` in `rescue.rs` keeps every republish of this node's alive, in acceptance order of its first header, and while fewer than `MAX_CHAINED_REPUBLISHES` (4) are in flight
   and the last one's commit change is unspent, sends the next run: the blocks of the range D-138 defines that the republishes in flight do not carry, funded by that change first (other funding
   UTXOs added when it is short). It is keyed by its first header, like the others. A chain whose last change is spent waits for its pairs to confirm. A republish's change always returns
-  to the funding address, never to the revenue address of D-060 (`fund_chainable` in `producer.rs`), and only change at the funding address links the chain: the next republish signs
-  for it with the funding key.
+  to the funding address, never to the revenue address of D-060, and only change at the funding address links the chain: the next republish signs
+  for it with the funding key (since D-142 every change does, through `fund`).
 - **Rationale**: a commit spending an unconfirmed commit's change cannot confirm before it, so the parents a payload needs from an earlier payload of the chain have counted by the time it
   confirms. Four full payloads, about 84 kvB with their commits, stay below Bitcoin Core's default 101 kvB cluster limit and the 25-transaction ancestor limit.
 - **Costs and limitations**: the order holds between commits; a reveal depends only on its own commit, so a miner could still include a later reveal without an earlier one. Miners select by
@@ -5097,7 +5097,72 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   output of the node's to spend. Pairs of different nodes, and a block's own settlement transactions (which must not spend each other, SPEC §7.2), are still ordered by the miner. A CPFP bump
   (D-102) spends a reveal's P2A output and leaves the chain as it is; a pinned link sent again (D-131) goes out as a pair of its own, outside the chain, while the links after it stay chained on
   the old one.
-- **Impact**: `crates/ksana-node` (`rescue.rs`: `MAX_CHAINED_REPUBLISHES`, `republish`; `producer.rs`: `fund_chainable`); the test `republishes_chain_on_the_change_of_the_one_before` in
-  `m12_batch.rs` (a backlog of more than four payloads with a revenue address set: four republishes in flight, each commit paying its change to the funding address and spending the change
-  of the one before, no block carried twice, all landing in one BTC block, and a new chain once they
+- **Impact**: `crates/ksana-node` (`rescue.rs`: `MAX_CHAINED_REPUBLISHES`, `republish`); the test `republishes_chain_on_the_change_of_the_one_before` in
+  `m12_batch.rs` (a backlog of more than four payloads with a revenue address set: four republishes in flight, each paying its change to the funding address and spending the change of the one before, no block carried twice, all landing in one BTC block, and a new chain once they
   confirm); SPEC (the version history, §7.6).
+
+## D-140 The reveal returns the change; no P2A output (fees of the public signet, 2026-11-08; revises D-081, D-102, D-131, D-139 and SPEC §7.2, §7.6, §7.7; consensus change, devnet / signet restart from genesis, M55)
+
+- **Problem**: every settlement and republish paid a 240-sat P2A output (Bitcoin Core 28's dust floor for P2A) and an empty `OP_RETURN` to keep the reveal's non-witness part at the
+  65-byte minimum. On the public signet another party spent the P2A output within a block of the reveal confirming every time, so the 240 sats were lost on every pair: at 2 sat/vB about a
+  quarter of a light-load settlement's cost. The P2A output was also the only one another party could spend, the root of the pinning D-131 works around.
+- **Decision**: the commit transaction's only output is the commitment; the reveal's only output is the producer's change (a standard output script, not a KSN1 output, not below its dust
+  floor), so the commitment amount is the change plus the reveal's fee. The producer bumps a waiting pair with a CPFP child spending that change alone (`cpfp_child`), and a republish chains
+  on the change of the reveal before it rather than of the commit (D-139).
+- **Rationale**: a 1-input 1-output reveal's non-witness part is 94 bytes, above the 65-byte minimum without a filler. The commit loses an output (about 43 vB) and the reveal gains 20
+  bytes, about 23 vB less per pair, and nothing is left for anyone to sweep. Only the producer's key spends the change, so no one else can attach a child: D-131's re-sending of a pinned
+  pair is gone. A later reveal of a chain now spends the earlier one's change, so the chain orders the reveals, not only the commits, and a later payload of the chain cannot confirm first.
+- **Costs and limitations**: no one but the producer can CPFP a pair; other nodes never did (they rescue with a pair of their own, SPEC §7.5). Once a chained republish spends a reveal's change
+  the earlier pair can only be lifted through the last link's child, and that child is sized for its own pair, not the chain. The change of a block's own settlement is unconfirmed until it
+  lands and settlement transactions still must not spend one another (SPEC §7.2), so it funds the next block only after confirming, as before. Change paid to the revenue address
+  of D-060 could not be bumped, since the funding key does not sign for it: D-142 keeps all change at the funding address.
+- **Impact**: `crates/ksana-btc` (`settlement.rs`: `CHANGE_OUTPUT`, `COMMITMENT_OUTPUT`, `draft`, `validate_attached`, `cpfp_child`; `P2A_AMOUNT_SAT`, `p2a_script` and `empty_op_return`
+  removed); `crates/ksana-node` (`rescue.rs`: the bump spends the reveal change, D-131's `anchor_taken` and `send_again` removed, the chain's tail is the reveal change); tests; SPEC (the
+  version history, §7.2, §7.5, §7.6, §7.7, §12, §13); `sdk/ts/src/types.ts`.
+
+## D-141 Envelope data may be one zstd frame (fees of the public signet, 2026-11-08; revises D-081 and SPEC §7.1, §7.2; consensus change, devnet / signet restart from genesis, M55)
+
+- **Problem**: under load the payload bytes dominate a settlement's cost. Re-encoding the 2 975 blocks and 46 840 transactions of the signet load test of D-138 took 5.08 MB; zstd on each
+  payload made it 3.58 MB (−30%): signatures (59% of the bytes) do not compress, the rest does.
+- **Decision**: the data of a KSN1 envelope (settlement and republish payloads) is either the payload itself or one zstd frame (RFC 8878, no dictionary) of it followed by zero or more `0x00`
+  bytes; it is a frame when it starts with the zstd magic number `28 b5 2f fd`, which no payload starts with (a payload's first byte is its variant tag, 0 to 2). A frame that is malformed,
+  needs a dictionary, decompresses to nothing or to more than the transaction size limit (400 000 bytes), or is followed by anything other than `0x00` is invalid data. A carried settlement's
+  envelope must decompress to exactly the canonical payload, and the payload counts against `MAX_BLOCK_DATA_BYTES` decompressed. The node compresses at level 19 and sends the frame when it
+  is at least `SLACK` (32) bytes shorter than the payload. `NativeOp` (path C, an `OP_RETURN` output) is never compressed.
+- **Rationale**: the validator compares decompressed bytes, so the result does not depend on the compressor's version or level, only on the decoder accepting the RFC 8878 format; the
+  Rust nodes and the indexer share one decoder (`ksana_btc::compress::unpack`). The producer drafts its settlement before the PoW and the final header changes the compressed length, so the
+  draft reserves `SLACK` bytes and the final frame is padded with zeros to the drafted length (the fee and signatures of the commit depend on it). Budgets stay on decompressed bytes in this
+  version: a payload carries as much data as before, at fewer bytes and lower fees. The TypeScript SDK builds no compressed payload, but it reads them: `txData` and `txPayload` give the
+  explorer a reveal's payload, so the SDK decompresses an envelope's data too (`unpackEnvelopeData`). It takes the dependency `fzstd` 0.1.1 for the blocks (a decoder in plain JavaScript, no
+  dependencies of its own, synchronous like `txData`; a WebAssembly build of libzstd would have to be loaded asynchronously) and checks the frame's layout itself by the node's rules: the
+  header, the dictionary ID, the extent of the blocks, the padding, the content size, the checksum (XXH64), and the bound on the output and on the window it allocates. The cases are the
+  shared vectors `tests/vectors/compress.json`, written from what the node's decoder says.
+- **Costs and limitations**: "malformed" is what the node's decoder says, libzstd 1.5.7 decoding the whole frame at once, and that is not RFC 8878 to the letter: it takes a raw or RLE
+  block longer than the frame's window or than 128 KiB (bounded by the 400 000 bytes alone). The vectors pin these cases, and a change of the bundled libzstd must keep them. `fzstd` does
+  not check that a match stays within the frame's own content, so the SDK reads a payload from some frames the node rejects (the vector `matches-before-the-start`): whether a settlement
+  counts is taken from the node or the indexer, never from the SDK's reading. The compression ratio of real traffic is likely below the load test's, which was generated by scripts. A final frame more than `SLACK` bytes longer than the
+  draft's fails the block (it does not happen in practice: the nonce is 8 bytes of noise either way). Raising the budgets to compressed bytes, and signature half-aggregation, are left for
+  later (the latter is a post-mainnet research item, SPEC §16).
+- **Impact**: `crates/ksana-btc` (`compress.rs`; `data::tx_data` decompresses; `settlement::draft`, `finalize` and `check_envelope`; the example `gen_compress_vectors`); the workspace
+  dependency `zstd`; the TS SDK (`compress.ts`, `txData`; the dependency `fzstd`); `tests/vectors/compress.json`; tests (`compress.rs`, `settlement.rs`, the SDK's `compress.test.ts` and
+  `path-c.test.ts`); SPEC (the version history, §7.1, §7.2, §12).
+
+## D-142 The revenue moves in a sweep transaction (fees of the public signet, 2026-11-10; revises D-060 and SPEC §7.7; local policy, M55)
+
+- **Problem**: D-060 paid a settlement's change to the revenue address while the hot wallet, without this settlement's inputs, stayed at or above the cap. Since D-140 the change on the reveal
+  is the only output a CPFP child can spend, and the funding key does not sign for the revenue address: a well-funded node, the one paying its change there most often, could bump none of
+  those pairs and had to leave them to a rescue, a whole pair, when fees rose. A republish chained on such change (D-139) could not be signed at all (found by review on PR #10).
+- **Decision**: the change of every pair this node sends returns to the funding address (`fund` in `producer.rs`; `Funding::change_script` removed). The rescue thread's
+  `maintain_revenue` sends a sweep transaction (`sweep_revenue` in `ksana-btc`'s `settlement.rs`) once the available funding UTXOs exceed the cap by at least `REVENUE_SWEEP_MIN_SAT`
+  (100 000 sats) and a tenth of the cap: it spends the largest UTXOs that cover the excess, pays the excess less its fee to the revenue address and the rest back to the funding address
+  (a rest below the dust floor is raised to it out of the excess: the hot wallet never keeps less than the cap, however small the cap). One sweep is in flight at a time, at the rate of a
+  split transaction (D-075), its inputs reserved like a split's; the node forgets a sweep or a split only together with its reservation, once it confirms or is abandoned, so a failed RPC
+  call leaves both for the next round.
+- **Rationale**: every pair can be bumped and chained again, whatever the revenue configuration. The cost is one transaction of about 100 to 150 vB per sweep, and a sweep waits for a tenth of
+  the cap to pile up, so it is rare; D-060's "without any extra transaction" is given up for it. Only UTXOs available for funding count, so what is in flight is never swept and the hot wallet
+  never falls below the cap through a sweep.
+- **Costs and limitations**: the excess waits in the hot wallet until it passes the threshold, at most a tenth of the cap or 100 000 sats more than D-060 left there. With a pool target (D-075)
+  above what the cap holds, split pieces may be swept again; the default cap and target were already at odds before.
+- **Impact**: `crates/ksana-btc` (`settlement.rs`: `sweep_revenue`); `crates/ksana-node` (`producer.rs`: `fund`, `Funding::change_script` removed; `rescue.rs`: `REVENUE_SWEEP_MIN_SAT`,
+  `maintain_revenue`, `settled`; `main.rs`: the help of `--revenue-address`); tests (`m6_2_mock.rs`, `m6_2_regtest.rs`, `m10_funding_pool.rs`, `m12_batch.rs`, `ksana-btc`'s
+  `settlement.rs`); SPEC (the version history, §7.7).

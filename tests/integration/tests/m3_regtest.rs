@@ -3,7 +3,7 @@
 //! delayed broadcast, unlock entries).
 //!
 //! 1. Path B: the op takes effect within a fast-lane block, the settlement transaction (only the producer's inputs;
-//!    outputs are change, data and P2A) confirms on regtest, and the fee is paid by the producer's funding (formerly
+//!    the reveal's only output is the change, D-140) confirms on regtest, and the fee is paid by the producer's funding (formerly
 //!    path A: the remainder of the contribution went into the producer's change; path A has been removed, D-078).
 //! 2. One settlement transaction covers the ops of 20 different users and lands on BTC (formerly merging the path-A
 //!    input/output pairs of 20 users).
@@ -13,8 +13,8 @@
 //!    block.
 //! 5. No spending relationship between settlement transactions: several settlements in the mempool at the same time
 //!    have no parent-child relationship with each other and confirm in the same BTC block.
-//! 6. One CPFP through the P2A output: after the settlement transaction is "stuck" (its mining priority lowered to
-//!    simulate a fee spike), anyone spends the P2A output to speed up its landing.
+//! 6. One CPFP through the reveal's change: after the settlement transaction is "stuck" (its mining priority lowered to
+//!    simulate a fee spike), the producer spends the change to speed up its landing (D-140).
 //! 7. Unlock: cannot unlock while the settlement is unconfirmed, or confirmed but an earlier block has not landed yet
 //!    (not in the settled prefix); once all are confirmed the producer writes an unlock entry and the locked token
 //!    fees become available balance; the same block cannot be unlocked twice.
@@ -26,13 +26,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+use bitcoin::consensus::encode::deserialize_hex;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::{
-    absolute, transaction, Amount, BlockHash, OutPoint as BtcOutPoint, ScriptBuf, Sequence,
-    Transaction, TxIn, TxOut, Txid, Witness,
-};
+use bitcoin::{Amount, BlockHash, OutPoint as BtcOutPoint, Transaction, TxOut, Txid};
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use ksana_btc::client::RpcClient;
 use ksana_btc::payload::{attached_payload, envelope_payload};
@@ -404,9 +401,9 @@ fn input_value(btc: &Btc, tx: &Transaction) -> u64 {
 }
 
 /// Acceptance 1 (revised by D-078, D-081): a path-B op takes effect within a fast-lane block; the settlement consists
-/// of a commit and a reveal transaction: the commit transaction has only the producer's inputs, with the change and
-/// the P2TR output committing to the envelope as outputs; the reveal transaction spends it, carries the payload in
-/// its witness, and has P2A and an empty OP_RETURN as outputs; broadcast after a delay of `SETTLEMENT_DEPTH` blocks,
+/// of a commit and a reveal transaction: the commit transaction has only the producer's inputs, with the P2TR output
+/// committing to the envelope as its only output; the reveal transaction spends it, carries the payload in its
+/// witness, and returns the change as its only output (D-140); broadcast after a delay of `SETTLEMENT_DEPTH` blocks,
 /// accepted and confirmed by bitcoind, with both fees paid by the producer's funding; BTC finality follows.
 #[test]
 fn path_b_op_takes_effect_and_the_producer_pays_the_settlement() {
@@ -447,8 +444,8 @@ fn path_b_op_takes_effect_and_the_producer_pays_the_settlement() {
     assert_eq!(s.status, SettlementState::Pending);
     let pair = decode_pair(&s);
     let (commit, reveal) = (&pair.commit, &pair.reveal);
-    assert_eq!(commit.output.len(), 2, "change and commitment");
-    assert_eq!(reveal.output.len(), 2, "P2A and empty OP_RETURN");
+    assert_eq!(commit.output.len(), 1, "the commitment");
+    assert_eq!(reveal.output.len(), 1, "the change");
     assert_eq!(
         s.txid,
         Some(pair.txid()),
@@ -482,31 +479,18 @@ fn path_b_op_takes_effect_and_the_producer_pays_the_settlement() {
     assert_eq!(confirmations(&btc, &txid_of(&s)), 1);
     assert_eq!(confirmations(&btc, &commit.compute_txid()), 1);
 
-    // Commit transaction: the change returns to the funding address, fee = producer inputs − change − committed
-    // amount; reveal transaction: fee = committed amount − P2A
+    // Commit transaction: fee = producer inputs − committed amount; reveal transaction: the change returns to the
+    // funding address, fee = committed amount − change
     let producer_in = input_value(&btc, commit);
-    let change = commit.output[0].value.to_sat();
-    let committed = commit.output[1].value.to_sat();
-    let commit_fee = producer_in - change - committed;
-    let reveal_fee = committed - btc_settlement::P2A_AMOUNT_SAT;
-    assert_eq!(commit.output[0].script_pubkey, fast.funding.script);
+    let committed = commit.output[0].value.to_sat();
+    let change = reveal.output[0].value.to_sat();
+    let commit_fee = producer_in - committed;
+    let reveal_fee = committed - change;
     assert!(
-        commit.output[1].script_pubkey.is_p2tr(),
+        commit.output[0].script_pubkey.is_p2tr(),
         "commitment output"
     );
-    assert_eq!(
-        reveal.output[0].script_pubkey,
-        btc_settlement::p2a_script(),
-        "P2A output"
-    );
-    assert_eq!(
-        reveal.output[0].value.to_sat(),
-        btc_settlement::P2A_AMOUNT_SAT
-    );
-    assert_eq!(
-        reveal.output[1].script_pubkey,
-        btc_settlement::empty_op_return()
-    );
+    assert_eq!(reveal.output[0].script_pubkey, fast.funding.script);
     let min = DEVNET.min_settlement_feerate_sat_vb;
     assert!(commit_fee >= commit.vsize() as u64 * min);
     assert!(reveal_fee >= reveal.vsize() as u64 * min);
@@ -578,12 +562,12 @@ fn twenty_users_share_one_settlement() {
     let pair = decode_pair(&s);
     assert_eq!(
         pair.commit.output.len(),
-        2,
+        1,
         "outputs independent of the number of users"
     );
     assert_eq!(
         pair.reveal.output.len(),
-        2,
+        1,
         "outputs independent of the number of users"
     );
     assert!(
@@ -729,9 +713,9 @@ fn settlements_never_spend_each_other() {
     }
 }
 
-/// Acceptance 6: one CPFP speed-up through the P2A output.
+/// Acceptance 6: one CPFP speed-up through the reveal's change (D-140).
 #[test]
-fn p2a_anchor_cpfp_confirms_a_stuck_settlement() {
+fn change_cpfp_confirms_a_stuck_settlement() {
     let btc = Btc::from_env().funded_wallet("m3");
     let gina = user("cpfp/gina");
     let hank = user("cpfp/hank");
@@ -756,7 +740,7 @@ fn p2a_anchor_cpfp_confirms_a_stuck_settlement() {
     for txid in [commit_txid, parent_txid] {
         btc.call(
             "prioritisetransaction",
-            &[json!(txid.to_string()), json!(0), json!(-100_000)],
+            &[json!(txid.to_string()), json!(0), json!(-10_000)],
         );
     }
     mine(&btc, 1);
@@ -767,62 +751,21 @@ fn p2a_anchor_cpfp_confirms_a_stuck_settlement() {
     assert_eq!(confirmations(&btc, &parent_txid), 0);
     assert_eq!(confirmations(&btc, &commit_txid), 0);
 
-    // Anyone: spend the reveal transaction's P2A output (empty witness) and pay enough fee from their own UTXO, which
-    // also speeds up the commit transaction (an ancestor)
-    let anchor_vout = 0;
-    assert_eq!(
-        parent.output[anchor_vout].script_pubkey,
-        btc_settlement::p2a_script()
-    );
-    let utxo = btc.call("listunspent", &[json!(1)])[0].clone();
-    let wallet_in = BtcOutPoint::new(
-        Txid::from_str(utxo["txid"].as_str().unwrap()).unwrap(),
-        u32::try_from(utxo["vout"].as_u64().unwrap()).unwrap(),
-    );
-    let wallet_value = {
-        let prev: Transaction = deserialize_hex(
-            btc.call("getrawtransaction", &[json!(wallet_in.txid.to_string())])
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        prev.output[wallet_in.vout as usize].value.to_sat()
-    };
-    let child_fee = 300_000;
-    let change_addr = btc.new_address();
-    let change_script = bitcoin::Address::from_str(&change_addr)
-        .unwrap()
-        .assume_checked()
-        .script_pubkey();
-    let child = Transaction {
-        version: transaction::Version::TWO,
-        lock_time: absolute::LockTime::ZERO,
-        input: vec![
-            TxIn {
-                previous_output: BtcOutPoint::new(parent_txid, u32::try_from(anchor_vout).unwrap()),
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            },
-            TxIn {
-                previous_output: wallet_in,
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            },
-        ],
-        output: vec![TxOut {
-            value: Amount::from_sat(wallet_value + btc_settlement::P2A_AMOUNT_SAT - child_fee),
-            script_pubkey: change_script,
-        }],
-    };
-    // The wallet can only sign its own input; the P2A input needs no signature (empty witness)
-    let signed_child = btc.call(
-        "signrawtransactionwithwallet",
-        &[json!(serialize_hex(&child))],
-    );
-    let child: Transaction = deserialize_hex(signed_child["hex"].as_str().unwrap()).unwrap();
-    assert!(child.input[0].witness.is_empty());
+    // The producer: spend the reveal transaction's change and pay enough fee from it, which also speeds up the
+    // commit transaction (an ancestor); a package rate of 100 sat/vB outweighs the lowered priority
+    let pair_fee = input_value(&btc, &pair.commit) - parent.output[0].value.to_sat();
+    let pair_vsize = (pair.commit.vsize() + parent.vsize()) as u64;
+    let (child, _) = btc_settlement::cpfp_child(
+        &DEVNET,
+        &parent,
+        pair_fee,
+        pair_vsize,
+        100,
+        0,
+        &fast.funding.keypair,
+    )
+    .unwrap()
+    .expect("the change pays for the child");
     btc.send(&child);
     let block = mine(&btc, 1).pop().unwrap();
     for txid in [commit_txid, parent_txid, child.compute_txid()] {

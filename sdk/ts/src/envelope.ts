@@ -65,7 +65,10 @@ export function isKsn1Envelope(magic: Uint8Array, leaf: Uint8Array): boolean {
   return envelopeBody(magic, leaf) !== null;
 }
 
-/** A parsed envelope: its key, its payload (the chunks concatenated in order) and the number of chunks. */
+/**
+ * A parsed envelope: its key, its data (`payload`: the chunks concatenated in order, the payload itself or its zstd frame, D-141,
+ * which `unpackEnvelopeData` reads) and the number of chunks.
+ */
 export interface Ksn1Envelope {
   key: Uint8Array;
   payload: Uint8Array;

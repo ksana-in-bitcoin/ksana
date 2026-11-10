@@ -66,9 +66,9 @@ fn settlement_is_broadcast_after_the_settlement_depth_and_confirms() {
             .expect("the block carries a settlement transaction"),
     )
     .unwrap();
-    // The commit transaction's change returns to the producer's funding address; the settlement txid is the reveal
+    // The reveal transaction's change returns to the producer's funding address (D-140); the settlement txid is the reveal
     // transaction (which carries the payload, D-081)
-    assert_eq!(pair.commit.output[0].script_pubkey, n.funding.script);
+    assert_eq!(pair.reveal.output[0].script_pubkey, n.funding.script);
     assert_eq!(pair.txid(), txid);
     assert_eq!(s.commit_txid, Some(pair.commit_txid()));
     assert!(n.mock.in_mempool(&pair.commit_txid()).unwrap());

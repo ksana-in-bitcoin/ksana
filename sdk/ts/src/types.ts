@@ -129,9 +129,9 @@ export type EntryData =
 
 /** The settlement transactions carried by a block (D-081): the commit transaction and the reveal transaction, both in Bitcoin network serialization. The payload is in the witness of the reveal transaction (KSN1 envelope). */
 export interface SettlementTxs {
-  /** Commit transaction: the producer's funding inputs; the outputs are the change and the P2TR output committing to the envelope. */
+  /** Commit transaction: the producer's funding inputs; the only output is the P2TR output committing to the envelope (D-140). */
   commit: Uint8Array;
-  /** Reveal transaction: spends the commitment output and carries the payload in its witness; the outputs are a P2A and an empty OP_RETURN. */
+  /** Reveal transaction: spends the commitment output and carries the payload in its witness, zstd-compressed when shorter (D-141); the only output is the producer's change (D-140). */
   reveal: Uint8Array;
 }
 

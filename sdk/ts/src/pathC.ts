@@ -28,6 +28,7 @@ import { decodePayload, encodePayload, encodeVmOp } from './codec.js';
 import { ChainMismatchError, type Params } from './params.js';
 import { verifyVmop } from './sign.js';
 import { OP_RETURN, dustLimit, isP2tr, isP2wpkh, isStandardOutputScript, pushData, readPush } from './btc/script.js';
+import { unpackEnvelopeData } from './compress.js';
 import { isKsn1Envelope, parseKsn1Envelope, witnessLeaf } from './envelope.js';
 import { SCURE_TX_OPTIONS, signPsbtWithKey } from './btc/signer.js';
 import { type Tx, type TxOut, parseTx } from './btc/tx.js';
@@ -103,11 +104,18 @@ export type TxData =
   /** More than one data carrier, or the only one is malformed: the transaction is not recognized. */
   | { kind: 'invalid' };
 
+/** The payload an envelope carries: its data, decompressed when that is a zstd frame (D-141); `null` when either is malformed. */
+function envelopePayload(magic: Uint8Array, leaf: Uint8Array): Uint8Array | null {
+  const envelope = parseKsn1Envelope(magic, leaf);
+  return envelope === null ? null : unpackEnvelopeData(envelope.payload);
+}
+
 /**
  * Extracts the KSN1 data of a transaction as `tx_data` does: its two kinds of data carrier, the KSN1 outputs (an OP_RETURN that
  * does not start with the magic does not count) and the inputs whose witness leaf is a KSN1 envelope (`isKsn1Envelope`), counted
  * together; `one` when they total exactly one and that one is well-formed. A transaction with a KSN1 output and an envelope is
- * not recognized at all.
+ * not recognized at all. An envelope's payload is its data, decompressed when that is a zstd frame (`unpackEnvelopeData`, D-141);
+ * a KSN1 output's data is never compressed.
  */
 export function txData(magic: Uint8Array, tx: Tx): TxData {
   let found: { carrier: Carrier; script: Uint8Array } | null = null;
@@ -124,7 +132,7 @@ export function txData(magic: Uint8Array, tx: Tx): TxData {
     found = { carrier: { kind: 'Input', index }, script: leaf };
   }
   if (found === null) return { kind: 'none' };
-  const payload = found.carrier.kind === 'Output' ? parseKsn1DataScript(magic, found.script) : (parseKsn1Envelope(magic, found.script)?.payload ?? null);
+  const payload = found.carrier.kind === 'Output' ? parseKsn1DataScript(magic, found.script) : envelopePayload(magic, found.script);
   return payload === null ? { kind: 'invalid' } : { kind: 'one', carrier: found.carrier, payload };
 }
 

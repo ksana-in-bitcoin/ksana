@@ -17,9 +17,9 @@ use common::*;
 use ksana_btc::data::{data_script, tx_data, tx_payload, Carrier, TxData};
 use ksana_btc::envelope::{commitment, envelope_script, parse_envelope};
 use ksana_btc::settlement::{
-    cpfp_child, decode_tx, draft, empty_op_return, finalize, p2a_script, validate_attached,
-    Checked, PrevoutSource, SettlementError, SettlementPair, COMMITMENT_OUTPUT,
-    MAX_SETTLEMENT_TX_BYTES, P2A_AMOUNT_SAT, PRODUCER_SEQUENCE,
+    cpfp_child, decode_tx, draft, finalize, sweep_revenue, validate_attached, Checked,
+    PrevoutSource, SettlementError, SettlementPair, COMMITMENT_OUTPUT, MAX_SETTLEMENT_TX_BYTES,
+    PRODUCER_SEQUENCE,
 };
 use ksana_btc::spend::{taproot_signature, verify_taproot_key_spend};
 use ksana_primitives::{Params, Payload, SettlementTxs, DEVNET};
@@ -51,7 +51,7 @@ fn tamper_commit(
     let mut pair = s.pair.clone();
     let mut prevouts = s.prevouts.clone();
     f(&mut pair.commit, &mut prevouts);
-    if !pair.commit.input.is_empty() && pair.commit.output.len() > 1 {
+    if !pair.commit.input.is_empty() && !pair.commit.output.is_empty() {
         relink(&mut pair, &prevouts, &s.key);
     }
     (pair, prevouts)
@@ -62,7 +62,7 @@ fn tamper_reveal(s: &Settled, f: impl FnOnce(&mut Transaction)) -> SettlementPai
     let mut pair = s.pair.clone();
     f(&mut pair.reveal);
     if pair.reveal.input.len() == 1 && pair.reveal.input[0].witness.len() >= 2 {
-        let committed = pair.commit.output[1].clone();
+        let committed = pair.commit.output[0].clone();
         resign_reveal(
             &mut pair.reveal,
             &committed,
@@ -87,7 +87,7 @@ fn with_leaf(
         .and_then(|(key, _)| bitcoin::key::XOnlyPublicKey::from_slice(&key).ok())
         .unwrap_or_else(|| signer.x_only_public_key().0);
     let c = commitment(&internal, &leaf).unwrap();
-    pair.commit.output[1].script_pubkey = c.script_pubkey;
+    pair.commit.output[0].script_pubkey = c.script_pubkey;
     resign_producer(
         &mut pair.commit,
         &s.prevouts,
@@ -104,7 +104,7 @@ fn with_leaf(
         leaf.to_bytes(),
         control.unwrap_or(c.control_block),
     ]);
-    let committed = pair.commit.output[1].clone();
+    let committed = pair.commit.output[0].clone();
     resign_reveal(
         &mut pair.reveal,
         &committed,
@@ -122,7 +122,7 @@ fn roundtrip_pays_the_minimum_fee() {
         let checked = attached(&s, &s.pair).unwrap();
         // Every signature is valid at its actual position in the transaction (independently of ksana_btc's checks)
         verify_in_place(commit, &s.prevouts).unwrap();
-        verify_reveal_in_place(reveal, &commit.output[1]).unwrap();
+        verify_reveal_in_place(reveal, &commit.output[0]).unwrap();
         assert_eq!(checked.txid, reveal.compute_txid().to_byte_array());
         assert_eq!(checked.commit_txid, commit.compute_txid().to_byte_array());
         assert_eq!(checked.fee, s.fee);
@@ -134,7 +134,7 @@ fn roundtrip_pays_the_minimum_fee() {
         assert_eq!(s.reveal_fee, reveal_vsize * feerate);
         assert_eq!(s.fee, (commit_vsize + reveal_vsize) * feerate);
 
-        // Commit transaction: v2, nLockTime 0, two producer inputs, two outputs: change and commitment
+        // Commit transaction: v2, nLockTime 0, two producer inputs, one output: the commitment (D-140)
         assert_eq!(commit.version, transaction::Version::TWO);
         assert_eq!(commit.lock_time, absolute::LockTime::ZERO);
         assert_eq!(commit.input.len(), 2);
@@ -143,22 +143,17 @@ fn roundtrip_pays_the_minimum_fee() {
             assert_eq!(input.witness.len(), 1);
             assert_eq!(input.witness.nth(0).unwrap().len(), 64);
         }
-        assert_eq!(commit.output.len(), 2);
-        assert_eq!(commit.output[0].script_pubkey, producer_script(&s.key));
-        assert_eq!(commit.output[0].value.to_sat(), s.change);
-        assert!(commit.output[1].script_pubkey.is_p2tr());
-        assert_eq!(
-            commit.output[1].value.to_sat(),
-            s.reveal_fee + P2A_AMOUNT_SAT
-        );
+        assert_eq!(commit.output.len(), 1);
+        assert!(commit.output[0].script_pubkey.is_p2tr());
+        assert_eq!(commit.output[0].value.to_sat(), s.reveal_fee + s.change);
         let total_in: u64 = s.prevouts.iter().map(|o| o.value.to_sat()).sum();
         assert_eq!(
-            total_in - s.change - commit.output[1].value.to_sat(),
+            total_in - commit.output[0].value.to_sat(),
             commit_vsize * feerate
         );
 
         // Reveal transaction: spends the commitment output, witness = signature, envelope leaf and 33-byte control
-        // block, outputs = P2A and an empty OP_RETURN
+        // block, the only output = the change (D-140)
         assert_eq!(reveal.version, transaction::Version::TWO);
         assert_eq!(reveal.lock_time, absolute::LockTime::ZERO);
         assert_eq!(reveal.input.len(), 1);
@@ -174,27 +169,29 @@ fn roundtrip_pays_the_minimum_fee() {
         assert_eq!(witness[0].len(), 64);
         assert_eq!(witness[2].len(), 33);
         let key = s.key.x_only_public_key().0;
+        let (envelope_key, data) =
+            parse_envelope(&DEVNET.magic, bitcoin::Script::from_bytes(&witness[1])).unwrap();
+        assert_eq!(envelope_key, key.serialize());
         assert_eq!(
             witness[1],
-            envelope_script(&key, &DEVNET.magic, &s.payload)
+            envelope_script(&key, &DEVNET.magic, &data)
                 .unwrap()
                 .to_bytes()
         );
+        // The envelope holds the payload, compressed when that is shorter (D-141)
+        assert_eq!(
+            ksana_btc::compress::unpack(&data, DEVNET.max_block_data_bytes).unwrap(),
+            s.payload
+        );
         assert_eq!(
             reveal.output,
-            vec![
-                TxOut {
-                    value: Amount::from_sat(P2A_AMOUNT_SAT),
-                    script_pubkey: p2a_script()
-                },
-                TxOut {
-                    value: Amount::ZERO,
-                    script_pubkey: empty_op_return()
-                },
-            ]
+            vec![TxOut {
+                value: Amount::from_sat(s.change),
+                script_pubkey: producer_script(&s.key)
+            }]
         );
-        // Non-witness part 74 bytes: not below Bitcoin Core's 65-byte minimum
-        assert_eq!(reveal.base_size(), 74);
+        // Non-witness part 94 bytes: not below Bitcoin Core's 65-byte minimum
+        assert_eq!(reveal.base_size(), 94);
 
         // The tracker recognizes the payload in the reveal transaction; the commit transaction carries no data
         assert_eq!(
@@ -229,12 +226,10 @@ fn roundtrip_pays_the_minimum_fee() {
             validate_attached(&params, &cheap_commit, &s.payload, &s.source()),
             "the fee of the commit transaction"
         ));
-        // Commitment amount 1 sat short: the reveal transaction pays 1 sat less (change 1 sat more, the commit
-        // transaction still pays enough)
-        let (cheap_reveal, _) = tamper_commit(&s, |tx, _| {
-            tx.output[1].value -= Amount::from_sat(1);
-            tx.output[0].value += Amount::from_sat(1);
-        });
+        // Commitment amount 1 sat short: the reveal transaction pays 1 sat less (the commit transaction pays 1 sat
+        // more)
+        let (cheap_reveal, _) =
+            tamper_commit(&s, |tx, _| tx.output[0].value -= Amount::from_sat(1));
         assert!(invalid_with(
             validate_attached(&params, &cheap_reveal, &s.payload, &s.source()),
             "the fee of the reveal transaction"
@@ -321,7 +316,7 @@ fn draft_rejects_bad_inputs() {
         run(&[], change.clone(), &payload, 1),
         Err(SettlementError::InsufficientFunds(_))
     ));
-    let tiny = producer_utxos(&key, &[900]);
+    let tiny = producer_utxos(&key, &[500]);
     assert!(matches!(
         run(&tiny, change.clone(), &payload, 1),
         Err(SettlementError::InsufficientFunds(_))
@@ -335,7 +330,12 @@ fn draft_rejects_bad_inputs() {
     p2wpkh[0].txout.script_pubkey = p2wpkh_script(&secret("producer"));
     assert!(is_invalid(run(&p2wpkh, change.clone(), &payload, 1)));
     // The change script is not a standard type / is a KSN1 output
-    assert!(is_invalid(run(&producer, p2a_script(), &payload, 1)));
+    assert!(is_invalid(run(
+        &producer,
+        ScriptBuf::new_p2a(),
+        &payload,
+        1
+    )));
     let ksn1 = data_script(&DEVNET.magic, b"x").unwrap();
     assert!(is_invalid(run(&producer, ksn1, &payload, 1)));
     // The payload is empty or too long
@@ -385,41 +385,20 @@ fn commit_output_rules() {
                     .push(txout(1_000, producer_script(&producer_key())))
             }),
         ),
-        (
-            "one output too few",
-            Box::new(|tx, _| tx.output.truncate(1)),
-        ),
-        (
-            "change is a KSN1 output",
-            Box::new(|tx, _| {
-                tx.output[0].script_pubkey = data_script(&DEVNET.magic, b"second").unwrap();
-            }),
-        ),
-        (
-            "change below the dust limit",
-            Box::new(|tx, _| tx.output[0].value = Amount::from_sat(329)),
-        ),
-        (
-            "change locking script is not a standard type",
-            Box::new(|tx, _| tx.output[0].script_pubkey = p2a_script()),
-        ),
+        ("no output", Box::new(|tx, _| tx.output.clear())),
         (
             "outputs exceed inputs",
             Box::new(|tx, _| tx.output[0].value += Amount::from_sat(10_000_000)),
         ),
         (
-            "commitment output and change swapped",
-            Box::new(|tx, _| tx.output.swap(0, 1)),
-        ),
-        (
             "commitment output is not P2TR",
             Box::new(|tx, _| {
-                tx.output[1].script_pubkey = p2wpkh_script(&secret("not a commitment"))
+                tx.output[0].script_pubkey = p2wpkh_script(&secret("not a commitment"))
             }),
         ),
         (
             "commitment output is the producer's own P2TR address (no envelope committed)",
-            Box::new(|tx, _| tx.output[1].script_pubkey = producer_script(&producer_key())),
+            Box::new(|tx, _| tx.output[0].script_pubkey = producer_script(&producer_key())),
         ),
     ];
     for (name, f) in violations {
@@ -552,40 +531,32 @@ fn reveal_output_and_input_rules() {
     let s = settle(3, 2);
     let violations: Vec<(&str, RevealTamper)> = vec![
         (
-            "P2A amount 241",
-            Box::new(|tx| tx.output[0].value += Amount::from_sat(1)),
+            "change is a KSN1 output",
+            Box::new(|tx| tx.output[0].script_pubkey = data_script(&DEVNET.magic, b"x").unwrap()),
         ),
         (
-            "P2A amount 239",
-            Box::new(|tx| tx.output[0].value -= Amount::from_sat(1)),
+            "change below the dust limit",
+            Box::new(|tx| tx.output[0].value = Amount::from_sat(329)),
         ),
         (
-            "first output is not P2A",
-            Box::new(|tx| tx.output[0].script_pubkey = producer_script(&producer_key())),
-        ),
-        ("no empty OP_RETURN", Box::new(|tx| tx.output.truncate(1))),
-        (
-            "OP_RETURN with data",
-            Box::new(|tx| tx.output[1].script_pubkey = ScriptBuf::new_op_return([1u8])),
+            "change locking script is not a standard type",
+            Box::new(|tx| tx.output[0].script_pubkey = ScriptBuf::new_p2a()),
         ),
         (
-            "OP_RETURN is a KSN1 output",
-            Box::new(|tx| tx.output[1].script_pubkey = data_script(&DEVNET.magic, b"x").unwrap()),
-        ),
-        (
-            "OP_RETURN amount is not 0",
-            Box::new(|tx| {
-                tx.output[1].value = Amount::from_sat(1);
-            }),
+            "outputs exceed inputs",
+            Box::new(|tx| tx.output[0].value += Amount::from_sat(10_000_000)),
         ),
         (
             "one output too many",
-            Box::new(|tx| tx.output.push(txout(0, empty_op_return()))),
+            Box::new(|tx| {
+                tx.output
+                    .push(txout(1_000, producer_script(&producer_key())))
+            }),
         ),
-        ("outputs swapped", Box::new(|tx| tx.output.swap(0, 1))),
+        ("no output", Box::new(|tx| tx.output.clear())),
         (
-            "spends output 0 of the commit transaction",
-            Box::new(|tx| tx.input[0].previous_output.vout = 0),
+            "spends output 1 of the commit transaction",
+            Box::new(|tx| tx.input[0].previous_output.vout = 1),
         ),
         (
             "spends another transaction",
@@ -698,7 +669,7 @@ fn envelope_rules() {
 #[test]
 fn reveal_signature_rules() {
     let s = settle(3, 2);
-    let committed = s.pair.commit.output[1].clone();
+    let committed = s.pair.commit.output[0].clone();
     let resigned = |ty: TapSighashType| {
         let mut pair = s.pair.clone();
         resign_reveal(&mut pair.reveal, &committed, &s.key, ty);
@@ -737,7 +708,6 @@ fn reveal_signature_rules() {
     // The commitment output's amount differs from the one signed: the signature is invalid (the amount is in the
     // sighash)
     let mut pair = s.pair.clone();
-    pair.commit.output[1].value += Amount::from_sat(1);
     pair.commit.output[0].value -= Amount::from_sat(1);
     resign_producer(
         &mut pair.commit,
@@ -765,12 +735,11 @@ fn producer_signature_rules() {
     let all = resigned(TapSighashType::All);
     assert_eq!(all.commit.input[0].witness.nth(0).unwrap().len(), 65);
     attached(&s, &all).unwrap();
+    // (`SIGHASH_SINGLE` cannot sign input 1: the commit transaction has only output 0)
     for ty in [
-        TapSighashType::Single,
         TapSighashType::None,
         TapSighashType::AllPlusAnyoneCanPay,
         TapSighashType::NonePlusAnyoneCanPay,
-        TapSighashType::SinglePlusAnyoneCanPay,
     ] {
         assert!(is_invalid(attached(&s, &resigned(ty))), "{ty:?}");
     }
@@ -842,7 +811,7 @@ fn with_p2wpkh_producer_input(
     let sig = p2wpkh_sig(&key, tx, last, &prevout, sighash_type);
     tx.input[last].witness = Witness::from_slice(&[sig, compressed_pubkey(&key)]);
     pair.reveal.input[0].previous_output.txid = pair.commit.compute_txid();
-    let committed = pair.commit.output[1].clone();
+    let committed = pair.commit.output[0].clone();
     resign_reveal(
         &mut pair.reveal,
         &committed,
@@ -960,126 +929,122 @@ fn prevout_source_results() {
     )));
 }
 
-/// A CPFP child (D-102): spends the reveal's P2A output and a funding UTXO, pays the package up to the requested fee
-/// rate (and at least the minimum given), signs the funding input; `None` when the UTXO cannot pay it.
+/// A CPFP child (D-102, D-140): spends the reveal's change, pays the package up to the requested fee rate (and at
+/// least the minimum given) and the rest back to the change's script, signs its input; `None` when the change cannot
+/// pay it.
 #[test]
-fn a_cpfp_child_pays_for_the_pair_through_the_p2a_output() {
+fn a_cpfp_child_pays_for_the_pair_through_the_reveal_change() {
     let s = settle(3, 2);
     let checked = attached(&s, &s.pair).unwrap();
-    let utxo = producer_utxos(&s.key, &[50_000]).remove(0);
-    let (child, fee) = cpfp_child(
-        &DEVNET,
-        &s.pair.reveal,
-        checked.fee,
-        checked.vsize,
-        &utxo,
-        20,
-        0,
-        &s.key,
-    )
-    .unwrap()
-    .unwrap();
-    let vsize = child.weight().to_vbytes_ceil();
+    let change = s.pair.reveal.output[0].clone();
+    let child = |reveal: &Transaction, feerate: u64, min_fee: u64, key: &Keypair| {
+        cpfp_child(
+            &DEVNET,
+            reveal,
+            checked.fee,
+            checked.vsize,
+            feerate,
+            min_fee,
+            key,
+        )
+    };
+    let (tx, fee) = child(&s.pair.reveal, 20, 0, &s.key).unwrap().unwrap();
+    let vsize = tx.weight().to_vbytes_ceil();
     // the package (pair and child) pays 20 sat/vB exactly
     assert_eq!(fee, 20 * (checked.vsize + vsize) - checked.fee);
-    assert_eq!(child.input.len(), 2);
+    assert_eq!(tx.input.len(), 1);
     assert_eq!(
-        child.input[0].previous_output,
+        tx.input[0].previous_output,
         OutPoint {
             txid: s.pair.reveal.compute_txid(),
             vout: 0
         }
     );
-    assert!(child.input[0].witness.is_empty());
-    assert_eq!(child.input[1].previous_output, utxo.outpoint);
-    assert!(child
-        .input
-        .iter()
-        .all(|i| i.sequence.0 == PRODUCER_SEQUENCE));
-    assert_eq!(child.output.len(), 1);
-    assert_eq!(child.output[0].script_pubkey, utxo.txout.script_pubkey);
-    assert_eq!(
-        child.output[0].value.to_sat(),
-        50_000 + P2A_AMOUNT_SAT - fee
-    );
-    // the funding input's signature verifies against both previous outputs
-    let prevouts = [s.pair.reveal.output[0].clone(), utxo.txout.clone()];
-    let (sig, sighash_type) = taproot_signature(child.input[1].witness.nth(0).unwrap()).unwrap();
+    assert_eq!(tx.input[0].sequence.0, PRODUCER_SEQUENCE);
+    assert_eq!(tx.output.len(), 1);
+    assert_eq!(tx.output[0].script_pubkey, change.script_pubkey);
+    assert_eq!(tx.output[0].value.to_sat(), change.value.to_sat() - fee);
+    // the input's signature verifies against the change
+    let (sig, sighash_type) = taproot_signature(tx.input[0].witness.nth(0).unwrap()).unwrap();
     verify_taproot_key_spend(
-        &child,
-        1,
-        &bitcoin::sighash::Prevouts::All(prevouts.as_slice()),
-        &utxo.txout.script_pubkey,
+        &tx,
+        0,
+        &bitcoin::sighash::Prevouts::All(std::slice::from_ref(&change)),
+        &change.script_pubkey,
         &sig,
         sighash_type,
     )
     .unwrap();
 
     // a pair already paying more needs only the child's own minimum, or the minimum fee given (a replacement)
-    let (_, fee) = cpfp_child(
-        &DEVNET,
-        &s.pair.reveal,
-        checked.fee,
-        checked.vsize,
-        &utxo,
-        1,
-        0,
-        &s.key,
-    )
-    .unwrap()
-    .unwrap();
+    let (_, fee) = child(&s.pair.reveal, 1, 0, &s.key).unwrap().unwrap();
     assert_eq!(fee, vsize * DEVNET.min_settlement_feerate_sat_vb);
-    let (_, fee) = cpfp_child(
-        &DEVNET,
-        &s.pair.reveal,
-        checked.fee,
-        checked.vsize,
-        &utxo,
-        1,
-        7_777,
-        &s.key,
-    )
-    .unwrap()
-    .unwrap();
+    let (_, fee) = child(&s.pair.reveal, 1, 7_777, &s.key).unwrap().unwrap();
     assert_eq!(fee, 7_777);
-    // a UTXO too small for the fee and a change above dust
-    let small = producer_utxos(&s.key, &[1_000]).remove(0);
-    assert_eq!(
-        cpfp_child(
-            &DEVNET,
-            &s.pair.reveal,
-            checked.fee,
-            checked.vsize,
-            &small,
-            50,
-            0,
-            &s.key
-        )
-        .unwrap(),
-        None
-    );
-    // only a UTXO of the funding key, only a reveal with the P2A output
+    // a change too small for the fee and a rest above dust
+    let mut poor = s.pair.reveal.clone();
+    poor.output[0].value = Amount::from_sat(1_000);
+    assert_eq!(child(&poor, 50, 0, &s.key).unwrap(), None);
+    // only a change of the funding key
     let other = Keypair::from_secret_key(&Secp256k1::new(), &secret("someone else"));
-    assert!(is_invalid(cpfp_child(
-        &DEVNET,
-        &s.pair.reveal,
-        checked.fee,
-        checked.vsize,
-        &utxo,
-        20,
-        0,
-        &other
-    )));
-    let mut reveal = s.pair.reveal.clone();
-    reveal.output.swap(0, 1);
-    assert!(is_invalid(cpfp_child(
-        &DEVNET,
-        &reveal,
-        checked.fee,
-        checked.vsize,
-        &utxo,
-        20,
-        0,
-        &s.key
-    )));
+    assert!(is_invalid(child(&s.pair.reveal, 20, 0, &other)));
+}
+
+/// The revenue sweep (D-142) pays `amount` less its fee to the revenue script and the rest back to the funding key; a
+/// rest below the funding script's dust floor is raised to it out of the amount, so a sweep never returns less than
+/// the rest (the hot wallet keeps its cap however small the cap is), and there is no funding output without a rest.
+#[test]
+fn a_revenue_sweep_never_returns_less_than_the_rest() {
+    let key = producer_key();
+    let funding = producer_script(&key);
+    let revenue = p2wpkh_script(&secret("sweep/revenue"));
+    let dust = funding.minimal_non_dust().to_sat();
+    let outputs = |values: &[u64], amount: u64| {
+        let utxos = producer_utxos(&key, values);
+        let tx = sweep_revenue(&utxos, amount, revenue.clone(), 2, &key)
+            .unwrap()
+            .expect("a sweep");
+        let prevouts: Vec<TxOut> = utxos.iter().map(|u| u.txout.clone()).collect();
+        verify_in_place(&tx, &prevouts).unwrap();
+        let fee =
+            values.iter().sum::<u64>() - tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+        assert_eq!(fee, tx.weight().to_vbytes_ceil() * 2);
+        assert_eq!(tx.output[0].script_pubkey, revenue);
+        let rest = tx.output.get(1).map(|o| {
+            assert_eq!(o.script_pubkey, funding);
+            o.value.to_sat()
+        });
+        assert!(tx.output.len() <= 2);
+        (tx.output[0].value.to_sat() + fee, rest)
+    };
+    // An ordinary rest returns as it is
+    assert_eq!(
+        outputs(&[500_000, 500_000], 600_000),
+        (600_000, Some(400_000))
+    );
+    // A rest of 100 sats (a cap below the dust floor) is raised to the dust floor, never paid to the revenue script
+    assert_eq!(outputs(&[100_100], 100_000), (100_100 - dust, Some(dust)));
+    assert_eq!(
+        outputs(&[500_000], 500_000 - dust + 1),
+        (500_000 - dust, Some(dust))
+    );
+    // No rest, no funding output
+    assert_eq!(outputs(&[300_000, 200_000], 500_000), (500_000, None));
+
+    // Nothing to send: no inputs, inputs below the amount, or a revenue output below its dust floor after the fee
+    let utxos = producer_utxos(&key, &[100_000]);
+    assert!(sweep_revenue(&[], 1, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(sweep_revenue(&utxos, 100_001, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(sweep_revenue(&utxos, 300, revenue.clone(), 2, &key)
+        .unwrap()
+        .is_none());
+    assert!(
+        sweep_revenue(&producer_utxos(&key, &[dust - 1]), 1, revenue, 2, &key)
+            .unwrap()
+            .is_none()
+    );
 }

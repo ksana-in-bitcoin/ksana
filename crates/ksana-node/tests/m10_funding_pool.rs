@@ -12,6 +12,7 @@ use std::time::Duration;
 use common::mock_node::{signed, wait, MockNode};
 use common::user;
 use ksana_btc::client::BtcClient;
+use ksana_node::producer::Revenue;
 use ksana_node::rescue::FUNDING_SPLIT_MIN_SAT;
 use ksana_primitives::FeeMode;
 use ksana_rpc::SettlementState;
@@ -101,11 +102,14 @@ fn the_node_splits_its_largest_funding_utxo_until_the_pool_is_full() {
 }
 
 /// Reaches the mock chain, except that UTXO set scans fail while `failing` is set (bitcoind busy with another
-/// process's scan, or a scan slower than the RPC client's timeout); counts the scans asked for.
+/// process's scan, or a scan slower than the RPC client's timeout) and transaction lookups fail while
+/// `lookups_failing` is set (an RPC timeout); counts the scans asked for and the lookups that failed.
 struct FailingScans {
     inner: std::sync::Arc<ksana_btc::mock::MockBtc>,
     failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     scans: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    lookups_failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    failed_lookups: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 mod failing_scans {
@@ -127,6 +131,10 @@ mod failing_scans {
             self.inner.header(hash)
         }
         fn transaction(&self, txid: &[u8; 32]) -> Result<Option<TxInfo>, BtcError> {
+            if self.lookups_failing.load(Ordering::SeqCst) {
+                self.failed_lookups.fetch_add(1, Ordering::SeqCst);
+                return Err(BtcError::Rpc("getrawtransaction: timed out".into()));
+            }
             self.inner.transaction(txid)
         }
         fn utxo(
@@ -184,6 +192,8 @@ fn a_failed_funding_scan_skips_settlements_not_blocks() {
                 inner: mock,
                 failing: f,
                 scans: s,
+                lookups_failing: Arc::default(),
+                failed_lookups: Arc::default(),
             })
         },
         // no splitting, as on the public signet: the pool would scan every round
@@ -217,4 +227,69 @@ fn a_failed_funding_scan_skips_settlements_not_blocks() {
     n.wait_settlement(height, SettlementState::Broadcast);
     n.mock.mine(1);
     n.wait_settlement(height, SettlementState::Confirmed);
+}
+
+/// A revenue sweep in flight (D-142) survives bitcoind failing the lookup of its transaction: the node keeps its record
+/// and the reservation of its inputs, so once bitcoind answers again it rebroadcasts the sweep its mempool dropped
+/// instead of leaving those inputs reserved for good. Hot wallet 8 × 500 000 sats, cap 2 400 000 sats.
+#[test]
+fn a_revenue_sweep_in_flight_survives_failed_transaction_lookups() {
+    use bitcoin::hashes::Hash;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    let alice = user("m10/sweep/alice");
+    let revenue = bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([9; 20]));
+    let failing = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicU32::new(0));
+    let (f, c) = (Arc::clone(&failing), Arc::clone(&failed));
+    let script = revenue.clone();
+    let n = MockNode::start_custom(
+        &[(&alice, 1_000)],
+        Duration::from_millis(100),
+        move |mock| {
+            Arc::new(FailingScans {
+                inner: mock,
+                failing: Arc::default(),
+                scans: Arc::default(),
+                lookups_failing: f,
+                failed_lookups: c,
+            })
+        },
+        |funding| {
+            funding.with_pool_target(0).with_revenue(Revenue {
+                script,
+                hot_cap_sat: 2_400_000,
+            })
+        },
+    );
+    let pending = || {
+        n.mock
+            .mempool()
+            .into_iter()
+            .find(|tx| tx.output.iter().any(|o| o.script_pubkey == revenue))
+    };
+    let sweep = wait("the revenue sweep to be broadcast", pending);
+    let txid = sweep.compute_txid();
+
+    // bitcoind fails the lookups of a few rounds and drops the sweep from its mempool meanwhile
+    failing.store(true, Ordering::SeqCst);
+    wait("lookups to fail", || {
+        (failed.load(Ordering::SeqCst) >= 3).then_some(())
+    });
+    assert!(n.mock.evict(&txid.to_byte_array()));
+    failing.store(false, Ordering::SeqCst);
+
+    // The node still tracks the sweep: the same transaction comes back, and confirms
+    let again = wait("the revenue sweep to be rebroadcast", pending);
+    assert_eq!(again.compute_txid(), txid);
+    n.mock.mine(1);
+    let paid: u64 = n
+        .mock
+        .scan_utxos(&revenue)
+        .unwrap()
+        .iter()
+        .map(|u| u.txout.value.to_sat())
+        .sum();
+    assert!(paid > 0 && paid <= 1_600_000, "{paid}");
 }

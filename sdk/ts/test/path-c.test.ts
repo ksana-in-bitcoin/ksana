@@ -11,6 +11,7 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 import { Transaction } from '@scure/btc-signer';
 
 import {
+  type Payload,
   DEVNET,
   SCURE_TX_OPTIONS,
   SIGHASH_ALL,
@@ -31,6 +32,7 @@ import {
   isKsn1Envelope,
   isKsn1Output,
   ksn1DataScript,
+  ZSTD_MAGIC,
   ksn1EnvelopeScript,
   nativeFirstInput,
   nativeOpFromTx,
@@ -192,6 +194,29 @@ test('txPayload: a KSN1 output carries only a path C payload, an envelope only a
   const both = txWith([ksn1DataScript(DEVNET.magic, native)], [revealWitness(ksn1EnvelopeScript(key, DEVNET.magic, headers))]);
   assert.equal(txPayload(both, DEVNET), null);
   assert.equal(nativeOpFromTx(both, DEVNET), null);
+});
+
+test('txData / txPayload: an envelope whose data is a zstd frame carries the decompressed payload; a KSN1 output never does (D-141)', () => {
+  const settled: Payload = { kind: 'Headers', headers: [], bodies: [], payee: new Uint8Array(32).fill(9) };
+  const headers = encodePayload(settled, DEVNET);
+  // the payload in one raw block (single segment, a 1-byte content size), followed by padding
+  const head = (headers.length << 3) | 1;
+  const frame = concatBytes(ZSTD_MAGIC, Uint8Array.of(0x20, headers.length, head & 0xff, head >> 8, 0), headers);
+  const key = xOnlyPublicKey(testKey(13));
+  const asEnvelope = (data: Uint8Array) => txWith([], [revealWitness(ksn1EnvelopeScript(key, DEVNET.magic, data))]);
+  const carrier = { kind: 'Input', index: 0 };
+  for (const data of [frame, concatBytes(frame, new Uint8Array(32))]) {
+    assert.deepEqual(txData(DEVNET.magic, asEnvelope(data)), { kind: 'one', carrier, payload: headers });
+    assert.deepEqual(txPayload(asEnvelope(data), DEVNET), { carrier, payload: settled });
+  }
+  // a malformed frame makes the envelope malformed
+  assert.deepEqual(txData(DEVNET.magic, asEnvelope(concatBytes(frame, Uint8Array.of(1)))), { kind: 'invalid' });
+  assert.deepEqual(txData(DEVNET.magic, asEnvelope(frame.subarray(0, frame.length - 1))), { kind: 'invalid' });
+  assert.equal(txPayload(asEnvelope(frame.subarray(0, frame.length - 1)), DEVNET), null);
+  // the data of a KSN1 output is taken as it is
+  const output = txWith([ksn1DataScript(DEVNET.magic, frame)]);
+  assert.deepEqual(txData(DEVNET.magic, output), { kind: 'one', carrier: { kind: 'Output', index: 0 }, payload: frame });
+  assert.equal(txPayload(output, DEVNET), null);
 });
 
 test('nativePayload is byte-for-byte equal to the NativeOp payload vector in codec.json', () => {

@@ -53,6 +53,7 @@
 
 pub mod bodies;
 pub mod client;
+pub mod compress;
 pub mod data;
 pub mod envelope;
 pub mod finality;

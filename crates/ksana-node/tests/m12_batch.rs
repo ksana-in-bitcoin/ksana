@@ -570,10 +570,9 @@ fn bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish() {
 }
 
 /// A backlog of bodies larger than several payloads, with no carrier ahead of it: the rescue thread keeps up to
-/// `MAX_CHAINED_REPUBLISHES` republishes in flight, each commit spending the change of the one before, so BTC confirms
+/// `MAX_CHAINED_REPUBLISHES` republishes in flight, each commit spending the reveal change of the one before (D-140), so BTC confirms
 /// them in order and the next payload never needs a header of an unconfirmed later one; each carries blocks the others
-/// do not, and they all land in one BTC block (D-139). The node pays settlement change to a revenue address, but a
-/// republish's change stays at the funding address, which the next one signs for.
+/// do not, and they all land in one BTC block (D-139).
 #[test]
 fn republishes_chain_on_the_change_of_the_one_before() {
     let params = Params {
@@ -637,15 +636,15 @@ fn republishes_chain_on_the_change_of_the_one_before() {
     }
     let sent = chained();
     let mut carried = BTreeSet::new();
-    for (index, (commit, _, headers)) in sent.iter().enumerate() {
+    for (index, (commit, reveal, headers)) in sent.iter().enumerate() {
         assert_eq!(
-            commit.output[0].script_pubkey, script,
+            reveal.output[0].script_pubkey, script,
             "republish {index} pays its change to the funding address"
         );
         for header in headers {
             assert!(carried.insert(header.hash()), "a block carried twice");
         }
-        if let Some((before, _, _)) = index.checked_sub(1).and_then(|i| sent.get(i)) {
+        if let Some((_, before, _)) = index.checked_sub(1).and_then(|i| sent.get(i)) {
             let change = bitcoin::OutPoint {
                 txid: before.compute_txid(),
                 vout: 0,

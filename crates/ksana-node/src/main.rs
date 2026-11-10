@@ -131,9 +131,9 @@ struct Cli {
         value_parser = clap::value_parser!(u16).range(1..=1008)
     )]
     settlement_conf_target: u16,
-    /// Revenue address (an address of this chain's BTC network, D-060): when the hot wallet (funding address) minus
-    /// this funding still stays at or above --hot-wallet-cap-sat, the change of the settlement transaction is paid
-    /// here; without it the change always returns to the hot wallet.
+    /// Revenue address (an address of this chain's BTC network, D-060): what the hot wallet (funding address) holds
+    /// above --hot-wallet-cap-sat is swept here by a transaction of its own (D-142); without it everything stays in the
+    /// hot wallet.
     #[arg(long)]
     revenue_address: Option<String>,
     /// Hot wallet cap (sats, D-060), only effective when --revenue-address is given.
@@ -291,7 +291,7 @@ fn run(cli: Cli) -> Result<(), NodeError> {
             hot_cap_sat: cli.hot_wallet_cap_sat,
         };
         eprintln!(
-            "[ksana-node] hot wallet cap {} sats: when the wallet minus this funding still stays at or above the cap, the settlement change is paid to the revenue address {address} (D-060)",
+            "[ksana-node] hot wallet cap {} sats: what the wallet holds above the cap is swept to the revenue address {address} (D-060, D-142)",
             revenue.hot_cap_sat
         );
         funding = Some(f.with_revenue(revenue));

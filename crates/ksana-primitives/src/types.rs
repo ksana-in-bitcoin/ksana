@@ -270,12 +270,12 @@ pub struct Block {
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettlementTxs {
-    /// The commit transaction: the producer's funding input, with the change and the P2TR output committing to the
-    /// envelope as outputs.
+    /// The commit transaction: the producer's funding input, with the P2TR output committing to the envelope as its
+    /// only output (D-140).
     #[serde(with = "hex_bytes")]
     pub commit: Vec<u8>,
-    /// The reveal transaction: spends the commitment output, carries the payload in the witness, with a P2A output and
-    /// an empty OP_RETURN as outputs.
+    /// The reveal transaction: spends the commitment output, carries the payload in the witness, with the producer's
+    /// change as its only output (D-140).
     #[serde(with = "hex_bytes")]
     pub reveal: Vec<u8>,
 }

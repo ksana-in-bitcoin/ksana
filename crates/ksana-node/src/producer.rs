@@ -93,8 +93,7 @@ impl TemplateSync {
 pub struct Revenue {
     /// Locking script of the revenue address (a standard output script; cannot be the funding address itself).
     pub script: ScriptBuf,
-    /// Hot wallet cap (sats): when the hot wallet minus this funding is still not below it, the settlement
-    /// transaction's change is paid to the revenue address.
+    /// Hot wallet cap (sats): what the available funding UTXOs hold above it is swept to the revenue address (D-142).
     pub hot_cap_sat: u64,
 }
 
@@ -216,8 +215,8 @@ pub fn current_feerate(
         .rate(params, chain.btc().client().as_ref(), urgent))
 }
 
-/// The producer's BTC funding wallet (D-037): a P2TR key-path (BIP86) address. Change returns to the same address;
-/// with a revenue address configured, the part above the hot wallet cap is paid to the revenue address (D-060).
+/// The producer's BTC funding wallet (D-037): a P2TR key-path (BIP86) address. Change always returns to the same address;
+/// with a revenue address configured, the part above the hot wallet cap is swept to the revenue address (D-060, D-142).
 #[derive(Clone)]
 pub struct Funding {
     /// Funding secret key (internal key, untweaked).
@@ -226,7 +225,7 @@ pub struct Funding {
     pub script: ScriptBuf,
     /// Fee rate policy of this node's BTC transactions (D-102).
     pub fees: FeePolicy,
-    /// Revenue address and hot wallet cap (D-060); when `None`, change always returns to the hot wallet.
+    /// Revenue address and hot wallet cap (D-060, D-142); when `None`, everything stays in the hot wallet.
     pub revenue: Option<Revenue>,
     /// Target size of the funding UTXO pool (D-075, local policy): when fewer funding UTXOs are available, the largest
     /// one is split; 0 means no splitting.
@@ -275,18 +274,6 @@ impl Funding {
     pub fn with_revenue(mut self, revenue: Revenue) -> Self {
         self.revenue = Some(revenue);
         self
-    }
-
-    /// Change script of a settlement transaction (D-060): with `available` sats in the hot wallet usable for funding
-    /// and `used` sats chosen this time, if the remainder is still not below the hot wallet cap, the change is paid to
-    /// the revenue address; otherwise it returns to the hot wallet.
-    pub fn change_script(&self, available: u64, used: u64) -> ScriptBuf {
-        match &self.revenue {
-            Some(revenue) if available.saturating_sub(used) >= revenue.hot_cap_sat => {
-                revenue.script.clone()
-            }
-            _ => self.script.clone(),
-        }
     }
 }
 
@@ -1011,46 +998,7 @@ pub(crate) fn fund(
     payload: &[u8],
     feerate: u64,
 ) -> Result<Result<Draft, Unfunded>, NodeError> {
-    fund_to(
-        params,
-        utxos,
-        funding,
-        payload,
-        feerate,
-        |available, used| funding.change_script(available, used),
-    )
-}
-
-/// Same as [`fund`], but the change always returns to the funding address, never to the revenue address: a
-/// republish's change funds the next republish chained on it (D-139), and only the funding key can sign it.
-pub(crate) fn fund_chainable(
-    params: &Params,
-    utxos: &[ProducerUtxo],
-    funding: &Funding,
-    payload: &[u8],
-    feerate: u64,
-) -> Result<Result<Draft, Unfunded>, NodeError> {
-    fund_to(params, utxos, funding, payload, feerate, |_, _| {
-        funding.script.clone()
-    })
-}
-
-fn fund_to(
-    params: &Params,
-    utxos: &[ProducerUtxo],
-    funding: &Funding,
-    payload: &[u8],
-    feerate: u64,
-    change: impl Fn(u64, u64) -> ScriptBuf,
-) -> Result<Result<Draft, Unfunded>, NodeError> {
     let feerate = feerate.max(params.min_settlement_feerate_sat_vb);
-    let sum = |utxos: &[ProducerUtxo]| {
-        utxos
-            .iter()
-            .map(|u| u.txout.value.to_sat())
-            .fold(0u64, u64::saturating_add)
-    };
-    let available = sum(utxos);
     for count in 1..=utxos.len() {
         let Some(inputs) = utxos.get(..count) else {
             break;
@@ -1058,7 +1006,7 @@ fn fund_to(
         match draft(
             params,
             inputs,
-            change(available, sum(inputs)),
+            funding.script.clone(),
             &funding.keypair.x_only_public_key().0,
             payload,
             feerate,
