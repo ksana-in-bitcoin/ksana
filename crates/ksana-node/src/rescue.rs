@@ -35,6 +35,9 @@
 //!   wait for `SETTLEMENT_DEPTH` to be reached), send a `Headers` transaction containing only the headers that
 //!   settlement payload cannot fit, plus the bodies of those among them that need one. Blocks carrying settlement
 //!   transactions that are parallel to it (possibly after it in acceptance order) will not carry it and do not count.
+//!   While this node's republishes wait in the mempool, the next run (the blocks they do not carry) goes out chained on them, its
+//!   commit transaction spending the change of the last one's first, so BTC confirms them in order; at most
+//!   [`MAX_CHAINED_REPUBLISHES`] are in flight, and none is added once the last one's change is spent (D-139).
 //!
 //! - Fee rate and CPFP bumps (D-102, D-117): every transaction this node sends pays the rate of its fee policy
 //!   ([`crate::producer::FeePolicy::rate`]: bitcoind's estimate for the confirmation target, kept within the floor and
@@ -72,7 +75,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
 use ksana_btc::client::BtcClient;
-use ksana_btc::payload::{entry_data, headers_payload_fixed_len};
+use ksana_btc::payload::{attached_payload, entry_data, headers_payload_fixed_len};
 use ksana_btc::settlement::{
     cpfp_child, finalize, split_funding, validate_attached, ProducerUtxo, SettlementError,
     SettlementPair,
@@ -110,6 +113,10 @@ pub const BUMP_AFTER: u32 = 2;
 /// The fee rate (sat/vB) a child replacing an earlier child pays on top of that one's fee (Bitcoin Core's
 /// `-incrementalrelayfee` default).
 const INCREMENTAL_RELAY_FEERATE: u64 = 1;
+/// At most this many republishes of this node's are in flight at once, each chained on the change of the one before
+/// (D-139): four full payloads stay below Bitcoin Core's default limit of 101 kvB on a cluster of unconfirmed
+/// transactions.
+pub const MAX_CHAINED_REPUBLISHES: usize = 4;
 
 /// Transactions sent by this node and not yet confirmed: commit and reveal for a rescue settlement or a republish
 /// (D-081), a single one for a split.
@@ -1418,12 +1425,53 @@ impl Rescuer {
         if end <= first {
             return Ok(());
         }
-        let key = block.hash;
-        if let Some(sent) = state.headers.get(&key) {
-            if self.keep_alive(client.as_ref(), sent)? {
-                return Ok(());
+        // This node's republishes in flight, in acceptance order (D-139): each is kept alive, and the next one chains on
+        // the change of the last one's commit transaction, so BTC confirms them in order; the blocks they carry are not
+        // carried again
+        let position = |hash: &[u8; 32]| accepted.iter().position(|(_, b)| b.hash == *hash);
+        let mut flying: Vec<[u8; 32]> = state.headers.keys().copied().collect();
+        flying.sort_by_key(|hash| position(hash));
+        let mut covered = BTreeSet::new();
+        let mut tail = None;
+        let mut in_flight = 0usize;
+        for hash in flying {
+            let Some(sent) = state.headers.get(&hash) else {
+                continue;
+            };
+            if !self.keep_alive(client.as_ref(), sent)? {
+                state.headers.remove(&hash);
+                continue;
             }
-            state.headers.remove(&key);
+            in_flight = in_flight.saturating_add(1);
+            tail = None;
+            if let [commit, reveal] = sent.txs.as_slice() {
+                let pair = SettlementPair {
+                    commit: commit.clone(),
+                    reveal: reveal.clone(),
+                };
+                if let Some(Payload::Headers { headers, .. }) = attached_payload(params, &pair)
+                    .and_then(|payload| Payload::decode(&payload, params).ok())
+                {
+                    covered.extend(headers.iter().map(BlockHeader::hash));
+                }
+                let change = bitcoin::OutPoint {
+                    txid: commit.compute_txid(),
+                    vout: 0,
+                };
+                if let Some(txout) = commit.output.first() {
+                    if client.utxo(&change, true).map_err(btc)?.is_some() {
+                        tail = Some(ProducerUtxo {
+                            outpoint: change,
+                            txout: txout.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        // A full chain waits for its first pairs to confirm; so does one whose last change is spent (it can no longer
+        // be ordered after it)
+        if in_flight >= MAX_CHAINED_REPUBLISHES || (in_flight > 0 && tail.is_none()) {
+            return Ok(());
         }
 
         // From first (up to before end), the blocks whose data has not landed: the header of each that has not counted,
@@ -1440,7 +1488,7 @@ impl Rescuer {
             if headers.len() >= params.max_settlement_headers {
                 break;
             }
-            if snapshot.data_height(b).is_some() {
+            if snapshot.data_height(b).is_some() || covered.contains(&b.hash) {
                 continue;
             }
             let body = b.settles && !chain.carries_settlement(&b.hash)?;
@@ -1493,7 +1541,12 @@ impl Rescuer {
         }
         let count = headers.len();
         let body_count = bodies.len();
-        let utxos = self.available_utxos(btc_tip)?;
+        let key = headers.first().map(BlockHeader::hash).unwrap_or(block.hash);
+        // The last republish's change first: the funding takes a prefix of the list
+        let utxos: Vec<ProducerUtxo> = tail
+            .into_iter()
+            .chain(self.available_utxos(btc_tip)?)
+            .collect();
         let draft = match fund(params, &utxos, &self.funding, &payload, feerate)? {
             Ok(draft) => draft,
             Err(why) => {

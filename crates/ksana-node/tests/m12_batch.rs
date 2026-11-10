@@ -17,10 +17,12 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::hashes::Hash as _;
+use bitcoin::Transaction;
 use common::mock_node::{signed, wait, MockNode};
 use common::side::{setup, Side};
 use common::{transfer_op, user};
@@ -29,7 +31,7 @@ use ksana_btc::mock::MockBtc;
 use ksana_btc::payload::{attached_payload, bodies_in, body_len, needs_body};
 use ksana_btc::settlement::{draft, finalize, ProducerUtxo, SettlementPair};
 use ksana_node::chain::{PAYLOAD_BODY_SHARE, PAYLOAD_BODY_TRIGGER};
-use ksana_node::rescue::Rescuer;
+use ksana_node::rescue::{Rescuer, MAX_CHAINED_REPUBLISHES};
 use ksana_node::NodeError;
 use ksana_primitives::{
     Block, BlockHeader, EntryData, FeeMode, Params, Payload, SettlementTxs, DEVNET,
@@ -564,4 +566,104 @@ fn bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish() {
     for hash in &dropped {
         assert!(snapshot.block_data_height(hash).is_some());
     }
+}
+
+/// A backlog of bodies larger than several payloads, with no carrier ahead of it: the rescue thread keeps up to
+/// `MAX_CHAINED_REPUBLISHES` republishes in flight, each commit spending the change of the one before, so BTC confirms
+/// them in order and the next payload never needs a header of an unconfirmed later one; each carries blocks the others
+/// do not, and they all land in one BTC block (D-139).
+#[test]
+fn republishes_chain_on_the_change_of_the_one_before() {
+    let params = Params {
+        max_block_data_bytes: 4 * 1024,
+        ..DEVNET
+    };
+    let (alice, bob) = (user("m12/chain/alice"), user("m12/chain/bob"));
+    let (mock, genesis) = setup(&[(&alice, 100_000)]);
+    let f = Side::batched_with_params(&mock, &genesis, "m12chain-f", params.clone());
+    let u = Side::unfunded_with_params(&mock, &genesis, "m12chain-u", params.clone());
+    let mut nonce = 0u64;
+    let blocks = backlog(
+        &u,
+        &f,
+        &alice,
+        bob.account,
+        &mut nonce,
+        (MAX_CHAINED_REPUBLISHES + 1) * params.max_block_data_bytes,
+    );
+    for _ in 0..params.settlement_depth {
+        let block = u.mine();
+        f.accept(&block).unwrap();
+    }
+    mock.mine(params.settlement_timeout * 4 + 1);
+    f.sync();
+
+    let rescuer = Rescuer::new(
+        Arc::clone(&f.chain),
+        f.producer.funding.clone().unwrap(),
+        Some(f.producer.producer),
+        None,
+    );
+    // The reveal and commit of each republish in the mempool, in mempool order
+    let chained = || -> Vec<(Transaction, Transaction, Vec<BlockHeader>)> {
+        let pool = mock.mempool();
+        pool.iter()
+            .filter_map(
+                |reveal| match ksana_btc::data::tx_payload(&params, reveal) {
+                    Some((_, Payload::Headers { headers, .. })) => {
+                        let parent = reveal.input[0].previous_output.txid;
+                        let commit = pool.iter().find(|tx| tx.compute_txid() == parent)?;
+                        Some((commit.clone(), reveal.clone(), headers))
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    for round in 1..=MAX_CHAINED_REPUBLISHES + 1 {
+        rescuer.run_once().unwrap();
+        assert_eq!(
+            chained().len(),
+            round.min(MAX_CHAINED_REPUBLISHES),
+            "round {round}"
+        );
+    }
+    let sent = chained();
+    let mut carried = BTreeSet::new();
+    for (index, (commit, _, headers)) in sent.iter().enumerate() {
+        for header in headers {
+            assert!(carried.insert(header.hash()), "a block carried twice");
+        }
+        if let Some((before, _, _)) = index.checked_sub(1).and_then(|i| sent.get(i)) {
+            let change = bitcoin::OutPoint {
+                txid: before.compute_txid(),
+                vout: 0,
+            };
+            assert!(
+                commit.input.iter().any(|i| i.previous_output == change),
+                "republish {index} chains on the change of the one before"
+            );
+        }
+    }
+    assert!(
+        blocks.iter().any(|b| !carried.contains(&b.header.hash())),
+        "the backlog needs more than a full chain"
+    );
+
+    mock.mine(1);
+    f.sync();
+    let snapshot = f.chain.btc().snapshot().unwrap();
+    for block in &blocks {
+        let hash = block.header.hash();
+        if carried.contains(&hash) {
+            assert!(
+                snapshot.block_data_height(&hash).is_some(),
+                "height {}",
+                block.header.height
+            );
+        }
+    }
+    // The chain confirmed: the next round starts a new one from the rest
+    rescuer.run_once().unwrap();
+    assert_eq!(chained().len(), 1);
 }

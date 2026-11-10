@@ -17,6 +17,9 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-08, republishes chain on the change of the one before (M54, D-139)**: no consensus change. A node keeps up to four republishes in flight at once, each
+  commit transaction spending the change of the last one's, so BTC confirms them in order and a backlog larger than one payload drains several payloads per BTC block rather than
+  one (§7.6).
 - **2026-11-08, bodies beyond the payload budget keep their headers, and one republish carries the bodies several carriers left (M53, D-138)**: no consensus change, from a load
   test of the public signet. With most blocks produced by unfunded producers, the bodies waiting for the next funded block exceeded the payload's body budget, and the producer dropped the
   earliest blocks' headers with their bodies; every later header in the payload then could not count (§6.5 item 1), so the payload confirmed and landed nothing, and the republish and rescue
@@ -1023,7 +1026,9 @@ Such a run starts at the first block whose data has not landed and skips the blo
 rescue); of the others it holds the header, and the body of one without settlement transactions that needs a body (D-138). The blocks skipped have counted, so every parent of a header in it has counted
 or is in the same payload, and its headers count as soon as it confirms (D-135). A block with settlement transactions parallel to f (which may come
 after it in acceptance order) will not carry it and is not counted. The same run of headers (distinguished by the starting hash) is not sent again until the transaction is confirmed or evicted; several nodes may each send one, and duplicates are
-ignored by the indexer. The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
+ignored by the indexer. While a node's republishes wait in the mempool, it sends the next run (the blocks above not carried by them) chained on them: the commit transaction spends the change of the last one's
+commit transaction first, so BTC confirms them in order and every parent of a header in it has counted or confirms before it; at most four (`MAX_CHAINED_REPUBLISHES`, within Bitcoin Core's
+default 101 kvB limit on a cluster of unconfirmed transactions) are in flight, and none is added once the last one's change is spent (D-139). The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
 `CARRIER_REPOST_DELAY` (2) BTC blocks, the payee takes that block's carrier reward (§8.6); an earlier republish (typically D-091's republish of this node's own headers)
 gets no reward, and the producer share of those blocks is not deducted.
 

@@ -1832,11 +1832,14 @@ fn a_republish_whose_p2a_output_another_party_holds_goes_out_again() {
         a.sync();
         rescuer.run_once().unwrap();
     }
-    assert_eq!(
-        republished(&mock, &params).len(),
-        1,
-        "not before BUMP_AFTER"
-    );
+    // The later runs go out chained on it (D-139); its own payload does not go out again yet
+    let carrying = |mock: &MockBtc| {
+        republished(mock, &params)
+            .into_iter()
+            .filter(|(sent, _)| *sent == headers)
+            .count()
+    };
+    assert_eq!(carrying(&mock), 1, "not before BUMP_AFTER");
     mock.mine(1);
     a.sync();
     rescuer.run_once().unwrap();
@@ -1844,7 +1847,7 @@ fn a_republish_whose_p2a_output_another_party_holds_goes_out_again() {
         .mempool()
         .into_iter()
         .filter(|tx| tx.compute_txid().to_byte_array() != first.txid())
-        .filter(|tx| envelope_payload(&params, tx).is_some())
+        .filter(|tx| envelope_payload(&params, tx) == envelope_payload(&params, &first.reveal))
         .collect();
     assert_eq!(again.len(), 1, "its payload went out again");
     assert_eq!(
@@ -1862,11 +1865,7 @@ fn a_republish_whose_p2a_output_another_party_holds_goes_out_again() {
         assert_eq!(landing.txid, again.txid(), "landed by the new pair");
     }
     rescuer.run_once().unwrap();
-    let carrying = republished(&mock, &params)
-        .into_iter()
-        .filter(|(sent, _)| *sent == headers)
-        .count();
-    assert_eq!(carrying, 1, "only the pinned republish carries them");
+    assert_eq!(carrying(&mock), 1, "only the pinned republish carries them");
 }
 
 /// A block's own settlement waiting in the BTC mempool below this node's fee rate does not hold this node's rescue back
