@@ -797,7 +797,8 @@ Two data carriers, both identified by the 4-byte magic `KSN1`:
   ends there. Each witness byte counts as only 1 weight unit (0.25 vB); in an OP_RETURN it is 1 vB.
 - **Compressed envelope data** (D-141): the envelope's data (its chunks concatenated) is the payload itself, or, when it starts with the zstd magic number `28 b5 2f fd` (no payload does:
   its first byte is the variant tag), one zstd frame (RFC 8878, no dictionary) of the payload followed by zero or more `0x00` bytes. A frame that is malformed, needs a dictionary,
-  decompresses to nothing or to more than 400 000 bytes, or is followed by anything other than `0x00`, makes the envelope malformed. The payload is the decompressed frame; every rule below
+  decompresses to nothing or to more than 400 000 bytes, or is followed by anything other than `0x00`, makes the envelope malformed; whether a frame is malformed is what the node's decoder
+  (libzstd 1.5.7 decoding the whole frame at once) says, and `tests/vectors/compress.json` holds the cases at its edges. The payload is the decompressed frame; every rule below
   (including `MAX_BLOCK_DATA_BYTES`) applies to it. The node sends a frame (level 19) only when it is at least 32 bytes shorter than the payload, padded by those 32 bytes (§7.2).
   `NativeOp` in an OP_RETURN output is never compressed.
 - The payload is taken only when a transaction's KSN1 outputs and inputs carrying a KSN1 envelope **together number exactly one** and that one is well-formed; the payload's length is checked against `MAX_BLOCK_DATA_BYTES` before it is fully
@@ -1068,8 +1069,8 @@ Local policy (D-037, D-060, D-075, D-109):
 - **Revenue address and hot-wallet cap** (D-060, D-142): the change of every pair this node sends (settlements, rescues, republishes) returns to the hot wallet, so the producer can bump any of them
   through it (D-140). When `--revenue-address` (an address on this chain's BTC network, not the funding address itself) and `--hot-wallet-cap-sat` (default 1 000 000) are configured, and the hot
   wallet's UTXOs available for funding hold more than the cap by at least 100 000 sats (`REVENUE_SWEEP_MIN_SAT`) and a tenth of the cap, a sweep transaction spends the largest of them that
-  cover the excess, pays the excess less its fee to the revenue address (which can be a cold wallet) and the rest back to the hot wallet; at most one sweep is unconfirmed at a time, and it
-  pays the rate of a split transaction. The hot wallet's balance therefore stays near the cap.
+  cover the excess, pays the excess less its fee to the revenue address (which can be a cold wallet) and the rest back to the hot wallet (a rest below the dust floor is raised to it out of
+  the excess, so the hot wallet never keeps less than the cap); at most one sweep is unconfirmed at a time, and it pays the rate of a split transaction. The hot wallet's balance therefore stays near the cap.
 
 ## 8. Fees, incentives and unlocking
 
@@ -1622,7 +1623,7 @@ ksana/
 | Network and RPC | `libp2p` 0.57, `jsonrpsee` 0.26, `tower-http` (CORS) |
 | Async, CLI and errors | `tokio` 1, `clap` 4, `thiserror`, `anyhow` |
 | Testing | `proptest`, `cargo-fuzz` (`libfuzzer-sys`), `tempfile`, `wat` |
-| TS SDK | `@noble/curves` 2.4, `@noble/hashes` 2.4, `@scure/base` 2.4, `@scure/btc-signer` 2.4, `borsh` 2.0; dev dependencies `typescript` 5.9, `esbuild`, `playwright-core` |
+| TS SDK | `@noble/curves` 2.4, `@noble/hashes` 2.4, `@scure/base` 2.4, `@scure/btc-signer` 2.4, `borsh` 2.0, `fzstd` 0.1 (D-141); dev dependencies `typescript` 5.9, `esbuild`, `playwright-core` |
 
 When introducing a dependency outside the table above, record the reason in `docs/DECISIONS.md` (D-008 and later entries record the existing additions).
 
