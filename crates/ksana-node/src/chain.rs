@@ -125,7 +125,7 @@ pub const PAYLOAD_BODY_TRIGGER: usize = 8;
 /// and its header has not counted yet (producer's policy, D-077, D-135). One unconfirmed for longer (e.g. waiting in the
 /// mempool at too low a fee rate) no longer makes the new block's body wait for it, and the new block's payload carries
 /// its header and the headers of its past that have not counted ([`Chain::payload_carry`]); its producer bumps it
-/// through the reveal's P2A output, and other nodes rescue it once it pays less than their fee rate or has waited
+/// through the reveal's change, and other nodes rescue it once it pays less than their fee rate or has waited
 /// `CLAIM_PATIENCE` BTC blocks (D-102, [`crate::rescue`]).
 const IN_FLIGHT_BTC_BLOCKS: u32 = 2;
 /// Capacity of the set of known invalid blocks: the earliest are forgotten first (a forgotten invalid block is only

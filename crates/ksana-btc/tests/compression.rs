@@ -21,7 +21,7 @@ use bitcoin::{
 };
 use common::*;
 use ksana_btc::data::data_script;
-use ksana_btc::settlement::{self, p2a_script};
+use ksana_btc::settlement;
 use ksana_primitives::{
     compact, Action, BlockHeader, Body, BtcAnchor, EntryData, FeeMode, Payload, SigScheme, VmOp,
     DEVNET, KSA_ASSET_ID,
@@ -162,7 +162,6 @@ fn before(s: &Scenario) -> Cost {
                 value: Amount::ZERO,
                 script_pubkey: data_script(&DEVNET.magic, &vec![0x55; bytes]).unwrap(),
             },
-            txout(settlement::P2A_AMOUNT_SAT, p2a_script()),
         ],
     };
     Cost {

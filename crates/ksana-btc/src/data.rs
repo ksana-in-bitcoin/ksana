@@ -147,7 +147,10 @@ pub fn tx_data(magic: &[u8; 4], tx: &Transaction) -> TxData {
     };
     let payload = match carrier {
         Carrier::Output(_) => parse_data_script(magic, script),
-        Carrier::Input(_) => parse_envelope(magic, script).map(|(_, payload)| payload),
+        // The envelope's data, decompressed when it is a zstd frame (D-141); a transaction never holds more
+        Carrier::Input(_) => parse_envelope(magic, script).and_then(|(_, data)| {
+            crate::compress::unpack(&data, crate::settlement::MAX_SETTLEMENT_TX_BYTES)
+        }),
     };
     match payload {
         Some(payload) => TxData::One { carrier, payload },

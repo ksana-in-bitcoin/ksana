@@ -18,14 +18,13 @@
 //!   count (D-100), come from a reorg that took the block's anchor off the BTC best chain: the block leaves the main
 //!   chain (D-104), and its op is included again by a block whose own settlement lands.
 //! - A low fee does not hold a block's data back (D-102): this node's fee rate follows bitcoind's estimate within its
-//!   floor and cap, a producer bumps its own settlement waiting below that rate through the reveal's P2A output (CPFP),
+//!   floor and cap, a producer bumps its own settlement waiting below that rate through the reveal's change (CPFP),
 //!   and a block's own settlement waiting in the mempool below another node's rate holds that node's rescue back no
 //!   more than another party's claim does. While bitcoind's mempool has room, the node's settlements and rescues pay
 //!   the floor, and a pair the miners leave waiting all the same is bumped to the estimate or past its own rate,
 //!   whatever bitcoind estimates (D-117).
-//! - Another party's child holding a reveal's P2A output first (pinning) does not hold a block's data back: the
-//!   payload of the producer's own settlement, a rescue or a republish goes out again in a new pair of this node's at
-//!   the bump's rate, and nothing more is spent on a pair whose block's data has landed (D-131).
+//! - Nothing more is spent on a pair whose block's data has landed (D-131). No other party can pin a pair: only the
+//!   producer's key spends the reveal's change (D-140).
 
 mod common;
 
@@ -1164,7 +1163,7 @@ fn in_mempool(mock: &MockBtc, txid: &[u8; 32]) -> bool {
         .any(|tx| tx.compute_txid().to_byte_array() == *txid)
 }
 
-/// The transactions in the BTC mempool spending the reveal's P2A output (output 0): CPFP children.
+/// The transactions in the BTC mempool spending the reveal's change (output 0): CPFP children.
 fn children(mock: &MockBtc, pair: &SettlementPair) -> Vec<Transaction> {
     mock.mempool()
         .into_iter()
@@ -1208,7 +1207,7 @@ fn waiting_block(seed: &str, cheap: bool) -> (Arc<MockBtc>, Instance, Block, Set
     (mock, a, block, pair)
 }
 
-/// A producer's settlement left waiting in the BTC mempool by a fee spike is bumped through the reveal's P2A output
+/// A producer's settlement left waiting in the BTC mempool by a fee spike is bumped through the reveal's change
 /// once it has waited `BUMP_AFTER` BTC blocks (D-102): the child lifts the package to the producer's rate, now the
 /// estimate, and miners take the pair with it. Nothing raised a stuck fee before.
 #[test]
@@ -1459,7 +1458,7 @@ fn a_rescue_pays_the_floor_while_the_mempool_has_room() {
 }
 
 /// A CPFP child that left the BTC mempool after its pair confirmed without it is not sent again (D-102, the review of
-/// M28): it would only pay the package's deficit to sweep the P2A output.
+/// M28): it would only pay the package's deficit.
 #[test]
 fn a_child_left_behind_by_its_confirmed_pair_is_not_sent_again() {
     let (mock, a, _, pair) = waiting_block("bump-left", true);
@@ -1559,149 +1558,6 @@ fn a_child_of_a_pair_whose_block_left_the_main_chain_is_not_sent_again() {
     assert!(children(&mock, &pair).is_empty());
 }
 
-/// Another party's child of the pair, put into the BTC mempool first: it spends the reveal's P2A output (anyone can,
-/// D-102) and `source`, an output of its own of 100 000 sats, and pays 1 sat/vB for about 20 000 vB, so that a child
-/// of this node's would have to pay more than its whole fee to replace it (BIP125 rule 3; the mock refuses any
-/// conflict), and the package stays below what the miners take.
-fn pin(mock: &MockBtc, pair: &SettlementPair, source: bitcoin::OutPoint) -> [u8; 32] {
-    let anchor = bitcoin::OutPoint {
-        txid: pair.reveal.compute_txid(),
-        vout: 0,
-    };
-    let data = bitcoin::script::PushBytesBuf::try_from(vec![0u8; 20_000]).unwrap();
-    let mut tx = Transaction {
-        version: transaction::Version::TWO,
-        lock_time: absolute::LockTime::ZERO,
-        input: [anchor, source]
-            .into_iter()
-            .map(|previous_output| TxIn {
-                previous_output,
-                script_sig: bitcoin::ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            })
-            .collect(),
-        output: vec![
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: bitcoin::ScriptBuf::new_op_return(data),
-            },
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: coinbase_script(),
-            },
-        ],
-    };
-    let input = pair.reveal.output[0].value.to_sat() + 100_000;
-    tx.output[1].value = Amount::from_sat(input - tx.vsize() as u64);
-    mock.submit(tx).unwrap()
-}
-
-/// The settlement pair of a reveal transaction in the BTC mempool, whose commit transaction waits there too.
-fn pair_in_mempool(mock: &MockBtc, reveal: Transaction) -> SettlementPair {
-    let commit_txid = reveal.input[0].previous_output.txid;
-    let commit = mock
-        .mempool()
-        .into_iter()
-        .find(|tx| tx.compute_txid() == commit_txid)
-        .unwrap();
-    SettlementPair { commit, reveal }
-}
-
-/// Whether the funding inputs of the pair are reserved by this node.
-fn reserved(a: &Instance, pair: &SettlementPair) -> bool {
-    let reserved = a.chain.reserved_inputs().unwrap();
-    pair.commit.input.iter().all(|input| {
-        reserved.contains(&(
-            input.previous_output.txid.to_byte_array(),
-            input.previous_output.vout,
-        ))
-    })
-}
-
-/// A lone producer's settlement left waiting by a fee spike, whose P2A output another party's large child at a low rate
-/// took first (pinning), goes out again in a new pair of the producer's at the bump's rate once it has waited
-/// `BUMP_AFTER` BTC blocks (D-131): bitcoind refuses the producer's CPFP child, which would have to pay more than that
-/// child's whole fee, and the producer does not rescue its own waiting settlement (D-102), so the block's data used to
-/// wait for as long as the pinned pair did. The new pair lands it, and nothing more is spent on the pinned one.
-#[test]
-fn a_settlement_whose_p2a_output_another_party_holds_goes_out_again() {
-    let (mock, a, block, pair) = waiting_block("pinned", true);
-    let source = mock.fund(&coinbase_script(), &[100_000])[0];
-    let pinning = pin(&mock, &pair, source);
-    a.sync();
-    let rescuer = Rescuer::new(
-        a.chain.clone(),
-        a.producer.funding.clone().unwrap(),
-        Some(a.producer.producer),
-        None,
-    );
-    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(10));
-    rescuer.run_once().unwrap();
-    for _ in 1..BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-    }
-    assert!(
-        rescues(&mock, &block, &[pair.txid()]).is_empty(),
-        "not before BUMP_AFTER"
-    );
-    mock.mine(1);
-    a.sync();
-    rescuer.run_once().unwrap();
-    let held: Vec<[u8; 32]> = children(&mock, &pair)
-        .iter()
-        .map(|tx| tx.compute_txid().to_byte_array())
-        .collect();
-    assert_eq!(held, [pinning], "the producer's child was refused");
-    let again = rescues(&mock, &block, &[pair.txid()]);
-    assert_eq!(again.len(), 1, "its payload went out again");
-    let again = pair_in_mempool(&mock, again[0].clone());
-    assert_eq!(pair_feerate(&mock, &again), 10, "at the bump's rate");
-    rescuer.run_once().unwrap();
-    assert_eq!(rescues(&mock, &block, &[pair.txid()]).len(), 1, "only once");
-
-    mock.mine(1);
-    a.sync();
-    assert!(landed_at_tip(&a, &again));
-    assert!(in_mempool(&mock, &pair.txid()) && in_mempool(&mock, &pinning));
-    let snapshot = a.chain.btc().snapshot().unwrap();
-    assert!(a
-        .chain
-        .carried_on_chain(&block, &snapshot)
-        .unwrap()
-        .is_some());
-    for _ in 0..BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-    }
-    assert_eq!(children(&mock, &pair).len(), 1, "not bumped");
-    assert!(
-        rescues(&mock, &block, &[pair.txid()]).is_empty(),
-        "not sent again"
-    );
-
-    // The block's record closes once the data has BTC_FINALITY_CONFS confirmations; the pinned pair's funding stays
-    // reserved while it waits (D-104), or the producer would pick it for a block it then had to discard
-    mock.mine(DEVNET.btc_finality_confs);
-    a.sync();
-    a.chain.process_settlements().unwrap();
-    rescuer.run_once().unwrap();
-    let hash = block.header.hash();
-    assert!(a
-        .chain
-        .open_settlements()
-        .unwrap()
-        .iter()
-        .all(|(open, _)| *open != hash));
-    assert!(in_mempool(&mock, &pair.txid()) && reserved(&a, &pair));
-    assert!(mock.evict(&pair.commit_txid()));
-    a.chain.process_settlements().unwrap();
-    assert!(!reserved(&a, &pair), "released once it is gone");
-}
-
 /// A producer's settlement waiting in the BTC mempool is not bumped once its block's data has landed through another
 /// party's transaction (D-131): the child would only pay for a payload already on BTC. It used to be bumped until the
 /// block's record closed, `BTC_FINALITY_CONFS` BTC blocks later.
@@ -1736,136 +1592,6 @@ fn a_settlement_whose_data_landed_otherwise_is_not_bumped() {
         rescues(&mock, &block, &[pair.txid()]).is_empty(),
         "nor sent again"
     );
-}
-
-/// A rescue whose P2A output another party's child took first goes out again the same way, in its place (D-131); the
-/// funding of the pinned rescue stays reserved while it waits in the BTC mempool (D-104).
-#[test]
-fn a_rescue_whose_p2a_output_another_party_holds_goes_out_again() {
-    let (mock, a, stuck, rescuer) = stuck_block("pinned-rescue");
-    mock.set_min_feerate(5);
-    let source = mock.fund(&coinbase_script(), &[100_000])[0];
-    a.sync();
-    rescuer.run_once().unwrap();
-    let rescue = rescues(&mock, &stuck, &[]);
-    assert_eq!(rescue.len(), 1, "rescued at the floor");
-    let first = pair_in_mempool(&mock, rescue[0].clone());
-    assert_eq!(pair_feerate(&mock, &first), 2);
-    pin(&mock, &first, source);
-    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(10));
-    for _ in 1..BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-    }
-    assert_eq!(
-        rescues(&mock, &stuck, &[]).len(),
-        1,
-        "not before BUMP_AFTER"
-    );
-    mock.mine(1);
-    a.sync();
-    rescuer.run_once().unwrap();
-    let again = rescues(&mock, &stuck, &[first.txid()]);
-    assert_eq!(again.len(), 1, "its payload went out again");
-    let again = pair_in_mempool(&mock, again[0].clone());
-    assert_eq!(pair_feerate(&mock, &again), 10, "at the bump's rate");
-    assert!(reserved(&a, &first) && reserved(&a, &again));
-
-    mock.mine(1);
-    a.sync();
-    assert!(landed_at_tip(&a, &again));
-    assert!(in_mempool(&mock, &first.txid()));
-    let snapshot = a.chain.btc().snapshot().unwrap();
-    assert!(a
-        .chain
-        .carried_on_chain(&stuck, &snapshot)
-        .unwrap()
-        .is_some());
-    for _ in 0..BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-    }
-    assert!(
-        rescues(&mock, &stuck, &[first.txid()]).is_empty(),
-        "not sent again"
-    );
-    assert!(reserved(&a, &first), "while the pinned rescue waits");
-}
-
-/// A republish whose P2A output another party's child took first goes out again the same way, with the same headers
-/// (D-131).
-#[test]
-fn a_republish_whose_p2a_output_another_party_holds_goes_out_again() {
-    let params = Params {
-        max_block_data_bytes: 1_024,
-        max_settlement_headers: 60,
-        ..DEVNET
-    };
-    let (mock, genesis) = setup(&[]);
-    let a = Instance::open(&mock, &genesis, "pinned-republish", &params, false);
-    for _ in 0..130 {
-        assert!(a.produce().unwrap().entries.is_empty());
-    }
-    let funding = Funding::new(btc_keypair("pinned-republish/rescuer"), 2);
-    mock.fund(&funding.script, &[400_000; 4]);
-    let source = mock.fund(&coinbase_script(), &[100_000])[0];
-    mock.set_min_feerate(5);
-    a.sync();
-    let payee = user("adv/liveness/pinned-republish/payee").account;
-    let rescuer = Rescuer::new(a.chain.clone(), funding, None, Some(payee));
-    rescuer.run_once().unwrap();
-    let reveal = mock
-        .mempool()
-        .into_iter()
-        .find(|tx| envelope_payload(&params, tx).is_some())
-        .unwrap();
-    let first = pair_in_mempool(&mock, reveal);
-    let sent = republished(&mock, &params);
-    assert_eq!(sent.len(), 1, "republished at the floor");
-    let headers = sent[0].0.clone();
-    pin(&mock, &first, source);
-    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(10));
-    for _ in 1..BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-    }
-    // The later runs go out chained on it (D-139); its own payload does not go out again yet
-    let carrying = |mock: &MockBtc| {
-        republished(mock, &params)
-            .into_iter()
-            .filter(|(sent, _)| *sent == headers)
-            .count()
-    };
-    assert_eq!(carrying(&mock), 1, "not before BUMP_AFTER");
-    mock.mine(1);
-    a.sync();
-    rescuer.run_once().unwrap();
-    let again: Vec<Transaction> = mock
-        .mempool()
-        .into_iter()
-        .filter(|tx| tx.compute_txid().to_byte_array() != first.txid())
-        .filter(|tx| envelope_payload(&params, tx) == envelope_payload(&params, &first.reveal))
-        .collect();
-    assert_eq!(again.len(), 1, "its payload went out again");
-    assert_eq!(
-        envelope_payload(&params, &again[0]),
-        envelope_payload(&params, &first.reveal)
-    );
-    let again = pair_in_mempool(&mock, again[0].clone());
-    assert_eq!(pair_feerate(&mock, &again), 10, "at the bump's rate");
-
-    mock.mine(1);
-    a.sync();
-    let snapshot = a.chain.btc().snapshot().unwrap();
-    for header in &headers {
-        let landing = snapshot.data_landing(&header.hash()).unwrap();
-        assert_eq!(landing.txid, again.txid(), "landed by the new pair");
-    }
-    rescuer.run_once().unwrap();
-    assert_eq!(carrying(&mock), 1, "only the pinned republish carries them");
 }
 
 /// A block's own settlement waiting in the BTC mempool below this node's fee rate does not hold this node's rescue back

@@ -31,6 +31,7 @@ use ksana_btc::mock::MockBtc;
 use ksana_btc::payload::{attached_payload, bodies_in, body_len, needs_body};
 use ksana_btc::settlement::{draft, finalize, ProducerUtxo, SettlementPair};
 use ksana_node::chain::{PAYLOAD_BODY_SHARE, PAYLOAD_BODY_TRIGGER};
+use ksana_node::producer::Revenue;
 use ksana_node::rescue::{Rescuer, MAX_CHAINED_REPUBLISHES};
 use ksana_node::NodeError;
 use ksana_primitives::{
@@ -569,7 +570,7 @@ fn bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish() {
 }
 
 /// A backlog of bodies larger than several payloads, with no carrier ahead of it: the rescue thread keeps up to
-/// `MAX_CHAINED_REPUBLISHES` republishes in flight, each commit spending the change of the one before, so BTC confirms
+/// `MAX_CHAINED_REPUBLISHES` republishes in flight, each commit spending the reveal change of the one before (D-140), so BTC confirms
 /// them in order and the next payload never needs a header of an unconfirmed later one; each carries blocks the others
 /// do not, and they all land in one BTC block (D-139).
 #[test]
@@ -598,9 +599,14 @@ fn republishes_chain_on_the_change_of_the_one_before() {
     mock.mine(params.settlement_timeout * 4 + 1);
     f.sync();
 
+    let funding = f.producer.funding.clone().unwrap().with_revenue(Revenue {
+        script: bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([7; 20])),
+        hot_cap_sat: 0,
+    });
+    let script = funding.script.clone();
     let rescuer = Rescuer::new(
         Arc::clone(&f.chain),
-        f.producer.funding.clone().unwrap(),
+        funding,
         Some(f.producer.producer),
         None,
     );
@@ -630,11 +636,15 @@ fn republishes_chain_on_the_change_of_the_one_before() {
     }
     let sent = chained();
     let mut carried = BTreeSet::new();
-    for (index, (commit, _, headers)) in sent.iter().enumerate() {
+    for (index, (commit, reveal, headers)) in sent.iter().enumerate() {
+        assert_eq!(
+            reveal.output[0].script_pubkey, script,
+            "republish {index} pays its change to the funding address"
+        );
         for header in headers {
             assert!(carried.insert(header.hash()), "a block carried twice");
         }
-        if let Some((before, _, _)) = index.checked_sub(1).and_then(|i| sent.get(i)) {
+        if let Some((_, before, _)) = index.checked_sub(1).and_then(|i| sent.get(i)) {
             let change = bitcoin::OutPoint {
                 txid: before.compute_txid(),
                 vout: 0,

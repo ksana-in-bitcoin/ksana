@@ -235,7 +235,7 @@ pub fn relink(pair: &mut SettlementPair, prevouts: &[TxOut], key: &Keypair) {
         txid: pair.commit.compute_txid(),
         vout: settlement::COMMITMENT_OUTPUT,
     };
-    let committed = pair.commit.output[1].clone();
+    let committed = pair.commit.output[0].clone();
     resign_reveal(&mut pair.reveal, &committed, key, TapSighashType::Default);
 }
 

@@ -47,9 +47,7 @@ use bitcoin::{
 };
 use ksana_btc::client::{BtcClient, RpcClient};
 use ksana_btc::data::data_script;
-use ksana_btc::settlement::{
-    draft, finalize, producer_script, ProducerUtxo, P2A_AMOUNT_SAT, PRODUCER_SEQUENCE,
-};
+use ksana_btc::settlement::{draft, finalize, producer_script, ProducerUtxo, PRODUCER_SEQUENCE};
 use ksana_btc::spend::bip86_keypair;
 use ksana_primitives::{Params, DEVNET, MAINNET, SIGNET};
 
@@ -265,7 +263,7 @@ struct Probe {
     kind: Kind,
     size: usize,
     payload: Vec<u8>,
-    /// What the test spends in all (fees, the P2A output), from a dry run.
+    /// What the test spends in all (fees), from a dry run.
     spends: u64,
 }
 
@@ -406,8 +404,7 @@ fn dry_run(params: &Params, probe: &Probe, feerate: u64, key: &Keypair) -> Resul
     };
     let (_, _, fee) = build(params, probe, &dummy, feerate, key)?;
     Ok(match probe.kind {
-        Kind::Envelope => fee + P2A_AMOUNT_SAT,
-        Kind::OpReturn => fee,
+        Kind::Envelope | Kind::OpReturn => fee,
     })
 }
 

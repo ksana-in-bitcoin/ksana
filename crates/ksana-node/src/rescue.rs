@@ -21,8 +21,7 @@
 //!   it (M26: anyone can put a transaction naming the block in the mempool). The block's own settlement transactions
 //!   waiting in the mempool hold the rescue back on the same terms (D-102): a pair paying less than this node's fee
 //!   rate, or one that has waited [`CLAIM_PATIENCE`] BTC blocks, counts as stuck, and the order above starts then. The
-//!   producer does not rescue its own block's waiting settlement; it bumps it, or sends its payload again when another
-//!   party holds its P2A output (below).
+//!   producer does not rescue its own block's waiting settlement; it bumps it (below).
 //! - Republishing block headers and bodies: in the main chain's acceptance order (each main-chain block preceded by the
 //!   blocks it merges, D-063), when the first block whose data has not landed carries no settlement transactions and
 //!   later settlement payloads will not include it any more (the first later block carrying settlement transactions
@@ -36,7 +35,8 @@
 //!   settlement payload cannot fit, plus the bodies of those among them that need one. Blocks carrying settlement
 //!   transactions that are parallel to it (possibly after it in acceptance order) will not carry it and do not count.
 //!   While this node's republishes wait in the mempool, the next run (the blocks they do not carry) goes out chained on them, its
-//!   commit transaction spending the change of the last one's first, so BTC confirms them in order; at most
+//!   commit transaction spending the change of the last one's reveal first (D-140), so BTC confirms them, reveals
+//!   included, in order; at most
 //!   [`MAX_CHAINED_REPUBLISHES`] are in flight, and none is added once the last one's change is spent (D-139).
 //!
 //! - Fee rate and CPFP bumps (D-102, D-117): every transaction this node sends pays the rate of its fee policy
@@ -46,24 +46,25 @@
 //!   (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for [`BUMP_AFTER`]
 //!   BTC blocks (at once while that competing chain is there) and pays less than the estimated rate
 //!   ([`crate::producer::FeePolicy::estimated_rate`], whether or not the mempool has room: the floor was not enough
-//!   for it) gets a child spending the reveal's P2A output and one funding UTXO, lifting the package to that rate;
+//!   for it) gets a child spending the reveal's change (D-140), lifting the package to that rate;
 //!   once it has waited those blocks while the mempool had room, outside a race, to at least twice the pair's own
 //!   rate, doubling for every further such block, up to the cap, so that the bump does not depend on the estimate
 //!   being above the pair's rate ([`crate::producer::FeePolicy::escalated`], D-117). When the rate rises again, a
-//!   child paying more replaces it (full RBF, Bitcoin Core 28). Anyone can spend the P2A output, so another party may
-//!   attach a large child at a low rate first, which this node's child would have to out-pay in full (BIP125 rule 3:
-//!   pinning). When bitcoind refuses this node's child while a transaction of another party spends the output, the
-//!   pair's payload goes out again in a new pair of this node's at the bump's rate, as the rescue of the block or as
-//!   the republish ([`Rescuer::send_again`], D-131): it spends nothing of the old pair's, so no transaction of another
-//!   party's stands in its way, and it is bumped in turn. A pair whose block's carried data has all landed is not
-//!   bumped.
+//!   child paying more replaces it (full RBF, Bitcoin Core 28). Only this node's key spends the change, so no other
+//!   party can attach a child first and pin the pair. A pair whose change a chained republish spent is lifted through
+//!   the last link's child instead, and a pair whose block's carried data has all landed is not bumped.
 //!
 //! - Funding UTXO pool (D-075): settlement transactions can only be funded by confirmed UTXOs and must not spend each
 //!   other, so when fewer than [`Funding::pool_target`] funding UTXOs are available, the largest one is split into
 //!   several equal outputs (each at least [`FUNDING_SPLIT_MIN_SAT`] sats); no further split until the split transaction
 //!   confirms.
 //!
-//! Rescue settlements, header republishing, CPFP children and split transactions reserve their funding inputs with
+//! - Revenue sweep (D-142): with a revenue address configured (D-060), once the available funding UTXOs hold at least
+//!   [`REVENUE_SWEEP_MIN_SAT`] and a tenth of the hot wallet cap above the cap, one transaction moves that excess to
+//!   the revenue address; no further sweep until it confirms. The change of every pair returns to the funding address,
+//!   so every pair can be bumped and chained.
+//!
+//! Rescue settlements, header republishing, CPFP children, split and sweep transactions reserve their funding inputs with
 //! [`Chain::try_reserve_inputs`] after choosing the funding and before broadcasting (mutually exclusive with the block
 //! production loop); while in flight they are excluded from the producer's funding; they are released when rejected or
 //! abandoned. Rescue settlements and republishing are both commit / reveal transaction pairs (D-081, the envelope using
@@ -77,8 +78,8 @@ use bitcoin::Transaction;
 use ksana_btc::client::BtcClient;
 use ksana_btc::payload::{attached_payload, entry_data, headers_payload_fixed_len};
 use ksana_btc::settlement::{
-    cpfp_child, finalize, split_funding, validate_attached, ProducerUtxo, SettlementError,
-    SettlementPair,
+    cpfp_child, finalize, split_funding, sweep_revenue, validate_attached, ProducerUtxo,
+    SettlementError, SettlementPair, CHANGE_OUTPUT,
 };
 use ksana_btc::tracker::{BlockSummary, BtcSnapshot};
 use ksana_primitives::{compact, Block, BlockHeader, Body, Payload};
@@ -107,6 +108,8 @@ const QUIET_REPUBLISH_FACTOR: u32 = 4;
 const COINBASE_MATURITY: u32 = 100;
 /// Minimum amount of each output split off for the funding UTXO pool (sats, D-075).
 pub const FUNDING_SPLIT_MIN_SAT: u64 = 100_000;
+/// The least excess above the hot wallet cap a revenue sweep moves (sats, D-142); it also waits for a tenth of the cap.
+pub const REVENUE_SWEEP_MIN_SAT: u64 = 100_000;
 /// BTC blocks a pair this node sent waits unconfirmed in the mempool before it is bumped by CPFP (local policy, D-102);
 /// none while a lighter competing chain is on BTC (D-091).
 pub const BUMP_AFTER: u32 = 2;
@@ -213,24 +216,6 @@ fn stalled(
     latest.is_some_and(|height| height > confirmed)
 }
 
-/// Records `sent` as the pair this node sent for what `lands` names, in place of `old` (D-131), whose funding inputs
-/// stay reserved while it may be in the BTC mempool (D-104): a pinned pair can wait there long after the settlement
-/// record of its block, which reserves those of the block's own settlement, has closed.
-fn take_place(
-    chain: &Chain,
-    state: &mut State,
-    lands: Lands,
-    old: &SettlementPair,
-    sent: Sent,
-) -> Result<(), NodeError> {
-    let replaced = match lands {
-        Lands::Block(hash) => state.rescues.insert(hash, sent),
-        Lands::Headers(first) => state.headers.insert(first, sent),
-    };
-    let old = replaced.unwrap_or_else(|| Sent::pair(old.clone()));
-    chain.linger(old.txids(), &old.inputs)
-}
-
 /// A transaction seen in the BTC mempool (D-057).
 struct Seen {
     /// The fast-lane block it claims to settle (hash of the last header of its settlement payload); `None` when it is
@@ -254,13 +239,13 @@ struct Bump {
     child: Option<(Sent, u64)>,
 }
 
-/// What a pair this node sent lands, so that its payload can go out again in its place (D-131).
+/// What a pair this node sent lands.
 #[derive(Clone, Copy)]
 enum Lands {
     /// The data of a block: the block's own settlement, or a rescue of it ([`State::rescues`]).
     Block([u8; 32]),
-    /// A republish, by the hash of its first header ([`State::headers`]).
-    Headers([u8; 32]),
+    /// A republish ([`State::headers`]).
+    Headers,
 }
 
 #[derive(Default)]
@@ -272,8 +257,7 @@ struct State {
     waiting: BTreeMap<[u8; 32], u32>,
     /// Reveal txid of a pair this node sent → its CPFP bump (D-102).
     bumps: BTreeMap<[u8; 32], Bump>,
-    /// Block hash → rescue settlement sent by this node (also the payload of the block's own settlement sent again when
-    /// another party held its P2A output, D-131).
+    /// Block hash → rescue settlement sent by this node.
     rescues: BTreeMap<[u8; 32], Sent>,
     /// Competing-chain blocks already republished for (or at least logged) (D-091), so the log is not repeated every
     /// round.
@@ -284,6 +268,8 @@ struct State {
     mempool: BTreeMap<[u8; 32], Seen>,
     /// Funding UTXO split transaction sent by this node and not yet confirmed (D-075).
     split: Option<Sent>,
+    /// Revenue sweep transaction sent by this node and not yet confirmed (D-142).
+    sweep: Option<Sent>,
 }
 
 /// Rescue settlement and header republishing.
@@ -359,7 +345,106 @@ impl Rescuer {
             Some(_) => fees.rate(params, client, false),
             None => feerate,
         };
-        self.maintain_pool(btc_tip, split_rate)
+        self.maintain_pool(btc_tip, split_rate)?;
+        self.maintain_revenue(btc_tip, split_rate)
+    }
+
+    /// Revenue sweep (D-142, local policy): once the available funding UTXOs exceed the hot wallet cap of D-060 by at
+    /// least [`REVENUE_SWEEP_MIN_SAT`] and a tenth of the cap, one transaction moves the excess, less its fee, to the
+    /// revenue address, spending the largest UTXOs that cover it and returning the rest to the funding address; no
+    /// further sweep until it confirms.
+    fn maintain_revenue(&self, btc_tip: u32, feerate: u64) -> Result<(), NodeError> {
+        let Some(revenue) = &self.funding.revenue else {
+            return Ok(());
+        };
+        let chain = &self.chain;
+        let client = chain.btc().client();
+        let mut state = self.state()?;
+        if let Some(sent) = state.sweep.take() {
+            let confirmed = client
+                .transaction(&sent.txid)
+                .map_err(btc)?
+                .is_some_and(|info| info.block.is_some());
+            if !confirmed {
+                if self.keep_alive(client.as_ref(), &sent)? {
+                    state.sweep = Some(sent);
+                }
+                return Ok(());
+            }
+            chain.release_inputs(&sent.inputs)?;
+        }
+        let utxos = self.available_utxos(btc_tip)?;
+        let total = utxos
+            .iter()
+            .map(|u| u.txout.value.to_sat())
+            .fold(0u64, u64::saturating_add);
+        let excess = total.saturating_sub(revenue.hot_cap_sat);
+        let least = REVENUE_SWEEP_MIN_SAT.max(revenue.hot_cap_sat.checked_div(10).unwrap_or(0));
+        if excess < least {
+            return Ok(());
+        }
+        let mut inputs = Vec::new();
+        let mut covered = 0u64;
+        for u in &utxos {
+            if covered >= excess {
+                break;
+            }
+            covered = covered.saturating_add(u.txout.value.to_sat());
+            inputs.push(u.clone());
+        }
+        let swept = sweep_revenue(
+            &inputs,
+            excess,
+            revenue.script.clone(),
+            feerate,
+            &self.funding.keypair,
+        )
+        .map_err(|e| {
+            NodeError::Internal(format!(
+                "assembling the revenue sweep transaction failed: {e}"
+            ))
+        })?;
+        let Some(tx) = swept else {
+            return Ok(());
+        };
+        if let Err(reason) = client.test_accept(&[&tx]).map_err(btc)? {
+            eprintln!(
+                "[ksana-node] testmempoolaccept rejected the revenue sweep transaction: {reason}"
+            );
+            return Ok(());
+        }
+        let sent = Sent {
+            txid: tx.compute_txid().to_byte_array(),
+            inputs: inputs
+                .iter()
+                .map(|u| (u.outpoint.txid.to_byte_array(), u.outpoint.vout))
+                .collect(),
+            txs: vec![tx],
+        };
+        if !chain.try_reserve_inputs(&sent.inputs)? {
+            return Ok(());
+        }
+        match client.broadcast_all(&sent.refs()) {
+            Ok(Ok(())) => {
+                eprintln!(
+                    "[ksana-node] revenue sweep: {excess} sats above the hot wallet cap to the revenue address txid={}",
+                    sent.shown()
+                );
+                state.sweep = Some(sent);
+            }
+            Ok(Err(reason)) => {
+                chain.release_inputs(&sent.inputs)?;
+                eprintln!(
+                    "[ksana-node] broadcasting the revenue sweep transaction failed: {reason}"
+                );
+            }
+            Err(e) => {
+                // Outcome unknown: track as usual and verify next round
+                state.sweep = Some(sent);
+                return Err(btc(e));
+            }
+        }
+        Ok(())
     }
 
     /// Funding UTXO pool (D-075, local policy): when fewer than [`Funding::pool_target`] funding UTXOs are available,
@@ -840,8 +925,8 @@ impl Rescuer {
     }
 
     /// A commit / reveal pair carrying `payload`, funded by this node at `feerate` (§7.3, D-045; the envelope using this
-    /// node's funding key, D-081): a rescue rebuilds a block's settlement transactions with the payload unchanged, and
-    /// a pair whose P2A output another party holds goes out again this way (D-131). It passes the checks of the
+    /// node's funding key, D-081): a rescue rebuilds a block's settlement transactions with the payload unchanged. It
+    /// passes the checks of the
     /// settlement transactions a block carries, by which other nodes judge a claim in the mempool (D-057), and
     /// `testmempoolaccept`; `None` when it cannot be assembled or is refused (logged, `what` naming it).
     fn build_pair(
@@ -884,18 +969,16 @@ impl Rescuer {
     /// CPFP bumps of the pairs this node sent (D-102): the settlement transactions of the blocks it produced, its
     /// rescues and its republishes. One waiting in the BTC mempool for [`BUMP_AFTER`] BTC blocks (at once while a
     /// lighter competing chain is on BTC, D-091) whose package pays less than `feerate`, the estimated rate (D-117),
-    /// gets a child through the reveal's P2A output, funded by one funding UTXO of this node, lifting the package to
+    /// gets a child spending the reveal's change (D-140), lifting the package to
     /// `feerate`. Once the pair has waited [`BUMP_AFTER`] BTC blocks while bitcoind's mempool had `room` (outside a
     /// race), the target is at least the pair's own rate doubled for every such block from the `BUMP_AFTER`-th on, up
     /// to the cap: those blocks had space for the pair, so the miners want more than it pays, whatever bitcoind
     /// estimates (D-117). The child is replaced by a richer one when the target rises again. The child's funding input
     /// stays reserved until the child confirms or is gone.
     ///
-    /// When bitcoind refuses this node's first child while a transaction of another party spends the P2A output (a
-    /// child attached first, which this node's would have to out-pay in full, BIP125 rule 3), the pair's payload goes
-    /// out again in a new pair of this node's at the target ([`Rescuer::send_again`], D-131). The pairs of a block
-    /// whose carried data has all landed are not bumped, and neither is a block's own settlement once its payload went
-    /// out again in a rescue of this node's: that one is bumped instead.
+    /// The pairs of a block whose carried data has all landed are not bumped, nor a pair whose change a chained
+    /// republish spent (D-139), nor a block's own settlement once its payload went out again in a rescue of this
+    /// node's: that one is bumped instead.
     fn bump(
         &self,
         snapshot: &BtcSnapshot,
@@ -932,12 +1015,7 @@ impl Rescuer {
             .rescues
             .iter()
             .map(|(hash, sent)| (Lands::Block(*hash), sent))
-            .chain(
-                state
-                    .headers
-                    .iter()
-                    .map(|(first, sent)| (Lands::Headers(*first), sent)),
-            );
+            .chain(state.headers.values().map(|sent| (Lands::Headers, sent)));
         for (lands, sent) in ours {
             if let [commit, reveal] = sent.txs.as_slice() {
                 let pair = SettlementPair {
@@ -950,7 +1028,7 @@ impl Rescuer {
 
         // The children sent: a confirmed one is done, one gone from the mempool is sent again while its pair still
         // waits (given up when that is rejected: its parents are gone) and given up once the pair no longer waits,
-        // since it would only pay the package's deficit to sweep the P2A output, or is no longer one this node settles
+        // since it would only pay the package's deficit, or is no longer one this node settles
         // (its block left the main chain, D-104); a bump is kept while its pair still waits or its child is
         // unconfirmed
         let tracked: Vec<[u8; 32]> = state.bumps.keys().copied().collect();
@@ -986,8 +1064,6 @@ impl Rescuer {
         }
 
         let wait = if urgent { 0 } else { BUMP_AFTER };
-        // The pairs whose P2A output another party holds, with the rate their payload goes out again at (D-131)
-        let mut pinned: Vec<([u8; 32], u64)> = Vec::new();
         for (reveal, (pair, lands)) in &pairs {
             if !client.in_mempool(reveal).map_err(btc)? {
                 continue;
@@ -1025,15 +1101,13 @@ impl Rescuer {
                 _ => feerate,
             };
             // Nothing more is spent on a pair whose block's carried data has all landed through other transactions
-            // (D-131)
             if let Lands::Block(hash) = lands {
                 if self.landed(hash, snapshot)? {
                     continue;
                 }
             }
-            // The funding UTXO and the least fee of the child: a replacement spends the same funding UTXO and pays
-            // more than the child it replaces by the relay increment
-            let (candidates, min_fee) = match &bump.child {
+            // The least fee of the child: a replacement pays more than the child it replaces by the relay increment
+            let min_fee = match &bump.child {
                 Some((child, fee)) => {
                     let Some(tx) = child.txs.first() else {
                         continue;
@@ -1043,70 +1117,51 @@ impl Rescuer {
                     if paid >= target.saturating_mul(pair_vsize.saturating_add(size)) {
                         continue;
                     }
-                    let Some(input) = tx.input.get(1) else {
-                        continue;
-                    };
-                    let Some(info) = client.utxo(&input.previous_output, false).map_err(btc)?
-                    else {
-                        continue;
-                    };
-                    let utxo = ProducerUtxo {
-                        outpoint: input.previous_output,
-                        txout: info.txout,
-                    };
-                    let min_fee =
-                        fee.saturating_add(size.saturating_mul(INCREMENTAL_RELAY_FEERATE));
-                    (vec![utxo], min_fee)
+                    fee.saturating_add(size.saturating_mul(INCREMENTAL_RELAY_FEERATE))
                 }
                 None => {
                     if pair_fee >= target.saturating_mul(pair_vsize) {
                         continue;
                     }
-                    // The smallest funding UTXO that pays for it
-                    let mut utxos = self.available_utxos(btc_tip)?;
-                    utxos.reverse();
-                    (utxos, 0)
+                    0
                 }
             };
-            let mut built = None;
-            for utxo in &candidates {
-                let child = cpfp_child(
-                    params,
-                    &pair.reveal,
-                    pair_fee,
-                    pair_vsize,
-                    utxo,
-                    target,
-                    min_fee,
-                    &self.funding.keypair,
-                )
-                .map_err(|e| NodeError::Internal(format!("building the CPFP child failed: {e}")))?;
-                if let Some((tx, fee)) = child {
-                    built = Some((tx, fee, utxo.outpoint));
-                    break;
-                }
+            // The child spends the reveal's change (D-140); once a republish chained on the pair spends it (D-139),
+            // that republish waits with it and is the one bumped. Every pair pays its change to the funding address
+            // (D-142); one that does not is not this key's to spend
+            if pair
+                .reveal
+                .output
+                .first()
+                .is_none_or(|change| change.script_pubkey != self.funding.script)
+            {
+                continue;
             }
-            let Some((tx, fee, outpoint)) = built else {
+            let outpoint = bitcoin::OutPoint {
+                txid: pair.reveal.compute_txid(),
+                vout: CHANGE_OUTPUT,
+            };
+            if bump.child.is_none() && client.utxo(&outpoint, true).map_err(btc)?.is_none() {
+                continue;
+            }
+            let child = cpfp_child(
+                params,
+                &pair.reveal,
+                pair_fee,
+                pair_vsize,
+                target,
+                min_fee,
+                &self.funding.keypair,
+            )
+            .map_err(|e| NodeError::Internal(format!("building the CPFP child failed: {e}")))?;
+            let Some((tx, fee)) = child else {
                 eprintln!(
-                    "[ksana-node] cannot bump the transaction {} waiting in the BTC mempool: no funding UTXO pays for it",
+                    "[ksana-node] cannot bump the transaction {} waiting in the BTC mempool: its change does not pay for it",
                     bitcoin::Txid::from_byte_array(*reveal)
                 );
                 continue;
             };
             if let Err(reason) = client.test_accept(&[&tx]).map_err(btc)? {
-                // With no child of this node's in flight, a transaction spending the P2A output is another party's,
-                // which this node's child would have to out-pay in full (BIP125 rule 3): the payload goes out again
-                // instead, in a pair nothing of the old one's holds back (D-131)
-                if bump.child.is_none() && self.anchor_taken(&tx, reveal)? {
-                    eprintln!(
-                        "[ksana-node] another party's transaction spends the P2A output of {} waiting in the BTC mempool, \
-                         and testmempoolaccept rejected this node's CPFP child ({reason}): sending its payload again at \
-                         {target} sat/vB (D-131)",
-                        bitcoin::Txid::from_byte_array(*reveal)
-                    );
-                    pinned.push((*reveal, target));
-                    continue;
-                }
                 eprintln!(
                     "[ksana-node] testmempoolaccept rejected the CPFP child of {}: {reason}",
                     bitcoin::Txid::from_byte_array(*reveal)
@@ -1148,11 +1203,6 @@ impl Rescuer {
                 }
             }
         }
-        for (reveal, rate) in pinned {
-            if let Some((pair, lands)) = pairs.get(&reveal) {
-                self.send_again(&mut state, pair, *lands, btc_tip, rate)?;
-            }
-        }
         Ok(())
     }
 
@@ -1162,78 +1212,6 @@ impl Rescuer {
             Some(block) => self.chain.carried_on_chain(&block, snapshot)?.is_some(),
             None => false,
         })
-    }
-
-    /// Whether a transaction in the BTC mempool spends the P2A output the CPFP child `child` of reveal `reveal` spends
-    /// (its first input) while the reveal still waits there (D-131). bitcoind's `gettxout` with the mempool has nothing
-    /// for an output a mempool transaction spends.
-    fn anchor_taken(&self, child: &Transaction, reveal: &[u8; 32]) -> Result<bool, NodeError> {
-        let client = self.chain.btc().client();
-        let Some(anchor) = child.input.first().map(|input| input.previous_output) else {
-            return Ok(false);
-        };
-        Ok(client.utxo(&anchor, true).map_err(btc)?.is_none()
-            && client.in_mempool(reveal).map_err(btc)?)
-    }
-
-    /// Sends the payload of a pair this node sent again, in a new commit / reveal pair funded by this node at `feerate`
-    /// (D-131): another party's transaction spends the pair's P2A output, and this node's CPFP child would have to pay
-    /// more than that transaction's whole fee to replace it (BIP125 rule 3), so a large child at a low rate attached
-    /// first would hold the pair at that rate for as long as it stays. The new pair spends nothing of the old one's, so
-    /// no transaction of another party's stands in its way, and it takes the old one's place: as the rescue of the block
-    /// whose data it lands (the producer's own settlement included), or as the republish. The old pair is no longer
-    /// bumped, and its funding inputs stay reserved while it may be in the BTC mempool (D-104).
-    fn send_again(
-        &self,
-        state: &mut State,
-        pair: &SettlementPair,
-        lands: Lands,
-        btc_tip: u32,
-        feerate: u64,
-    ) -> Result<(), NodeError> {
-        let chain = &self.chain;
-        let client = chain.btc().client();
-        if let Lands::Block(hash) = lands {
-            // As for a rescue: the payload counts only in a BTC block above the block's anchor (D-100)
-            let anchor = chain
-                .store()
-                .block(&hash)?
-                .map(|block| block.header.btc_anchor.height);
-            if anchor.is_none_or(|height| height > btc_tip) {
-                return Ok(());
-            }
-        }
-        let Some(payload) = settlement::attached_payload(chain.params(), pair) else {
-            return Ok(());
-        };
-        let what = format!("the payload of {} again", pair.reveal.compute_txid());
-        let Some(sent) = self.build_pair(&payload, btc_tip, feerate, &what)? else {
-            return Ok(());
-        };
-        // Reserve the funding before broadcasting (as for rescue settlements)
-        if !chain.try_reserve_inputs(&sent.inputs)? {
-            return Ok(());
-        }
-        match client.broadcast_all(&sent.refs()) {
-            Ok(Ok(())) => {
-                eprintln!(
-                    "[ksana-node] sent {what} at {feerate} sat/vB (D-131) reveal txid={}",
-                    sent.shown()
-                );
-                take_place(chain, state, lands, pair, sent)?;
-            }
-            Ok(Err(reason)) => {
-                chain.release_inputs(&sent.inputs)?;
-                eprintln!("[ksana-node] broadcasting {what} failed: {reason}");
-            }
-            Err(e) => {
-                // Outcome unknown (the transactions may have entered the mempool): track as usual; keep_alive verifies
-                // next round
-                take_place(chain, state, lands, pair, sent)?;
-                return Err(btc(e));
-            }
-        }
-        Ok(())
     }
 
     /// The fees (sats) and virtual size (vB) of a commit / reveal pair together; `None` when the previous outputs of the
@@ -1263,7 +1241,7 @@ impl Rescuer {
         };
         // The reveal spends the commit's commitment output, so the pair's fee is what the commit's inputs give minus
         // what neither transaction spends: the commit's change and the reveal's outputs
-        let committed = pair.commit.output.get(1).map_or(0, |o| o.value.to_sat());
+        let committed = pair.commit.output.first().map_or(0, |o| o.value.to_sat());
         let fee = total_in
             .saturating_sub(out(&pair.commit).saturating_sub(committed))
             .saturating_sub(out(&pair.reveal));
@@ -1455,10 +1433,15 @@ impl Rescuer {
                     covered.extend(headers.iter().map(BlockHeader::hash));
                 }
                 let change = bitcoin::OutPoint {
-                    txid: commit.compute_txid(),
-                    vout: 0,
+                    txid: reveal.compute_txid(),
+                    vout: CHANGE_OUTPUT,
                 };
-                if let Some(txout) = commit.output.first() {
+                // Only change the funding key signs links the chain (every pair pays it there, D-142)
+                if let Some(txout) = reveal
+                    .output
+                    .first()
+                    .filter(|txout| txout.script_pubkey == self.funding.script)
+                {
                     if client.utxo(&change, true).map_err(btc)?.is_some() {
                         tail = Some(ProducerUtxo {
                             outpoint: change,

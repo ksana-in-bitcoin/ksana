@@ -22,6 +22,7 @@ borsh = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 ksana-primitives = { workspace = true, features = ["proptest"] }

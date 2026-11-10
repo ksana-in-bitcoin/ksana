@@ -138,8 +138,8 @@ fn envelope_tx(mock: &MockBtc, payload: &Payload) -> Transaction {
             witness: Witness::from_slice(&[vec![0u8; 64], leaf.into_bytes(), vec![0xc0; 33]]),
         }],
         output: vec![TxOut {
-            value: Amount::from_sat(ksana_btc::settlement::P2A_AMOUNT_SAT),
-            script_pubkey: ksana_btc::settlement::p2a_script(),
+            value: Amount::from_sat(1_000),
+            script_pubkey: ksana_btc::settlement::producer_script(&key),
         }],
     }
 }
