@@ -10,7 +10,6 @@
 import { Buffer } from 'node:buffer';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -416,8 +415,16 @@ function answer(req) {
   }
 }
 
-const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-for await (const line of lines) {
-  if (line.trim() === '') continue;
+// A line ends at a line feed alone: node:readline also ends one at U+2028 and U+2029, which a JSON string holds unescaped
+function reply(line) {
+  if (line.trim() === '') return;
   process.stdout.write(`${JSON.stringify(answer(JSON.parse(line)))}\n`);
 }
+let pending = '';
+process.stdin.setEncoding('utf8');
+for await (const chunk of process.stdin) {
+  const lines = (pending + chunk).split('\n');
+  pending = lines.pop() ?? '';
+  for (const line of lines) reply(line);
+}
+reply(pending);
