@@ -1011,6 +1011,38 @@ pub(crate) fn fund(
     payload: &[u8],
     feerate: u64,
 ) -> Result<Result<Draft, Unfunded>, NodeError> {
+    fund_to(
+        params,
+        utxos,
+        funding,
+        payload,
+        feerate,
+        |available, used| funding.change_script(available, used),
+    )
+}
+
+/// Same as [`fund`], but the change always returns to the funding address, never to the revenue address: a
+/// republish's change funds the next republish chained on it (D-139), and only the funding key can sign it.
+pub(crate) fn fund_chainable(
+    params: &Params,
+    utxos: &[ProducerUtxo],
+    funding: &Funding,
+    payload: &[u8],
+    feerate: u64,
+) -> Result<Result<Draft, Unfunded>, NodeError> {
+    fund_to(params, utxos, funding, payload, feerate, |_, _| {
+        funding.script.clone()
+    })
+}
+
+fn fund_to(
+    params: &Params,
+    utxos: &[ProducerUtxo],
+    funding: &Funding,
+    payload: &[u8],
+    feerate: u64,
+    change: impl Fn(u64, u64) -> ScriptBuf,
+) -> Result<Result<Draft, Unfunded>, NodeError> {
     let feerate = feerate.max(params.min_settlement_feerate_sat_vb);
     let sum = |utxos: &[ProducerUtxo]| {
         utxos
@@ -1026,7 +1058,7 @@ pub(crate) fn fund(
         match draft(
             params,
             inputs,
-            funding.change_script(available, sum(inputs)),
+            change(available, sum(inputs)),
             &funding.keypair.x_only_public_key().0,
             payload,
             feerate,

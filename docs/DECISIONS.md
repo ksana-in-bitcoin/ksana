@@ -5079,3 +5079,25 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish` in `m12_batch.rs` (an unfunded producer backlogs bodies past the budget twice, the funded one carries every header
   and drops the earliest bodies, both carriers' data lands, and one republish lands both dropped bodies); SPEC (the version history, §7.5, §7.6).
 
+## D-139 Republishes chain on the change of the one before (recovering the public signet after a load test, 2026-11-08; revises D-047, D-138 and SPEC §7.6; local policy, no consensus change, M54)
+
+- **Problem**: a node kept one republish in flight and sent the next run only once it confirmed (D-047, D-138), so a backlog larger than one payload drained one `MAX_BLOCK_DATA_BYTES`
+  payload per BTC block per node. Recovering the public signet after the load test of D-138 by hand, independent pairs sent at once confirmed across two BTC blocks in an order of the miner's:
+  a later payload confirming first landed nothing (D-135) and had to go out again. Pairs where each commit spent the previous commit's change confirmed in order and drained the rest without
+  waste.
+- **Decision**: `republish` in `rescue.rs` keeps every republish of this node's alive, in acceptance order of its first header, and while fewer than `MAX_CHAINED_REPUBLISHES` (4) are in flight
+  and the last one's commit change is unspent, sends the next run: the blocks of the range D-138 defines that the republishes in flight do not carry, funded by that change first (other funding
+  UTXOs added when it is short). It is keyed by its first header, like the others. A chain whose last change is spent waits for its pairs to confirm. A republish's change always returns
+  to the funding address, never to the revenue address of D-060 (`fund_chainable` in `producer.rs`), and only change at the funding address links the chain: the next republish signs
+  for it with the funding key.
+- **Rationale**: a commit spending an unconfirmed commit's change cannot confirm before it, so the parents a payload needs from an earlier payload of the chain have counted by the time it
+  confirms. Four full payloads, about 84 kvB with their commits, stay below Bitcoin Core's default 101 kvB cluster limit and the 25-transaction ancestor limit.
+- **Costs and limitations**: the order holds between commits; a reveal depends only on its own commit, so a miner could still include a later reveal without an earlier one. Miners select by
+  package fee rate and the pairs pay the same rate, so this did not happen in the signet recovery, but it is not guaranteed; spending an earlier reveal's output would be, and the reveal has no
+  output of the node's to spend. Pairs of different nodes, and a block's own settlement transactions (which must not spend each other, SPEC §7.2), are still ordered by the miner. A CPFP bump
+  (D-102) spends a reveal's P2A output and leaves the chain as it is; a pinned link sent again (D-131) goes out as a pair of its own, outside the chain, while the links after it stay chained on
+  the old one.
+- **Impact**: `crates/ksana-node` (`rescue.rs`: `MAX_CHAINED_REPUBLISHES`, `republish`; `producer.rs`: `fund_chainable`); the test `republishes_chain_on_the_change_of_the_one_before` in
+  `m12_batch.rs` (a backlog of more than four payloads with a revenue address set: four republishes in flight, each commit paying its change to the funding address and spending the change
+  of the one before, no block carried twice, all landing in one BTC block, and a new chain once they
+  confirm); SPEC (the version history, §7.6).
