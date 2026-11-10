@@ -3,8 +3,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { parseAbi } from '../abi/parse';
 import type { Abi, Value } from '../abi/types';
 import { AiPage } from '../ai/AiPage';
+import { useAccount } from '../chain/account';
+import { KSA_HEX, formatUnits } from '../chain/assets';
 import { connect, useConnection, useConnectionState, useTip } from '../chain/connection';
 import { endpoints } from '../chain/deployment';
+import { useWallet } from '../chain/wallet';
 import { EXAMPLES, exampleAbi, exampleById, type ExampleDef } from '../examples';
 import { identify } from '../examples/identify';
 import { LOCALES, setLocale, useLocale, useT } from '../i18n';
@@ -16,11 +19,12 @@ import { ReviewDialog } from '../ui/Review';
 import { SettingsDialog } from '../ui/Settings';
 import { Toasts } from '../ui/Toasts';
 import { Banner, Button, Empty, Field, Modal, Section, Spinner, Tabs, copyText } from '../ui/ui';
-import { WalletButton } from '../ui/Wallet';
+import { ConnectDialog, WalletButton } from '../ui/Wallet';
 import { deployRequestStore } from './deploys';
 import { addInstance, forgetInstance, selectInstance, useInstances, type Instance } from './instances';
 import { TABS, navigate, shareLink, useRoute, type Tab } from './route';
 import { useStore } from './store';
+import { Workbench } from './Workbench';
 
 const REPO = 'https://github.com/ksana-in-bitcoin/ksana';
 
@@ -123,41 +127,69 @@ function Footer() {
 function Home() {
   const t = useT();
   const m = t.core;
-  const steps = ['wallet', 'faucet', 'deploy', 'edit'] as const;
   return <div className="home">
     <section className="hero">
-      <h1>{m.title}</h1>
-      <p className="lead">{m.home.lead}</p>
+      <div className="hero-text">
+        <p className="hero-eyebrow"><span className="net-dot" aria-hidden="true" />{m.home.eyebrow}</p>
+        <h1>{m.home.headline}</h1>
+        <p className="lead">{m.home.lead}</p>
+      </div>
       <div className="hero-actions">
-        <a className="btn btn--primary btn--md" href="#/counter">{m.home.start}</a>
         <a className="btn btn--secondary btn--md" href="#/ai">{m.home.ai}</a>
         <a className="btn btn--ghost btn--md" href={docsLink(useLocale())}>{m.nav.docs}</a>
       </div>
     </section>
-    <Section title={m.home.examplesTitle}>
+    <Workbench />
+    <Section title={m.home.stepsTitle}>
+      <Steps steps={['wallet', 'faucet', 'deploy', 'edit']} />
+    </Section>
+    <Section title={m.home.more}>
       <ul className="cards">
-        {EXAMPLES.map((e) => <li key={e.id}>
-          <a className="card" href={`#/${e.id}`}>
-            <span className="card-title">{m.examples[e.id].title}</span>
-            <span className="card-body">{m.examples[e.id].summary}</span>
-            <span className="card-meta mono">{e.crate}{e.build ? ` · ${(e.build.bytes / 1024).toFixed(1)} KiB` : ''}</span>
-            {e.uses && <span className="card-meta">{m.home.uses}: {e.uses.map((u) => m.examples[u].title).join(', ')}</span>}
-          </a>
-        </li>)}
         <li>
-          <a className="card card--plain" href="#/open">
+          <a className="card" href="#/open">
             <span className="card-title">{m.home.contract}</span>
             <span className="card-body">{m.home.contractBody}</span>
           </a>
         </li>
+        <li>
+          <a className="card" href="#/ai">
+            <span className="card-title">{m.home.ai}</span>
+            <span className="card-body">{m.home.aiBody}</span>
+          </a>
+        </li>
       </ul>
     </Section>
-    <Section title={m.home.stepsTitle}>
-      <ol className="steps">
-        {steps.map((s, i) => <li key={s}><span className="step-n">{i + 1}</span><div><h3>{m.home.steps[s].title}</h3><p>{m.home.steps[s].body}</p></div></li>)}
-      </ol>
-    </Section>
   </div>;
+}
+
+type Step = 'wallet' | 'faucet' | 'deploy' | 'edit';
+
+/** The way from nothing to a deployed contract, with the steps the connected wallet has already taken ticked */
+function Steps({ steps }: { steps: Step[] }) {
+  const m = useT().core;
+  const conn = useConnection();
+  const wallet = useWallet();
+  const ksa = useAccount()?.balances.get(KSA_HEX) ?? 0n;
+  const [connecting, setConnecting] = useState(false);
+  const address = wallet?.account.address ?? '';
+  const done: Partial<Record<Step, string>> = {
+    ...(wallet ? { wallet: m.home.connected(`${address.slice(0, 6)}…${address.slice(-4)}`) } : {}),
+    ...(wallet && ksa > 0n ? { faucet: m.home.balance(formatUnits(ksa, 8, 2)) } : {}),
+  };
+  return <>
+    <ol className="steps">
+      {steps.map((s, i) => <li key={s} className={done[s] ? 'is-done' : ''}>
+        <span className="step-n" aria-hidden="true">{done[s] ? '✓' : i + 1}</span>
+        <div>
+          <h3>{m.home.steps[s].title}</h3>
+          <p>{m.home.steps[s].body}</p>
+          {done[s] && <p className="step-state">{done[s]}</p>}
+          {s === 'wallet' && !wallet && <Button size="sm" disabled={!conn} onClick={() => setConnecting(true)}>{m.wallet.connect}</Button>}
+        </div>
+      </li>)}
+    </ol>
+    <ConnectDialog open={connecting} onClose={() => setConnecting(false)} />
+  </>;
 }
 
 function instanceAbi(def: ExampleDef, instance: Instance | null): { abi: Abi | null; custom: boolean } {
@@ -249,7 +281,8 @@ function NoNode() {
 function NoContract({ onDeploy, onOpen }: { onDeploy: () => void; onOpen: () => void }) {
   const m = useT().core.instance;
   return <Section className="empty-state">
-    <p>{m.needDeploy}</p>
+    <p className="lead">{m.needDeploy}</p>
+    <Steps steps={['wallet', 'faucet', 'deploy']} />
     <div className="method-actions">
       <Button variant="primary" onClick={onDeploy}>{m.deployNew}</Button>
       <Button onClick={onOpen}>{m.open}</Button>

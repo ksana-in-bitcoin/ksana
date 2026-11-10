@@ -27,7 +27,7 @@ import { FundsEditor, ValueEditor, fundsOf, type FundsDraft } from './values';
 
 type Choice = 'example' | 'build';
 
-function initialDrafts(def: ExampleDef, abi: Abi | null, me: Uint8Array | null, network: BtcNetwork | null, asked: Record<string, Value> | null): Draft[] {
+export function initialDrafts(def: ExampleDef, abi: Abi | null, me: Uint8Array | null, network: BtcNetwork | null, asked: Record<string, Value> | null): Draft[] {
   const params = abi?.init?.params ?? [];
   const presets = { ...def.presets?.({ me, network }), ...asked };
   return params.map((p) => (p.name in presets ? draftOf(abi!, p.type, presets[p.name]!) : emptyDraft(abi!, p.type)));
