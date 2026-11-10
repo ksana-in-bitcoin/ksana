@@ -120,10 +120,10 @@ past has landed on Bitcoin (SPEC §8.5); `ksana-cli --chain signet account <acco
   blocks took nothing below 2 while a backlog at 1 sat/vB waited (D-107). Cap it at 5 like the seed nodes
   (`--max-settlement-feerate 5`): bitcoind's estimate can stay far above what signet's blocks take; from 2026-10-16 it
   stayed at 100.03 sat/vB, and before D-117 every pair paid the default cap of 100, about 37 000 sats (D-107). What it
-  costs: a settlement pair is about 320 to 380 vB plus a 240-sat anchor output, so about 1 000 sats at 2 sat/vB; even an
+  costs: a settlement pair is about 300 to 360 vB (D-140), so about 700 sats at 2 sat/vB; even an
   idle network sends one about every two signet blocks, paid by whichever producer made the block carrying it (D-109),
-  so a node producing a third of the blocks spends about 0.00025 sBTC a day at 2 sat/vB, up to 0.0005 with traffic: 0.02
-  sBTC lasts it about six weeks. Every settlement returns its change to the address, and several can be in flight, one
+  so a node producing a third of the blocks spends about 0.00017 sBTC a day at 2 sat/vB, up to 0.00035 with traffic: 0.02
+  sBTC lasts it about eight weeks. Every settlement returns its change to the address, and several can be in flight, one
   per output. Top up below 0.002 sBTC or three outputs (`bitcoin-cli -signet -rpcwallet=ksana-funding listunspent 0`
   with the wallet below): a node without funds keeps producing, but its blocks' data waits for another producer to carry
   it.
