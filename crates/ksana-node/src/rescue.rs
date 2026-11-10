@@ -360,18 +360,8 @@ impl Rescuer {
         let chain = &self.chain;
         let client = chain.btc().client();
         let mut state = self.state()?;
-        if let Some(sent) = state.sweep.take() {
-            let confirmed = client
-                .transaction(&sent.txid)
-                .map_err(btc)?
-                .is_some_and(|info| info.block.is_some());
-            if !confirmed {
-                if self.keep_alive(client.as_ref(), &sent)? {
-                    state.sweep = Some(sent);
-                }
-                return Ok(());
-            }
-            chain.release_inputs(&sent.inputs)?;
+        if !self.settled(client.as_ref(), &mut state.sweep)? {
+            return Ok(());
         }
         let utxos = self.available_utxos(btc_tip)?;
         let total = utxos
@@ -459,19 +449,8 @@ impl Rescuer {
         let chain = &self.chain;
         let client = chain.btc().client();
         let mut state = self.state()?;
-        if let Some(sent) = state.split.take() {
-            let confirmed = client
-                .transaction(&sent.txid)
-                .map_err(btc)?
-                .is_some_and(|info| info.block.is_some());
-            if !confirmed {
-                if self.keep_alive(client.as_ref(), &sent)? {
-                    state.split = Some(sent);
-                }
-                return Ok(());
-            }
-            // Confirmed: the input is spent, no longer reserved
-            chain.release_inputs(&sent.inputs)?;
+        if !self.settled(client.as_ref(), &mut state.split)? {
+            return Ok(());
         }
         let utxos = self.available_utxos(btc_tip)?;
         if utxos.len() >= target {
@@ -564,6 +543,26 @@ impl Rescuer {
         }
         utxos.sort_by_key(|u| std::cmp::Reverse(u.txout.value));
         Ok(utxos)
+    }
+
+    /// Whether nothing is left of the split or sweep transaction tracked in `slot`: none is tracked, or it has
+    /// confirmed (its inputs are spent, no longer reserved). False while it is unconfirmed and in the round that
+    /// abandons it. The record is dropped only with its reservation, so an RPC error leaves both for the next round.
+    fn settled(&self, client: &dyn BtcClient, slot: &mut Option<Sent>) -> Result<bool, NodeError> {
+        let Some(sent) = slot.as_ref() else {
+            return Ok(true);
+        };
+        let confirmed = client
+            .transaction(&sent.txid)
+            .map_err(btc)?
+            .is_some_and(|info| info.block.is_some());
+        if confirmed {
+            self.chain.release_inputs(&sent.inputs)?;
+        } else if self.keep_alive(client, sent)? {
+            return Ok(false);
+        }
+        *slot = None;
+        Ok(confirmed)
     }
 
     /// Keeps in-flight transactions alive: rebroadcasts them (in order) when not in the mempool, gives up when rejected
