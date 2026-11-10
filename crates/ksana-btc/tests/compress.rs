@@ -95,6 +95,42 @@ fn a_frame_decompressing_beyond_the_bound_is_rejected() {
     assert_eq!(unpack(&bomb, 4 * MAX).unwrap().len(), 4 * MAX);
 }
 
+/// The shared vectors `tests/vectors/compress.json` (the TS SDK checks the same file): the payload read from each
+/// envelope's data, or none.
+#[test]
+fn shared_vectors_match() {
+    let path = format!(
+        "{}/../../tests/vectors/compress.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    let vectors: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let cases = vectors["cases"].as_array().unwrap();
+    assert!(cases.len() >= 39);
+    for case in cases {
+        let data = hex::decode(case["data"].as_str().unwrap()).unwrap();
+        let max = usize::try_from(case["max"].as_u64().unwrap()).unwrap();
+        let payload = case["payload"].as_str().map(|p| hex::decode(p).unwrap());
+        assert_eq!(unpack(&data, max), payload, "{}", case["name"]);
+    }
+}
+
+/// The node's decoder bounds a raw or RLE block by the payload's bound alone, not by the frame's window or by 128 KiB.
+#[test]
+fn a_block_longer_than_128_kib_decodes() {
+    // a 1 MiB window, one RLE block of 131 073 bytes
+    let head = (131_073u32 << 3) | (1 << 1) | 1;
+    let frame = [
+        ZSTD_MAGIC.as_slice(),
+        &[0x00, 0x50],
+        &head.to_le_bytes()[..3],
+        &[2],
+    ]
+    .concat();
+    assert_eq!(unpack(&frame, 400_000).unwrap(), vec![2u8; 131_073]);
+    assert_eq!(unpack(&frame, 131_072), None);
+}
+
 #[test]
 fn the_tracker_reads_the_decompressed_payload_of_an_envelope() {
     let raw = compressible(4_000);

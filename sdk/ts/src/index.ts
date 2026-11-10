@@ -43,6 +43,7 @@ export * from './btc/ecdsa.js';
 export * from './btc/signer.js';
 export * from './pathC.js';
 export * from './envelope.js';
+export * from './compress.js';
 export * from './topUp.js';
 export * from './standards.js';
 export * from './rpc.js';
