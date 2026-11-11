@@ -1041,18 +1041,35 @@ impl Rescuer {
     }
 
     /// Whether the transaction has confirmed in a BTC block the snapshot has read (`Some(true)`) or in one it has not,
-    /// bitcoind being ahead of it (`Some(false)`); `None` when it has not confirmed on the best chain.
+    /// bitcoind being ahead of it (`Some(false)`); `None` when it has not confirmed on the best chain. A transaction
+    /// bitcoind does not know while its txindex is behind its tip may be in a block the index has not reached, which
+    /// the snapshot has not read either: `Some(false)`.
     fn read_on_btc(
         &self,
         snapshot: &BtcSnapshot,
         txid: &[u8; 32],
     ) -> Result<Option<bool>, NodeError> {
         let client = self.chain.btc().client();
-        let Some(block) = client
-            .transaction(txid)
-            .map_err(btc)?
-            .and_then(|info| info.block)
-        else {
+        let info = match client.transaction(txid).map_err(btc)? {
+            Some(info) => info,
+            None => {
+                // txindex follows the tip after a block connects: "unknown" says nothing before it has caught up
+                let tip = client.tip().map_err(btc)?.0;
+                if client
+                    .txindex_height()
+                    .map_err(btc)?
+                    .is_some_and(|indexed| indexed < tip)
+                {
+                    return Ok(Some(false));
+                }
+                // It had caught up with that tip: asked again, the answer covers every block up to it
+                match client.transaction(txid).map_err(btc)? {
+                    Some(info) => info,
+                    None => return Ok(None),
+                }
+            }
+        };
+        let Some(block) = info.block else {
             return Ok(None);
         };
         Ok(client

@@ -319,6 +319,8 @@ struct Chain {
     min_feerate: u64,
     /// [`MockBtc::set_mempool_info`]: what bitcoind tells of its mempool.
     mempool_info: Option<MempoolInfo>,
+    /// [`MockBtc::set_txindex_lag`]: how many blocks the txindex is behind the tip.
+    txindex_lag: u32,
 }
 
 impl Chain {
@@ -348,6 +350,7 @@ impl Chain {
             held: BTreeSet::new(),
             fee_estimates: BTreeMap::new(),
             min_feerate: 0,
+            txindex_lag: 0,
             mempool_info: None,
         }
     }
@@ -933,6 +936,12 @@ impl MockBtc {
         self.lock().mempool = Mempool::default();
     }
 
+    /// Sets how many blocks the txindex is behind the tip (bitcoind updates it after a block connects): the transactions
+    /// of the blocks it has not reached are unknown to [`BtcClient::transaction`]. 0, the default, keeps it in sync.
+    pub fn set_txindex_lag(&self, blocks: u32) {
+        self.lock().txindex_lag = blocks;
+    }
+
     /// Simulates bitcoind being unavailable: when true, all [`BtcClient`] methods return [`BtcError::Rpc`].
     pub fn set_offline(&self, offline: bool) {
         self.lock().offline = offline;
@@ -967,7 +976,13 @@ impl BtcClient for MockBtc {
     }
 
     fn transaction(&self, txid: &[u8; 32]) -> Result<Option<TxInfo>, BtcError> {
-        Ok(self.online()?.transaction(txid))
+        let chain = self.online()?;
+        let indexed = chain.height().saturating_sub(chain.txindex_lag);
+        Ok(chain.transaction(txid).filter(|info| {
+            info.block
+                .and_then(|hash| chain.blocks.get(&hash))
+                .is_none_or(|stored| stored.height <= indexed)
+        }))
     }
 
     fn utxo(
@@ -1046,9 +1061,10 @@ impl BtcClient for MockBtc {
         Ok(self.online()?.mempool.order.clone())
     }
 
-    /// The mock chain's txindex is always in sync with the tip.
+    /// The mock chain's txindex is in sync with the tip, unless [`MockBtc::set_txindex_lag`] holds it back.
     fn txindex_height(&self) -> Result<Option<u32>, BtcError> {
-        Ok(Some(self.online()?.height()))
+        let chain = self.online()?;
+        Ok(Some(chain.height().saturating_sub(chain.txindex_lag)))
     }
 
     /// The estimate set for the highest target at or below `target` ([`MockBtc::set_fee_estimate`]).

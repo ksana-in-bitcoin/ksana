@@ -5193,7 +5193,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      node sends those headers itself. A node about to start a chain with a block it did not produce first waits `REPUBLISH_YIELD` (10 s) times one to six, drawn from the block's hash and the
      node's funding script, and then sends what the republishes that arrived meanwhile leave; the producer of the first block, and a node racing a competing chain (D-091), do not wait. A
      republish that left the mempool holds the node's back only while it is in a BTC block the node has not read yet (bitcoind's tip is ahead of the one the node has read): once the node
-     has read that block, what the republish landed shows there, and one that left without confirming lands nothing. A republish of the node's own that confirmed, in a block the node has
+     has read that block, what the republish landed shows there, and one that left without confirming lands nothing. While bitcoind's txindex is behind its tip, a transaction it does not
+     know is taken to be in a block the index has not reached. A republish of the node's own that confirmed, in a block the node has
      read, without landing its headers is no longer treated as in flight: the headers go out again (it lands nothing when a header it needed, carried by another sender's republish, had
      not counted).
 - **Rationale**: none of the three needs a consensus change, and D-135's "no trace" is what keeps anyone paying BTC fees from making nodes hold data, so settlements that did not count are

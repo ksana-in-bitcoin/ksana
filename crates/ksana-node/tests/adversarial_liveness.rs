@@ -739,6 +739,18 @@ fn a_republish_in_the_mempool_is_not_sent_again_by_another_node() {
         .collect();
     assert!(again.is_empty(), "sent again: {again:?}");
 
+    // Nor while bitcoind's txindex has not reached that block and does not know the transactions that left the mempool
+    mock.set_txindex_lag(1);
+    second.run_once().unwrap();
+    first.run_once().unwrap();
+    let again: Vec<u64> = republished_heights(&mock, &params)
+        .into_iter()
+        .flatten()
+        .filter(|height| *height <= total as u64)
+        .collect();
+    assert!(again.is_empty(), "sent again behind the txindex: {again:?}");
+    mock.set_txindex_lag(0);
+
     // In one BTC block, whatever the order (D-135): everything sent landed
     a.sync();
     let snapshot = a.chain.btc().snapshot().unwrap();
