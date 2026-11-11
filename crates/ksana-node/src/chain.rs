@@ -339,6 +339,9 @@ pub struct BlockInfo {
 
 type Dag = BlockDag<BlockInfo>;
 
+/// A funding output the settlement transactions spend: txid and output index.
+type FundingInput = ([u8; 32], u32);
+
 /// What [`Chain::payload_carry`] reads from the settlement transactions a block carries (D-143): the reveal's txid and
 /// the hashes of the headers in the payload.
 struct CarrierPayload {
@@ -855,7 +858,7 @@ pub struct Chain {
     /// Funding inputs of the blocks whose settlement record was dropped because the main chain no longer accepts them,
     /// while a later main-chain block may still merge them (D-143): reserved until the block is accepted again, which
     /// gives it a record, or is beyond the merge depth of the main-chain tip.
-    detached: Mutex<BTreeMap<Hash, Vec<([u8; 32], u32)>>>,
+    detached: Mutex<BTreeMap<Hash, Vec<FundingInput>>>,
     /// The settlement payloads [`Chain::payload_carry`] last examined (D-143), `None` for a block without a readable
     /// one: decoded once per block, kept while the search still reaches the block.
     carrier_payloads: Mutex<BTreeMap<Hash, Option<Arc<CarrierPayload>>>>,
