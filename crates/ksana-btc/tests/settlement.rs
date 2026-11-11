@@ -17,7 +17,7 @@ use common::*;
 use ksana_btc::data::{data_script, tx_data, tx_payload, Carrier, TxData};
 use ksana_btc::envelope::{commitment, envelope_script, parse_envelope};
 use ksana_btc::settlement::{
-    cpfp_child, decode_tx, draft, finalize, sweep_revenue, validate_attached, Checked,
+    cpfp_child, decode_tx, draft, finalize, redraft, sweep_revenue, validate_attached, Checked,
     PrevoutSource, SettlementError, SettlementPair, COMMITMENT_OUTPUT, MAX_SETTLEMENT_TX_BYTES,
     PRODUCER_SEQUENCE,
 };
@@ -295,6 +295,58 @@ fn finalize_requires_equal_payload_length_and_the_producer_key() {
     .unwrap();
     let pair = finalize(&DEVNET, d, &payload, &key).unwrap();
     validate_attached(&DEVNET, &pair, &payload, &source).unwrap();
+}
+
+/// A final payload that compresses to more than the draft reserved cannot be written into it (D-141); drafted again
+/// over the same inputs it can, and the pair pays the fee rate for its new size (D-144).
+#[test]
+fn a_final_payload_that_does_not_fit_the_draft_is_drafted_again_over_the_same_inputs() {
+    let key = producer_key();
+    let xonly = key.x_only_public_key().0;
+    let producer = producer_utxos(&key, &[40_000]);
+    let first: Vec<u8> = (0..3_000usize).map(|i| (i % 7) as u8).collect();
+    // The same length, 200 bytes of it noise
+    let mut last = first.clone();
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for byte in last.iter_mut().skip(1_000).take(200) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state.to_le_bytes()[0];
+    }
+    let old = draft(&DEVNET, &producer, producer_script(&key), &xonly, &first, 1).unwrap();
+    assert!(old.data_len < first.len());
+    assert!(invalid_with(
+        finalize(&DEVNET, old.clone(), &last, &key),
+        "does not fit"
+    ));
+
+    let again = redraft(&DEVNET, &old, &xonly, &last, 1).unwrap();
+    assert!(again.data_len > old.data_len);
+    let pair = finalize(&DEVNET, again, &last, &key).unwrap();
+    assert_eq!(
+        pair.commit
+            .input
+            .iter()
+            .map(|txin| txin.previous_output)
+            .collect::<Vec<_>>(),
+        producer
+            .iter()
+            .map(|utxo| utxo.outpoint)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        tx_data(&DEVNET.magic, &pair.reveal),
+        TxData::One {
+            carrier: Carrier::Input(0),
+            payload: last.clone(),
+        }
+    );
+    let change = &pair.reveal.output[0];
+    assert_eq!(change.script_pubkey, producer_script(&key));
+    let fee = 40_000 - change.value.to_sat();
+    let vsize = pair.commit.weight().to_vbytes_ceil() + pair.reveal.weight().to_vbytes_ceil();
+    assert!(fee >= vsize, "fee {fee} for {vsize} vB");
 }
 
 #[test]

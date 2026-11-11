@@ -17,6 +17,9 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-11, a final payload that does not fit its draft is drafted again (M57, D-144)**: no consensus change. A producer's settlement is drafted before the PoW and the final payload
+  written into the length the draft reserved (D-141); when its compressed form does not fit, the producer now drafts the pair again over the same funding inputs instead of failing the
+  block it solved (§7.2).
 - **2026-11-11, a failed settlement does not take the next ones with it, and nodes do not republish the same headers (M56, D-143)**: no consensus change, from the second load test of
   the public signet. A block that left the main chain keeps its settlement's funding inputs reserved while it can still be merged, so the block that merges it does not spend them again
   (§7.3). A producer does not wait for a settlement it knows will land nothing (refused by bitcoind, confirmed without counting, or relying on such a one) and carries that block's header
@@ -916,6 +919,8 @@ Validation rules (the settlement transactions a block carries, D-034, D-081):
 - The serialized length and the weight of both transactions do not exceed 400 000 (BTC's standard transaction limit); when decoding, the length is checked first and complete consumption is required.
 - Every input of both transactions has `nSequence = 0xFFFFFFFD` (D-100): with another value BIP68 could put a relative time lock on an input, and the block's settlement could not land on BTC until it expired.
 - The envelope's data must decompress (§7.1, D-141) to exactly the payload generated from the block's contents, and the leaf must be the canonical construction of that data (compared byte for byte); the control block and the commitment output are both recomputed from the public key in the leaf and the leaf, and compared byte for byte.
+  A producer drafts the pair before the PoW, with the envelope's data at the length the payload then compresses to plus 32 bytes, and writes the final payload into that length; when the
+  final payload does not fit it, the producer drafts the pair again for the final payload over the same funding inputs (local policy, D-144).
 - Payload (§7.1): the last header is this block and `entries` is all of this block's entries; the header each item in `bodies` points at must be a block in this block's past, and its `entries` must equal
   all entries of that block; the remaining headers may be any headers (self-certified by PoW); every header anchors at or below this block's anchor height (D-100): the reveal transaction commits to this block's anchor
   and so confirms above it, and the payload then always counts (§7.1).

@@ -29,7 +29,8 @@ use bitcoin::ScriptBuf;
 use ksana_btc::client::{BtcClient, ScannedUtxo};
 use ksana_btc::payload::PayloadError;
 use ksana_btc::settlement::{
-    draft, finalize, producer_script, validate_attached, Draft, ProducerUtxo, SettlementError,
+    draft, finalize, producer_script, redraft, validate_attached, Draft, ProducerUtxo,
+    SettlementError,
 };
 use ksana_btc::tracker::BtcSnapshot;
 use ksana_consensus::{median_time_past, Consensus};
@@ -756,18 +757,16 @@ impl Producer {
         // same length as the final one). Its funding inputs stay reserved until this attempt ends: after the commit the
         // block's settlement record takes them over; they are released when the attempt is abandoned
         let mut reserved = None;
+        let mut drafted_at = 0u64;
         let draft = if carries {
             let funded = match &self.funding {
                 Some(funding) => {
                     match own_payload(params, &mut payload_headers, &mut payload_bodies, &entries)?
                     {
-                        Some(payload) => match fund(
-                            params,
-                            &funding_utxos,
-                            funding,
-                            &payload,
-                            current_feerate(chain, funding, &snapshot)?,
-                        )? {
+                        Some(payload) => match fund(params, &funding_utxos, funding, &payload, {
+                            drafted_at = current_feerate(chain, funding, &snapshot)?;
+                            drafted_at
+                        })? {
                             Ok(draft) => Some(draft),
                             Err(Unfunded::Insufficient) => None,
                             Err(Unfunded::Failed(reason)) => {
@@ -840,9 +839,31 @@ impl Producer {
                 }
                 let payload =
                     settlement::payload(params, payload_headers, &entries, payload_bodies)?;
-                let pair = finalize(params, draft, &payload, &funding.keypair).map_err(|e| {
+                let signing = |e: SettlementError| {
                     NodeError::Internal(format!("settlement transaction signing failed: {e}"))
-                })?;
+                };
+                let pair = match finalize(params, draft.clone(), &payload, &funding.keypair) {
+                    Ok(pair) => pair,
+                    // The final payload does not fit what the draft reserved (D-144): the block is solved, so the pair
+                    // is drafted again for the final payload over the same inputs, which stay reserved
+                    Err(SettlementError::Invalid(why)) => {
+                        eprintln!(
+                            "[ksana-node] the final settlement payload does not fit its draft ({why}; payload {} bytes, {} reserved): drafting the settlement transactions again over the same inputs",
+                            payload.len(),
+                            draft.data_len
+                        );
+                        let again = redraft(
+                            params,
+                            &draft,
+                            &funding.keypair.x_only_public_key().0,
+                            &payload,
+                            drafted_at.max(params.min_settlement_feerate_sat_vb),
+                        )
+                        .map_err(signing)?;
+                        finalize(params, again, &payload, &funding.keypair).map_err(signing)?
+                    }
+                    Err(e) => return Err(signing(e)),
+                };
                 // Self-check: the same checks other nodes make on receipt (D-034, D-037, D-081)
                 validate_attached(params, &pair, &payload, &AnchoredPrevouts(&btc_view)).map_err(
                     |e| {
