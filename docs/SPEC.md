@@ -966,7 +966,7 @@ Local policy (D-045, D-057, D-077, D-081):
 - **Reserving funding inputs**: transactions of this node that are in flight at the same time (the settlement transactions blocks carry, rescues, republishes, split transactions of funding UTXOs) may not spend the same funding output; after choosing the funding and
   before broadcasting, "check and reserve" atomically, and release when rejected or abandoned. A pair whose record is dropped or closed (its block left the main chain, or its data landed through another
   transaction) keeps its inputs reserved while any of its transactions is in the BTC mempool, where a BTC reorg can also put it back (D-104). A block that left the main chain keeps the
-  inputs of its settlement reserved, broadcast or not, while a main-chain block can still merge it (its blue score within `MERGE_DEPTH` of the tip's): the block that merges it carries
+  inputs of its settlement reserved, broadcast or not, while a main-chain block can still merge it (its blue score within `MERGE_DEPTH` of the tip's) and until its settlement confirms: the block that merges it carries
   its own settlement and must not spend them again (D-143).
 
 ### 7.4 Forced inclusion of native transactions

@@ -783,6 +783,16 @@ struct Inner {
     tip: Tip,
 }
 
+/// Funding inputs kept reserved for a block that left the main chain while a later main-chain block may merge it
+/// (D-143).
+#[derive(Clone, Debug)]
+struct Detached {
+    /// The block's settlement (reveal) transaction: once it confirmed, the inputs are spent.
+    txid: [u8; 32],
+    /// The funding inputs its settlement transactions spend.
+    inputs: Vec<FundingInput>,
+}
+
 /// The BTC tip (height and block hash) a snapshot ends at; `None` before any BTC block is scanned.
 type BtcTip = Option<(u32, [u8; 32])>;
 
@@ -857,8 +867,8 @@ pub struct Chain {
     lingering: Mutex<Vec<Lingering>>,
     /// Funding inputs of the blocks whose settlement record was dropped because the main chain no longer accepts them,
     /// while a later main-chain block may still merge them (D-143): reserved until the block is accepted again, which
-    /// gives it a record, or is beyond the merge depth of the main-chain tip.
-    detached: Mutex<BTreeMap<Hash, Vec<FundingInput>>>,
+    /// gives it a record, is beyond the merge depth of the main-chain tip, or its settlement transactions confirmed.
+    detached: Mutex<BTreeMap<Hash, Detached>>,
     /// The settlement payloads [`Chain::payload_carry`] last examined (D-143), `None` for a block without a readable
     /// one: decoded once per block, kept while the search still reaches the block.
     carrier_payloads: Mutex<BTreeMap<Hash, Option<Arc<CarrierPayload>>>>,
@@ -2694,7 +2704,7 @@ impl Chain {
                 .lock()
                 .map_err(poisoned)?
                 .values()
-                .flat_map(|inputs| inputs.iter().copied()),
+                .flat_map(|d| d.inputs.iter().copied()),
         );
         Ok(reserved)
     }
@@ -2715,7 +2725,7 @@ impl Chain {
             reserved.contains(input)
                 || open.values().any(|r| r.funding_inputs.contains(input))
                 || lingering.iter().any(|l| l.inputs.contains(input))
-                || detached.values().any(|d| d.contains(input))
+                || detached.values().any(|d| d.inputs.contains(input))
         });
         if !taken {
             reserved.extend(inputs.iter().copied());
@@ -2787,15 +2797,14 @@ impl Chain {
 
     /// Releases the funding inputs of the blocks that left the main chain (`detached`, D-143) once no main-chain block
     /// can merge them any more: pruned from the DAG, or beyond the merge depth of the main-chain tip (a merged block
-    /// needs `blue_score + MERGE_DEPTH ≥ blue_score(SP)`). A block accepted again has a settlement record instead.
-    fn release_detached(&self) -> Result<(), NodeError> {
-        let hashes: Vec<Hash> = self
-            .detached
-            .lock()
-            .map_err(poisoned)?
-            .keys()
-            .copied()
-            .collect();
+    /// needs `blue_score + MERGE_DEPTH ≥ blue_score(SP)`); and of those whose settlement transactions confirmed on
+    /// BTC, which spent them. A block accepted again has a settlement record instead.
+    fn release_detached(&self, snapshot: &BtcSnapshot) -> Result<(), NodeError> {
+        let hashes: Vec<Hash> = {
+            let mut detached = self.detached.lock().map_err(poisoned)?;
+            detached.retain(|_, d| snapshot.ksn1_height(&d.txid).is_none());
+            detached.keys().copied().collect()
+        };
         if hashes.is_empty() {
             return Ok(());
         }
@@ -2826,8 +2835,8 @@ impl Chain {
     /// blocks that left the main chain and can no longer be merged (D-143).
     pub fn process_settlements(&self) -> Result<(), NodeError> {
         self.release_lingering()?;
-        self.release_detached()?;
         let snapshot = self.btc.snapshot()?;
+        self.release_detached(&snapshot)?;
         let btc_tip = snapshot.tip().map(|(h, _)| h).unwrap_or(0);
         let tip_height = self.tip()?.header.height;
         let client = self.btc.client();
@@ -2840,10 +2849,13 @@ impl Chain {
                 if open.remove(&block_hash).is_some()
                     && self.accepted_height(&block_hash)?.is_none()
                 {
-                    self.detached
-                        .lock()
-                        .map_err(poisoned)?
-                        .insert(block_hash, record.funding_inputs.clone());
+                    self.detached.lock().map_err(poisoned)?.insert(
+                        block_hash,
+                        Detached {
+                            txid: record.txid,
+                            inputs: record.funding_inputs.clone(),
+                        },
+                    );
                 }
                 continue;
             }
@@ -5101,10 +5113,13 @@ impl Chain {
             let Some(record) = open.remove(&block.header.hash()) else {
                 continue;
             };
-            self.detached
-                .lock()
-                .map_err(poisoned)?
-                .insert(block.header.hash(), record.funding_inputs.clone());
+            self.detached.lock().map_err(poisoned)?.insert(
+                block.header.hash(),
+                Detached {
+                    txid: record.txid,
+                    inputs: record.funding_inputs.clone(),
+                },
+            );
             if !record.broadcast {
                 continue;
             }

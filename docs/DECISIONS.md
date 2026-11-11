@@ -5181,7 +5181,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      fraction of a second, and since D-139 each sent four in a row: 37 ranges during the run and 63 during the recovery, every one of them twice.
 - **Decision**: three changes to local policy.
   1. A block that leaves the main chain keeps the funding inputs of its settlement reserved (`Chain::detached`) for as long as it can still be merged (its blue score within `MERGE_DEPTH` of
-     the tip's); when a main-chain block accepts it again the open record holds them once more. The producer, the rescue, republishing, splits and sweeps all pass over them
+     the tip's) and its settlement transactions have not confirmed, which spends them; when a main-chain block accepts it again the open record holds them once more. The producer, the rescue, republishing, splits and sweeps all pass over them
      (`reserved_inputs`, `try_reserve_inputs`).
   2. `Chain::payload_carry` no longer waits for a settlement it knows will land nothing (`lands_nothing`): one bitcoind refused, one whose reveal has confirmed while its block's header has
      not counted, and one whose payload relies on the header of such a block (followed through the payloads the blocks carry, at most `PAYLOAD_HEADER_SEARCH` blocks). The payload carries
@@ -5202,9 +5202,10 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
 - **Costs and limitations**: the reservation of a detached block's inputs is in memory, like the others, and is lost by a restart. The search for settlements that land nothing reads up to
   `PAYLOAD_HEADER_SEARCH` blocks' settlement transactions per template (cached per block); when the headers to carry exceed the payload's header budget the earliest are still left to
   republishing. A republish sent after another sender's relies on that one confirming no later than it does: within one BTC block the order does not matter (D-135), but should the other
-  confirm in a later block, this one lands nothing and its headers go out again. Anyone can put a paying republish into the mempool: it delays a node's own by at most two BTC blocks when it
+  confirm in a later block, or not at all, this one lands nothing, its fee is spent and its headers go out again. Anyone can put a paying republish into the mempool: it delays a node's own by at most two BTC blocks when it
   does not confirm, and has landed the data at its sender's cost when it does. The wait by turns uses the node's monotonic clock and delays the first republish of a chain by 10 to 60
-  seconds for a node that did not produce the run's first block.
+  seconds for a node that did not produce the run's first block. There are six turns: two nodes that neither produced that block draw the same one for one run in six, and then both send
+  it, as before.
 - **Impact**: `crates/ksana-node` (`chain.rs`: `detached`, `release_detached`, `drop_records`, `lands_nothing`, `carrier_payload`, `payload_carry`; `rescue.rs`: `REPUBLISH_PATIENCE`,
   `REPUBLISH_YIELD`, `scan_mempool`, `republished_by_others`, `republish_pays`, `yield_slot`, `Rescuer::with_republish_yield`, `republish`); tests (`m7_dag.rs`, `m51_counting.rs`,
   `adversarial_liveness.rs`); SPEC (the version history, §7.3, §7.5, §7.6, §13); ARCHITECTURE.
