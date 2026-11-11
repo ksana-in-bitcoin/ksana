@@ -5166,3 +5166,45 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
 - **Impact**: `crates/ksana-btc` (`settlement.rs`: `sweep_revenue`); `crates/ksana-node` (`producer.rs`: `fund`, `Funding::change_script` removed; `rescue.rs`: `REVENUE_SWEEP_MIN_SAT`,
   `maintain_revenue`, `settled`; `main.rs`: the help of `--revenue-address`); tests (`m6_2_mock.rs`, `m6_2_regtest.rs`, `m10_funding_pool.rs`, `m12_batch.rs`, `ksana-btc`'s
   `settlement.rs`); SPEC (the version history, §7.7).
+
+## D-143 A failed settlement does not take the next ones with it, and nodes do not republish the same headers (second load test of the public signet, 2026-11-11; revises D-047, D-104, D-135's local policy, D-139 and SPEC §7.3, §7.5, §7.6; local policy, no consensus change, M56)
+
+- **Problem**: the second two-hour load test of the public signet (v0.2.0, 15 nodes in 8 regions) ended in the pause of D-046 again, 119 minutes in, and the signet took 5 hours 16 minutes
+  (29 BTC blocks) to leave it. Three things in the nodes' local policy were behind it.
+  1. *Two pairs of one node spent the same funding output.* A block of the node left the main chain in a switch; `Chain::drop_records` removed its open settlement record, and with the pair
+     not yet in the BTC mempool nothing kept its funding inputs reserved (D-104 keeps them only while a transaction is there). The node's next block merged that block again and chose the
+     same output for its own settlement: bitcoind refused the second pair as a replacement paying too little (heights 384 and 1857 of the signet, both seconds after a main-chain switch).
+  2. *One settlement that landed nothing took every later one with it.* A producer leaves out the header of a carrier whose settlement is in flight, by the age of its anchor alone (D-135).
+     After the refused pair, the next block's settlement confirmed before the rescue of the refused one: it counted nothing (D-135), and the block after it relied on it in turn, as did
+     every block after that. Of the 42 rescues of the run, 40 sent again a settlement that had confirmed without landing anything.
+  3. *The two funded nodes republished the same headers.* D-047 lets every node send its own republish; both found the same run due when the same BTC block arrived and sent it within a
+     fraction of a second, and since D-139 each sent four in a row: 37 ranges during the run and 63 during the recovery, every one of them twice.
+- **Decision**: three changes to local policy.
+  1. A block that leaves the main chain keeps the funding inputs of its settlement reserved (`Chain::detached`) for as long as it can still be merged (its blue score within `MERGE_DEPTH` of
+     the tip's); when a main-chain block accepts it again the open record holds them once more. The producer, the rescue, republishing, splits and sweeps all pass over them
+     (`reserved_inputs`, `try_reserve_inputs`).
+  2. `Chain::payload_carry` no longer waits for a settlement it knows will land nothing (`lands_nothing`): one bitcoind refused, one whose reveal has confirmed while its block's header has
+     not counted, and one whose payload relies on the header of such a block (followed through the payloads the blocks carry, at most `PAYLOAD_HEADER_SEARCH` blocks). The payload carries
+     that block's header, and the headers behind it, as it does for a settlement no longer in flight. The rules for counting are untouched: an appearance that did not count still leaves no
+     trace, and the settlement that landed nothing is still sent again by the rescue.
+  3. Before it republishes, a node reads the republishes in the BTC mempool (`Rescuer::republished_by_others`) and does not carry again the headers, and the bodies, another sender's carries.
+     Such a republish holds the node's own back when it pays the node's fee rate, spends confirmed outputs or the change of another one that does (a chain, D-139), and every header it needs
+     from outside its payload has counted or is carried by a republish that holds as well; and only for `REPUBLISH_PATIENCE` (2) BTC blocks from when the node first saw it, after which the
+     node sends those headers itself. A node about to start a chain with a block it did not produce first waits `REPUBLISH_YIELD` (10 s) times one to six, drawn from the block's hash and the
+     node's funding script, and then sends what the republishes that arrived meanwhile leave; the producer of the first block, and a node racing a competing chain (D-091), do not wait. A
+     republish that left the mempool while bitcoind's tip is ahead of the one the node has read is kept until the node has caught up: it has most likely confirmed in the block not yet
+     read. A republish of the node's own that confirmed without landing its headers is no longer treated as in flight: the headers go out again.
+- **Rationale**: none of the three needs a consensus change, and D-135's "no trace" is what keeps anyone paying BTC fees from making nodes hold data, so settlements that did not count are
+  not revived; the producer simply stops building on them. One failure now costs the payloads already sent, not every one after it. For republishing, the mempool is the only thing the nodes
+  share without a new message: reading it removes the duplicates when one node is ahead, and the wait by turns removes them when several start at the same moment. A node's turn changes from
+  run to run, so no node is always last. Availability stays that of D-047: a node that is alone, or whose peer's transactions do not confirm, sends everything itself after two BTC blocks at
+  the latest.
+- **Costs and limitations**: the reservation of a detached block's inputs is in memory, like the others, and is lost by a restart. The search for settlements that land nothing reads up to
+  `PAYLOAD_HEADER_SEARCH` blocks' settlement transactions per template (cached per block); when the headers to carry exceed the payload's header budget the earliest are still left to
+  republishing. A republish sent after another sender's relies on that one confirming no later than it does: within one BTC block the order does not matter (D-135), but should the other
+  confirm in a later block, this one lands nothing and its headers go out again. Anyone can put a paying republish into the mempool: it delays a node's own by at most two BTC blocks when it
+  does not confirm, and has landed the data at its sender's cost when it does. The wait by turns uses the node's monotonic clock and delays the first republish of a chain by 10 to 60
+  seconds for a node that did not produce the run's first block.
+- **Impact**: `crates/ksana-node` (`chain.rs`: `detached`, `release_detached`, `drop_records`, `lands_nothing`, `carrier_payload`, `payload_carry`; `rescue.rs`: `REPUBLISH_PATIENCE`,
+  `REPUBLISH_YIELD`, `scan_mempool`, `republished_by_others`, `republish_pays`, `yield_slot`, `Rescuer::with_republish_yield`, `republish`); tests (`m7_dag.rs`, `m51_counting.rs`,
+  `adversarial_liveness.rs`); SPEC (the version history, §7.3, §7.5, §7.6, §13); ARCHITECTURE.

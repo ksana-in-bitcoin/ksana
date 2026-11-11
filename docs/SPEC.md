@@ -17,6 +17,11 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-11, a failed settlement does not take the next ones with it, and nodes do not republish the same headers (M56, D-143)**: no consensus change, from the second load test of
+  the public signet. A block that left the main chain keeps its settlement's funding inputs reserved while it can still be merged, so the block that merges it does not spend them again
+  (§7.3). A producer does not wait for a settlement it knows will land nothing (refused by bitcoind, confirmed without counting, or relying on such a one) and carries that block's header
+  itself (§7.5). A node does not republish the headers another sender's republish in the BTC mempool carries, for two BTC blocks, and waits its turn before starting a run it did not
+  produce (§7.6).
 - **2026-11-10, the revenue moves in a sweep transaction (M55, D-142)**: local policy. The change of every settlement, rescue and republish returns to the funding address, so the producer
   can bump any pair through it (D-140); what the funding wallet holds above the hot-wallet cap goes to the revenue address in a transaction of its own (§7.7).
 - **2026-11-08, the reveal returns the change, and envelope data may be zstd-compressed (M55, D-140, D-141)**: consensus change, devnet / signet restart from genesis. The commit
@@ -960,7 +965,9 @@ Local policy (D-045, D-057, D-077, D-081):
   (§7.7, D-140); a CPFP child is not counted in the pair's fee rate, so another node may still rescue a bumped settlement in its turn.
 - **Reserving funding inputs**: transactions of this node that are in flight at the same time (the settlement transactions blocks carry, rescues, republishes, split transactions of funding UTXOs) may not spend the same funding output; after choosing the funding and
   before broadcasting, "check and reserve" atomically, and release when rejected or abandoned. A pair whose record is dropped or closed (its block left the main chain, or its data landed through another
-  transaction) keeps its inputs reserved while any of its transactions is in the BTC mempool, where a BTC reorg can also put it back (D-104).
+  transaction) keeps its inputs reserved while any of its transactions is in the BTC mempool, where a BTC reorg can also put it back (D-104). A block that left the main chain keeps the
+  inputs of its settlement reserved, broadcast or not, while a main-chain block can still merge it (its blue score within `MERGE_DEPTH` of the tip's): the block that merges it carries
+  its own settlement and must not spend them again (D-143).
 
 ### 7.4 Forced inclusion of native transactions
 
@@ -1001,7 +1008,9 @@ The producer's strategy (local, D-063, D-075, D-077):
   yet, at most `MAX_SETTLEMENT_HEADERS − 1`, sorted by blue work ascending; the compact encoding takes at most half of the payload limit, dropping the earliest when it exceeds that (republishing
   carries them, §7.6). A block that carries settlement transactions is skipped together with its past while its settlement is in flight (below) or once its header has counted. When its settlement
   is no longer in flight and its header has not counted, its header is collected, not its body, and the search goes on into its past for headers only: a header counts only once its parents have
-  (§6.5 item 1), so leaving it out would make this block's own header wait for that settlement.
+  (§6.5 item 1), so leaving it out would make this block's own header wait for that settlement. A settlement the node knows will land nothing is treated as no longer in flight, however
+  recent its anchor (D-143): one bitcoind refused, one whose reveal has confirmed while its block's header has not counted, and one whose payload relies on the header of such a block;
+  otherwise every later settlement would rely on it and land nothing in turn. This is the producer's choice of what to carry: what counts on BTC is unchanged (§6.5 item 1).
 - Bodies carried: among them, the bodies (together with the headers) of blocks that carry no settlement transaction, need a body, whose data has not landed on-chain yet and that are reached
   without passing a block that carries settlement transactions; they share the remaining space with this block's entries, with bodies taking at most
   a quarter of the payload limit, dropping the earliest bodies when they do not fit while keeping their headers, since a header left out would keep every later header in the payload from
@@ -1036,7 +1045,12 @@ Such a run starts at the first block whose data has not landed and skips the blo
 rescue); of the others it holds the header, and the body of one without settlement transactions that needs a body (D-138). The blocks skipped have counted, so every parent of a header in it has counted
 or is in the same payload, and its headers count as soon as it confirms (D-135). A block with settlement transactions parallel to f (which may come
 after it in acceptance order) will not carry it and is not counted. The same run of headers (distinguished by the starting hash) is not sent again until the transaction is confirmed or evicted; several nodes may each send one, and duplicates are
-ignored by the indexer. While a node's republishes wait in the mempool, it sends the next run (the blocks above not carried by them) chained on them: the commit transaction spends the change of the last one's
+ignored by the indexer. A node does not carry again the headers, or the bodies, that another sender's republish in the BTC mempool carries (D-143): such a republish holds the node's own back when it pays at
+least the node's fee rate, its commit transaction spends confirmed outputs or the change of another republish that holds (a chain, below), and every header it needs from outside its payload has counted
+or is carried by a republish that holds; and only for `REPUBLISH_PATIENCE` (2) BTC blocks from when the node first saw it, after which the node sends those headers itself (one that left the mempool while bitcoind's tip is ahead of the tip the node has read is kept until the node has caught up). A node about to start a
+chain with a block it did not produce first waits its turn, `REPUBLISH_YIELD` (10 seconds) times one to six by the hash of that block and the node's funding script, and then sends what the republishes
+that reached the mempool meanwhile leave; the producer of that block, and a node racing a competing chain, do not wait. A republish of the node's own that confirmed without landing its headers (one it
+relied on confirmed later) is sent again. While a node's republishes wait in the mempool, it sends the next run (the blocks above not carried by them) chained on them: the commit transaction spends the change of the last one's
 reveal transaction first (D-140), so BTC confirms them, reveals included, in order and every parent of a header in it has counted or confirms before it; at most four (`MAX_CHAINED_REPUBLISHES`, within Bitcoin Core's
 default 101 kvB limit on a cluster of unconfirmed transactions) are in flight, and none is added once the last one's change is spent (D-139); a republish's change always returns to the funding address, whose key signs for it in the next one. The republish payload carries the payee `payee` (`--carrier-payee`, defaulting to `--producer`; all zeros, i.e. not collecting, when neither is given; D-095): when the republish lands a block's data on-chain for the first time and the data has waited more than
 `CARRIER_REPOST_DELAY` (2) BTC blocks, the payee takes that block's carrier reward (§8.6); an earlier republish (typically D-091's republish of this node's own headers)
@@ -1694,7 +1708,7 @@ asset names 1–64 bytes, symbols 1–16 bytes, decimals ≤ 18 (D-121),
 ≤ 64 instances per op, linear memory ≤ 256 MiB in total; see `docs/ABI.md` for the gas table.
 
 Local policy defaults: entry pool minimum sponsored fee 1, capacity 10 000, 64 per account; settlement fee rate 2 sat/vB; hot-wallet cap 1 000 000 sats; funding UTXO pool target 64, each split piece
-≥ 100 000 sats; settlement batching on, headers at most 1/2 of a payload, bodies at most 1/4, trigger threshold 1/8, 2 BTC blocks in flight; rescue order window 6, delay 2, quiet-time republish
+≥ 100 000 sats; settlement batching on, headers at most 1/2 of a payload, bodies at most 1/4, trigger threshold 1/8, 2 BTC blocks in flight; rescue order window 6, delay 2, another sender's republish honored for 2 BTC blocks, republish turns of 10 s, quiet-time republish
 multiplier 4; P2P asks Status every 3 seconds, redials every 2 seconds, bans for 60 seconds at 3 points, request timeout 30 seconds, token buckets as in §11.1; orphan pool 256; BTC polling 500 ms; devnet nodes
 `--min-block-interval-ms 5000`; pruning on, margin `PRUNE_BTC_MARGIN` 144 BTC blocks, step `PRUNE_STEP` 1 000 blue score, at `min_pruning_depth = 3 × (MERGE_DEPTH + GHOSTDAG_K) + 1` = 2 209 below the pruning
 root (§6.6, §10.2, D-097).
@@ -1884,7 +1898,7 @@ Testing focuses on determinism and exception paths: any problem that makes state
 | A BTC payload carries hundreds of junk headers and bodies | Headers whose parents have not counted are ignored and nothing is held for them; a landed body is kept as the bytes of its transaction, one copy per transaction (D-098, D-135); a payload with more than `MAX_SETTLEMENT_HEADERS` headers is not recognized (D-100) |
 | A payload carries 500 headers whose parents never appeared, without valid PoW | Ignored: the memory and the checkpoint of nodes and indexers do not grow (the second audit's A2-10, D-135) |
 | A parent's header and a child's header land in two transactions of one BTC block, in either order | Both count at that height (D-135) |
-| A child's settlement confirms before its parent's: the parent's is still in flight or stuck, or a BTC reorg moved it higher | The child's header does not count and its data does not land; once the parent's header counts, the child's payload is rescued unchanged and lands; node and indexer agree (D-135) |
+| A child's settlement confirms before its parent's: the parent's is still in flight or stuck, or a BTC reorg moved it higher | The child's header does not count and its data does not land; once the parent's header counts, the child's payload is rescued unchanged and lands; node and indexer agree (D-135). The blocks produced after the node knows of it carry the missing headers themselves, so the settlements after it land (D-143) |
 | The headers waiting to land exceed one payload | The settlement carries the latest; once it has counted, the earliest are republished, the settlement is rescued, and all the data lands (D-135) |
 | A header counts on one BTC chain; a reorg moves its anchor off the best chain, then BTC returns | It does not count on the other chain and counts again on the first; a running tracker and one scanning from scratch agree at every step (D-135) |
 | A block that needs a body carries more entries than any payload can fit | Invalid block (D-100) |
