@@ -837,6 +837,41 @@ fn a_republish_holds_a_node_back_no_longer_once_the_nodes_rate_is_above_it() {
     );
 }
 
+/// A republish that confirms before the headers it relies on lands nothing (D-135), and what it carried goes out again.
+/// While bitcoind is a block ahead of what the node has read, the node keeps the republishes that left the mempool
+/// (D-143): one whose confirmation it has read is not among those it waits for, and does not hold that retry back.
+#[test]
+fn a_republish_read_on_btc_does_not_hold_back_the_retry_of_what_it_did_not_land() {
+    let (mock, a, params) = long_run_of_empty_blocks("retry");
+    let first = republisher(&mock, &a, "retry/first", 2);
+    let second = republisher(&mock, &a, "retry/second", 2);
+    first.run_once().unwrap();
+    for tx in mock.mempool() {
+        mock.hold(&tx.compute_txid().to_byte_array());
+    }
+    // The second node sends the headers after the first one's, and sees its own republish in the mempool
+    second.run_once().unwrap();
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    let carried = sent[0].len() as u64;
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    // The second node's confirm while the first one's waits: they land nothing
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    let hash = a.chain.store().hash_at(carried + 1).unwrap().unwrap();
+    assert!(snapshot.counted_at(&hash).is_none());
+    // bitcoind is a block ahead of the node: the second node sends them again behind the first one's
+    mock.mine(1);
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert!(
+        sent.iter().any(|h| h.first() == Some(&(carried + 1))),
+        "{sent:?}"
+    );
+}
+
 /// Nodes that find the same run due when the same BTC block arrives do not all send it (D-143): the producer of the
 /// run's first block sends at once, any other node waits its turn first, and sends what the republishes that reached
 /// the mempool meanwhile leave.

@@ -5192,8 +5192,10 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      from outside its payload has counted or is carried by a republish that holds as well; and only for `REPUBLISH_PATIENCE` (2) BTC blocks from when the node first saw it, after which the
      node sends those headers itself. A node about to start a chain with a block it did not produce first waits `REPUBLISH_YIELD` (10 s) times one to six, drawn from the block's hash and the
      node's funding script, and then sends what the republishes that arrived meanwhile leave; the producer of the first block, and a node racing a competing chain (D-091), do not wait. A
-     republish that left the mempool while bitcoind's tip is ahead of the one the node has read is kept until the node has caught up: it has most likely confirmed in the block not yet
-     read. A republish of the node's own that confirmed without landing its headers is no longer treated as in flight: the headers go out again.
+     republish that left the mempool holds the node's back only while it is in a BTC block the node has not read yet (bitcoind's tip is ahead of the one the node has read): once the node
+     has read that block, what the republish landed shows there, and one that left without confirming lands nothing. A republish of the node's own that confirmed, in a block the node has
+     read, without landing its headers is no longer treated as in flight: the headers go out again (it lands nothing when a header it needed, carried by another sender's republish, had
+     not counted).
 - **Rationale**: none of the three needs a consensus change, and D-135's "no trace" is what keeps anyone paying BTC fees from making nodes hold data, so settlements that did not count are
   not revived; the producer simply stops building on them. One failure now costs the payloads already sent, not every one after it. For republishing, the mempool is the only thing the nodes
   share without a new message: reading it removes the duplicates when one node is ahead, and the wait by turns removes them when several start at the same moment. A node's turn changes from
