@@ -330,6 +330,42 @@ pub fn draft(
     })
 }
 
+/// A new draft for `payload` over the inputs and the change script of draft `old`, at `feerate_sat_vb` (D-144): for a
+/// final payload [`finalize`] cannot fit to the length `old` reserved. The fees follow the new length, so the change
+/// differs from `old`'s; [`SettlementError::InsufficientFunds`] when the inputs no longer cover them.
+pub fn redraft(
+    params: &Params,
+    old: &Draft,
+    key: &XOnlyPublicKey,
+    payload: &[u8],
+    feerate_sat_vb: u64,
+) -> Result<Draft, SettlementError> {
+    let producer: Vec<ProducerUtxo> = old
+        .commit
+        .input
+        .iter()
+        .zip(&old.prevouts)
+        .map(|(txin, txout)| ProducerUtxo {
+            outpoint: txin.previous_output,
+            txout: txout.clone(),
+        })
+        .collect();
+    let change_script = old
+        .reveal
+        .output
+        .first()
+        .map(|out| out.script_pubkey.clone())
+        .ok_or_else(|| invalid("the draft's reveal transaction has no output"))?;
+    draft(
+        params,
+        &producer,
+        change_script,
+        key,
+        payload,
+        feerate_sat_vb,
+    )
+}
+
 /// Writes the final payload and signs both transactions, returning the complete settlement transactions.
 ///
 /// `payload` must have the same length as the payload in the draft (PoW solving only changes the header's nonce, not
