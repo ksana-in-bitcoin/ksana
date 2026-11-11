@@ -5188,7 +5188,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      that block's header, and the headers behind it, as it does for a settlement no longer in flight. The rules for counting are untouched: an appearance that did not count still leaves no
      trace, and the settlement that landed nothing is still sent again by the rescue.
   3. Before it republishes, a node reads the republishes in the BTC mempool (`Rescuer::republished_by_others`) and does not carry again the headers, and the bodies, another sender's carries.
-     Such a republish holds the node's own back when it pays the node's fee rate, spends confirmed outputs or the change of another one that does (a chain, D-139), and every header it needs
+     Such a republish holds the node's own back when it pays the fee rate the node pays now (asked again when that rate changes), spends confirmed outputs or the change of another one that does (a chain, D-139), and every header it needs
      from outside its payload has counted or is carried by a republish that holds as well; and only for `REPUBLISH_PATIENCE` (2) BTC blocks from when the node first saw it, after which the
      node sends those headers itself. A node about to start a chain with a block it did not produce first waits `REPUBLISH_YIELD` (10 s) times one to six, drawn from the block's hash and the
      node's funding script, and then sends what the republishes that arrived meanwhile leave; the producer of the first block, and a node racing a competing chain (D-091), do not wait. A

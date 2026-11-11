@@ -813,6 +813,30 @@ fn a_republish_paying_less_than_this_nodes_rate_does_not_hold_it_back() {
     assert_eq!(sent[1].first(), Some(&1));
 }
 
+/// Whether a republish in the mempool pays this node's fee rate is asked of the rate the node pays now (D-143): once
+/// that rate is above what the republish pays, it holds this node's back no longer. The answer used to be kept from
+/// the first look.
+#[test]
+fn a_republish_holds_a_node_back_no_longer_once_the_nodes_rate_is_above_it() {
+    let (mock, a, params) = long_run_of_empty_blocks("rate");
+    let first = republisher(&mock, &a, "rate/first", 1);
+    let node = republisher(&mock, &a, "rate/second", 1);
+    first.run_once().unwrap();
+    node.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 2);
+    let carried = sent[0].len() as u64;
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    mock.set_fee_estimate(1, Some(3));
+    node.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert!(
+        sent.iter().skip(2).any(|h| h.first() == Some(&1)),
+        "{sent:?}"
+    );
+}
+
 /// Nodes that find the same run due when the same BTC block arrives do not all send it (D-143): the producer of the
 /// run's first block sends at once, any other node waits its turn first, and sends what the republishes that reached
 /// the mempool meanwhile leave.

@@ -290,6 +290,9 @@ struct State {
     sweep: Option<Sent>,
     /// The first header of the republish this node is waiting its turn to send, and since when (D-143).
     yielding: Option<([u8; 32], Instant)>,
+    /// This node's fee rate (sat/vB) the republishes of [`State::mempool`] were last checked against
+    /// ([`Rescuer::republish_pays`], D-143).
+    republish_feerate: u64,
 }
 
 /// Rescue settlement and header republishing.
@@ -968,6 +971,15 @@ impl Rescuer {
     ) -> Result<Option<BTreeMap<[u8; 32], bool>>, NodeError> {
         if !self.scan_mempool(state, btc_tip)? {
             return Ok(None);
+        }
+        // Whether a republish pays this node's rate is checked again when that rate has changed
+        if state.republish_feerate != feerate {
+            state.republish_feerate = feerate;
+            for seen in state.mempool.values_mut() {
+                if !seen.republished.is_empty() {
+                    seen.honored = None;
+                }
+            }
         }
         let own: BTreeSet<[u8; 32]> = state.headers.values().map(|sent| sent.txid).collect();
         let mut pays: BTreeMap<[u8; 32], bool> = state
