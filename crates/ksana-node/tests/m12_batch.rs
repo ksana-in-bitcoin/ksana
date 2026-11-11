@@ -545,7 +545,9 @@ fn bodies_beyond_the_budget_keep_their_headers_and_go_out_in_one_republish() {
         a.producer.funding.clone().unwrap(),
         Some(a.producer.producer),
         None,
-    );
+    )
+    // The run starts with another producer's block: no waiting for a turn here (D-143)
+    .with_republish_yield(Duration::ZERO);
     rescuer.run_once().unwrap();
     let republishes: Vec<Payload> = mock
         .mempool()
@@ -609,7 +611,8 @@ fn republishes_chain_on_the_change_of_the_one_before() {
         funding,
         Some(f.producer.producer),
         None,
-    );
+    )
+    .with_republish_yield(Duration::ZERO);
     // The reveal and commit of each republish in the mempool, in mempool order
     let chained = || -> Vec<(Transaction, Transaction, Vec<BlockHeader>)> {
         let pool = mock.mempool();

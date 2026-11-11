@@ -52,7 +52,7 @@ use ksana_node::genesis::GenesisFile;
 use ksana_node::producer::{
     FeePolicy, Funding, Producer, TemplateSync, DEFAULT_FEE_TARGET, ROOMY_MEMPOOL_VSIZE,
 };
-use ksana_node::rescue::{Rescuer, BUMP_AFTER, CLAIM_PATIENCE};
+use ksana_node::rescue::{Rescuer, BUMP_AFTER, CLAIM_PATIENCE, REPUBLISH_PATIENCE};
 use ksana_node::rpc::NodeRpc;
 use ksana_node::NodeError;
 use ksana_primitives::hash::sha256;
@@ -646,6 +646,7 @@ fn a_republish_of_a_long_run_of_empty_blocks_fits_in_one_payload() {
     a.sync();
     let payee = user("adv/liveness/republish/payee").account;
     Rescuer::new(a.chain.clone(), funding, None, Some(payee))
+        .with_republish_yield(Duration::ZERO)
         .run_once()
         .unwrap();
 
@@ -660,6 +661,277 @@ fn a_republish_of_a_long_run_of_empty_blocks_fits_in_one_payload() {
         "as many headers as fit: {}",
         heights.len()
     );
+}
+
+/// A chain of 130 empty blocks whose headers are due for republishing, about 55 to a payload.
+fn long_run_of_empty_blocks(name: &str) -> (Arc<MockBtc>, Instance, Params) {
+    let params = Params {
+        max_block_data_bytes: 1_024,
+        max_settlement_headers: 60,
+        ..DEVNET
+    };
+    let (mock, genesis) = setup(&[]);
+    let a = Instance::open(&mock, &genesis, name, &params, false);
+    for _ in 0..130 {
+        assert!(a.produce().unwrap().entries.is_empty());
+    }
+    (mock, a, params)
+}
+
+/// A node that republishes the headers of `a`'s chain from its own funding wallet, paying `feerate` sat/vB, and does
+/// not wait its turn (D-143).
+fn republisher(mock: &MockBtc, a: &Instance, seed: &str, feerate: u64) -> Rescuer {
+    let funding = Funding::new(btc_keypair(seed), feerate);
+    mock.fund(&funding.script, &[400_000; 4]);
+    a.sync();
+    let payee = user(&format!("adv/liveness/{seed}/payee")).account;
+    Rescuer::new(a.chain.clone(), funding, None, Some(payee)).with_republish_yield(Duration::ZERO)
+}
+
+/// The heights of the headers each republish in the mock BTC mempool carries, in the order they were sent.
+fn republished_heights(mock: &MockBtc, params: &Params) -> Vec<Vec<u64>> {
+    republished(mock, params)
+        .iter()
+        .map(|(headers, _)| headers.iter().map(|h| h.height).collect())
+        .collect()
+}
+
+/// Two nodes find the same run of headers due (D-143): what the first one's republish in the BTC mempool carries, the
+/// second does not carry again and sends the headers after it; each goes on from what both have sent. The two used to
+/// send the same ranges, every one of them twice (D-047).
+#[test]
+fn a_republish_in_the_mempool_is_not_sent_again_by_another_node() {
+    let (mock, a, params) = long_run_of_empty_blocks("dedupe");
+    let first = republisher(&mock, &a, "dedupe/first", 2);
+    let second = republisher(&mock, &a, "dedupe/second", 2);
+
+    first.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].first(), Some(&1));
+    let carried = sent[0].len() as u64;
+
+    // A different range is not held back: the second node sends the headers after the first one's
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    // The first node chains its next republish (D-139) after the second node's
+    first.run_once().unwrap();
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    let mut all: Vec<u64> = sent.iter().flatten().copied().collect();
+    let total = all.len();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), total, "no header is sent twice: {sent:?}");
+    assert_eq!(all, (1..=total as u64).collect::<Vec<_>>());
+
+    // They confirm, and bitcoind knows the block before the node has read it: the headers are not sent again in between
+    mock.mine(1);
+    second.run_once().unwrap();
+    first.run_once().unwrap();
+    let again: Vec<u64> = republished_heights(&mock, &params)
+        .into_iter()
+        .flatten()
+        .filter(|height| *height <= total as u64)
+        .collect();
+    assert!(again.is_empty(), "sent again: {again:?}");
+
+    // Nor while bitcoind's txindex has not reached that block and does not know the transactions that left the mempool
+    mock.set_txindex_lag(1);
+    second.run_once().unwrap();
+    first.run_once().unwrap();
+    let again: Vec<u64> = republished_heights(&mock, &params)
+        .into_iter()
+        .flatten()
+        .filter(|height| *height <= total as u64)
+        .collect();
+    assert!(again.is_empty(), "sent again behind the txindex: {again:?}");
+    mock.set_txindex_lag(0);
+
+    // In one BTC block, whatever the order (D-135): everything sent landed
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    for height in 1..=total as u64 {
+        let hash = a.chain.store().hash_at(height).unwrap().unwrap();
+        assert!(snapshot.counted_at(&hash).is_some(), "height {height}");
+    }
+}
+
+/// The node whose republish is in the mempool goes away and its transactions do not confirm (D-143): the other node
+/// waits `REPUBLISH_PATIENCE` BTC blocks from when it first saw them, and then sends the headers itself.
+#[test]
+fn a_republish_that_does_not_confirm_holds_another_node_back_only_for_a_while() {
+    let (mock, a, params) = long_run_of_empty_blocks("fallback");
+    let first = republisher(&mock, &a, "fallback/first", 2);
+    let second = republisher(&mock, &a, "fallback/second", 2);
+    // The first node sends everything that is due, and is not heard of again
+    for _ in 0..4 {
+        first.run_once().unwrap();
+    }
+    let sent = republished_heights(&mock, &params);
+    let due: u64 = sent.iter().map(|heights| heights.len() as u64).sum();
+    assert!(sent.len() >= 2 && due > 100, "{sent:?}");
+    for tx in mock.mempool() {
+        mock.hold(&tx.compute_txid().to_byte_array());
+    }
+
+    second.run_once().unwrap();
+    assert_eq!(republished(&mock, &params).len(), sent.len());
+    for _ in 1..REPUBLISH_PATIENCE {
+        mock.mine(1);
+        a.sync();
+        second.run_once().unwrap();
+        assert_eq!(
+            republished(&mock, &params).len(),
+            sent.len(),
+            "not before REPUBLISH_PATIENCE"
+        );
+    }
+    mock.mine(1);
+    a.sync();
+    second.run_once().unwrap();
+    let now = republished_heights(&mock, &params);
+    assert_eq!(now.len(), sent.len() + 1);
+    assert_eq!(now.last().and_then(|heights| heights.first()), Some(&1));
+
+    // The second node's chain lands the headers although the first node's transactions never confirm
+    for _ in 0..4 {
+        second.run_once().unwrap();
+    }
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    for height in 1..=due {
+        let hash = a.chain.store().hash_at(height).unwrap().unwrap();
+        assert!(snapshot.counted_at(&hash).is_some(), "height {height}");
+    }
+}
+
+/// A republish paying less than this node's fee rate may confirm much later or never: it does not hold this node's
+/// back (D-143).
+#[test]
+fn a_republish_paying_less_than_this_nodes_rate_does_not_hold_it_back() {
+    let (mock, a, params) = long_run_of_empty_blocks("cheap");
+    let cheap = republisher(&mock, &a, "cheap/first", 1);
+    let node = republisher(&mock, &a, "cheap/second", 2);
+    cheap.run_once().unwrap();
+    node.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].first(), Some(&1));
+    assert_eq!(sent[1].first(), Some(&1));
+}
+
+/// Whether a republish in the mempool pays this node's fee rate is asked of the rate the node pays now (D-143): once
+/// that rate is above what the republish pays, it holds this node's back no longer. The answer used to be kept from
+/// the first look.
+#[test]
+fn a_republish_holds_a_node_back_no_longer_once_the_nodes_rate_is_above_it() {
+    let (mock, a, params) = long_run_of_empty_blocks("rate");
+    let first = republisher(&mock, &a, "rate/first", 1);
+    let node = republisher(&mock, &a, "rate/second", 1);
+    first.run_once().unwrap();
+    node.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 2);
+    let carried = sent[0].len() as u64;
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    mock.set_fee_estimate(1, Some(3));
+    node.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert!(
+        sent.iter().skip(2).any(|h| h.first() == Some(&1)),
+        "{sent:?}"
+    );
+}
+
+/// A republish that confirms before the headers it relies on lands nothing (D-135), and what it carried goes out again.
+/// While bitcoind is a block ahead of what the node has read, the node keeps the republishes that left the mempool
+/// (D-143): one whose confirmation it has read is not among those it waits for, and does not hold that retry back.
+#[test]
+fn a_republish_read_on_btc_does_not_hold_back_the_retry_of_what_it_did_not_land() {
+    let (mock, a, params) = long_run_of_empty_blocks("retry");
+    let first = republisher(&mock, &a, "retry/first", 2);
+    let second = republisher(&mock, &a, "retry/second", 2);
+    first.run_once().unwrap();
+    for tx in mock.mempool() {
+        mock.hold(&tx.compute_txid().to_byte_array());
+    }
+    // The second node sends the headers after the first one's, and sees its own republish in the mempool
+    second.run_once().unwrap();
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    let carried = sent[0].len() as u64;
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    // The second node's confirm while the first one's waits: they land nothing
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    let hash = a.chain.store().hash_at(carried + 1).unwrap().unwrap();
+    assert!(snapshot.counted_at(&hash).is_none());
+    // bitcoind is a block ahead of the node: the second node sends them again behind the first one's
+    mock.mine(1);
+    second.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert!(
+        sent.iter().any(|h| h.first() == Some(&(carried + 1))),
+        "{sent:?}"
+    );
+}
+
+/// Nodes that find the same run due when the same BTC block arrives do not all send it (D-143): the producer of the
+/// run's first block sends at once, any other node waits its turn first, and sends what the republishes that reached
+/// the mempool meanwhile leave.
+#[test]
+fn a_node_waits_its_turn_before_republishing_a_run_it_did_not_start() {
+    let (mock, a, params) = long_run_of_empty_blocks("turn");
+    let funding = |seed: &str| {
+        let funding = Funding::new(btc_keypair(seed), 2);
+        mock.fund(&funding.script, &[400_000; 4]);
+        funding
+    };
+    let payee = user("adv/liveness/turn/payee").account;
+    let other = Rescuer::new(a.chain.clone(), funding("turn/other"), None, Some(payee))
+        .with_republish_yield(Duration::from_secs(3_600));
+    let quick = Rescuer::new(a.chain.clone(), funding("turn/quick"), None, Some(payee))
+        .with_republish_yield(Duration::from_millis(1));
+    let producer = Rescuer::new(
+        a.chain.clone(),
+        funding("turn/producer"),
+        Some(a.producer.producer),
+        None,
+    )
+    .with_republish_yield(Duration::from_secs(3_600));
+    a.sync();
+
+    other.run_once().unwrap();
+    quick.run_once().unwrap();
+    assert!(republished(&mock, &params).is_empty(), "both wait");
+
+    // The producer of the first block does not wait
+    producer.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].first(), Some(&1));
+    let carried = sent[0].len() as u64;
+
+    // What is left starts with another block: the wait starts again, and then the node sends the rest
+    std::thread::sleep(Duration::from_millis(20));
+    quick.run_once().unwrap();
+    assert_eq!(republished(&mock, &params).len(), 1);
+    std::thread::sleep(Duration::from_millis(20));
+    quick.run_once().unwrap();
+    let sent = republished_heights(&mock, &params);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].first(), Some(&(carried + 1)));
+
+    other.run_once().unwrap();
+    assert_eq!(republished(&mock, &params).len(), 2, "still waiting");
 }
 
 /// `ksana_call` (SPEC §11.2): `max_gas` defaults to `BLOCK_GAS_LIMIT` and may not exceed it — a contract call that

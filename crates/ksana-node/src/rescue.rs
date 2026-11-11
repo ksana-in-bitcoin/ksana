@@ -72,8 +72,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{sha256, Hash, HashEngine};
 use bitcoin::Transaction;
 use ksana_btc::client::BtcClient;
 use ksana_btc::payload::{attached_payload, entry_data, headers_payload_fixed_len};
@@ -98,6 +99,16 @@ pub const RESCUE_DELAY: u32 = 2;
 /// (local policy, M26): as long as a node outside the rescue order waits. A claim that has not confirmed by then is
 /// treated as a rescue that never came.
 pub const CLAIM_PATIENCE: u32 = RESCUE_ORDER_WINDOW.saturating_add(RESCUE_DELAY);
+/// Number of BTC blocks another sender's republish in the mempool holds this node's back, for the headers and bodies it
+/// carries, after this node first saw it (local policy, D-143): as long as this node lets a pair of its own wait before
+/// it bumps it. One that has not confirmed by then is treated as a republish that never came.
+pub const REPUBLISH_PATIENCE: u32 = BUMP_AFTER;
+/// A node starting a chain of republishes with a block it did not produce first waits one to [`REPUBLISH_YIELD_SLOTS`]
+/// times this long, and then sends what the republishes that reached the mempool meanwhile leave (local policy, D-143):
+/// nodes that find the same run due when the same BTC block arrives do not all send it.
+pub const REPUBLISH_YIELD: Duration = Duration::from_secs(10);
+/// The number of waits a node's turn is drawn from ([`REPUBLISH_YIELD`]).
+const REPUBLISH_YIELD_SLOTS: u8 = 6;
 /// Maximum number of newly seen mempool transactions fetched from bitcoind per round (D-057): the mainnet mempool is
 /// large and takes several rounds to scan, during which no rescue is initiated.
 const MEMPOOL_SCAN_BATCH: usize = 1_000;
@@ -221,9 +232,18 @@ struct Seen {
     /// The fast-lane block it claims to settle (hash of the last header of its settlement payload); `None` when it is
     /// not a settlement transaction.
     block: Option<[u8; 32]>,
+    /// The blocks whose headers its republish payload carries, each with whether the payload also carries the block's
+    /// body as this node stores it (D-143); empty when it is not a republish.
+    republished: Vec<([u8; 32], bool)>,
+    /// The parents of those headers that the payload does not carry: nothing of it lands before they have counted
+    /// (D-135).
+    needs: Vec<[u8; 32]>,
     /// The BTC tip height when this node first saw it.
     since: u32,
-    /// Whether the claim holds this node's rescue back ([`Rescuer::honors`]), once checked.
+    /// Whether it has left the mempool: a republish is then kept while bitcoind is ahead of the scanned tip (D-143).
+    left: bool,
+    /// Whether the claim holds this node's rescue back ([`Rescuer::honors`]), or the republish pays this node's fee rate
+    /// ([`Rescuer::republish_pays`]), once checked.
     honored: Option<bool>,
 }
 
@@ -270,6 +290,11 @@ struct State {
     split: Option<Sent>,
     /// Revenue sweep transaction sent by this node and not yet confirmed (D-142).
     sweep: Option<Sent>,
+    /// The first header of the republish this node is waiting its turn to send, and since when (D-143).
+    yielding: Option<([u8; 32], Instant)>,
+    /// This node's fee rate (sat/vB) the republishes of [`State::mempool`] were last checked against
+    /// ([`Rescuer::republish_pays`], D-143).
+    republish_feerate: u64,
 }
 
 /// Rescue settlement and header republishing.
@@ -280,6 +305,8 @@ pub struct Rescuer {
     /// Payee account of republish payloads (D-095): defaults to the producer account; all zeros for a non-producing
     /// node (no carrier reward collected).
     payee: [u8; 32],
+    /// The unit of the wait before a chain of republishes this node is not the first to send ([`REPUBLISH_YIELD`]).
+    republish_yield: Duration,
     state: Mutex<State>,
 }
 
@@ -302,8 +329,15 @@ impl Rescuer {
             funding,
             producer,
             payee: payee.or(producer).unwrap_or([0; 32]),
+            republish_yield: REPUBLISH_YIELD,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// Replaces [`REPUBLISH_YIELD`] (zero: this node never waits its turn to republish).
+    pub fn with_republish_yield(mut self, unit: Duration) -> Self {
+        self.republish_yield = unit;
+        self
     }
 
     fn state(&self) -> Result<MutexGuard<'_, State>, NodeError> {
@@ -823,35 +857,8 @@ impl Rescuer {
         feerate: u64,
         own: &[u8; 32],
     ) -> Result<Option<bool>, NodeError> {
-        let client = self.chain.btc().client();
-        let params = self.chain.params();
-        let txids: BTreeSet<[u8; 32]> = client.mempool_txids().map_err(btc)?.into_iter().collect();
-        state.mempool.retain(|txid, _| txids.contains(txid));
-        let mut fetched = 0usize;
-        for txid in &txids {
-            if state.mempool.contains_key(txid) {
-                continue;
-            }
-            if fetched >= MEMPOOL_SCAN_BATCH {
-                return Ok(None);
-            }
-            fetched = fetched.saturating_add(1);
-            let block = client.transaction(txid).map_err(btc)?.and_then(|info| {
-                match ksana_btc::data::tx_payload(params, &info.tx) {
-                    Some((_, Payload::Settlement { headers, .. })) => {
-                        headers.last().map(|h| h.hash())
-                    }
-                    _ => None,
-                }
-            });
-            state.mempool.insert(
-                *txid,
-                Seen {
-                    block,
-                    since: btc_tip,
-                    honored: None,
-                },
-            );
+        if !self.scan_mempool(state, btc_tip)? {
+            return Ok(None);
         }
         for (txid, seen) in state.mempool.iter_mut() {
             if txid == own
@@ -869,6 +876,270 @@ impl Rescuer {
             }
         }
         Ok(Some(false))
+    }
+
+    /// Brings [`State::mempool`] up to date with the BTC mempool (D-057, D-143): the transactions that left it are
+    /// forgotten (a republish only once the scanned tip has caught up with bitcoind's), and at most
+    /// [`MEMPOOL_SCAN_BATCH`] newly seen ones are fetched and read. `false` while some are left for the next round.
+    fn scan_mempool(&self, state: &mut State, btc_tip: u32) -> Result<bool, NodeError> {
+        let client = self.chain.btc().client();
+        let params = self.chain.params();
+        let txids: BTreeSet<[u8; 32]> = client.mempool_txids().map_err(btc)?.into_iter().collect();
+        // bitcoind may be a block ahead of the scanned tip: a republish that left the mempool has then most likely
+        // confirmed in a block this node has not read yet, and is kept until it has (D-143)
+        let ahead = client.tip().map_err(btc)?.0 > btc_tip;
+        state.mempool.retain(|txid, seen| {
+            seen.left = !txids.contains(txid);
+            !seen.left || (ahead && !seen.republished.is_empty())
+        });
+        let mut fetched = 0usize;
+        for txid in &txids {
+            if state.mempool.contains_key(txid) {
+                continue;
+            }
+            if fetched >= MEMPOOL_SCAN_BATCH {
+                return Ok(false);
+            }
+            fetched = fetched.saturating_add(1);
+            let mut seen = Seen {
+                block: None,
+                republished: Vec::new(),
+                needs: Vec::new(),
+                since: btc_tip,
+                left: false,
+                honored: None,
+            };
+            let payload = client
+                .transaction(txid)
+                .map_err(btc)?
+                .and_then(|info| ksana_btc::data::tx_payload(params, &info.tx));
+            match payload {
+                Some((_, Payload::Settlement { headers, .. })) => {
+                    seen.block = headers.last().map(BlockHeader::hash);
+                }
+                Some((
+                    _,
+                    Payload::Headers {
+                        headers, bodies, ..
+                    },
+                )) => {
+                    let hashes: Vec<[u8; 32]> = headers.iter().map(BlockHeader::hash).collect();
+                    let genesis = self.chain.genesis().hash();
+                    let needs: BTreeSet<[u8; 32]> = headers
+                        .iter()
+                        .flat_map(|header| header.parents.iter().copied())
+                        .filter(|parent| *parent != genesis && !hashes.contains(parent))
+                        .collect();
+                    seen.needs = needs.into_iter().collect();
+                    // A body counts only when it is the one this node stores for that block: any other lands nothing
+                    let mut with_body = BTreeSet::new();
+                    for body in &bodies {
+                        let Some(hash) = usize::try_from(body.header)
+                            .ok()
+                            .and_then(|index| hashes.get(index))
+                        else {
+                            continue;
+                        };
+                        let stored = self.chain.store().block(hash)?;
+                        if stored.is_some_and(|block| entry_data(&block.entries) == body.entries) {
+                            with_body.insert(*hash);
+                        }
+                    }
+                    seen.republished = hashes
+                        .into_iter()
+                        .map(|hash| (hash, with_body.contains(&hash)))
+                        .collect();
+                }
+                Some((_, Payload::NativeOp { .. })) | None => {}
+            }
+            state.mempool.insert(*txid, seen);
+        }
+        Ok(true)
+    }
+
+    /// The blocks other senders' republishes in the BTC mempool carry (local policy, D-143), each with whether its body
+    /// is carried too: this node does not carry them again. A republish holds this node's back when this node first saw
+    /// it fewer than [`REPUBLISH_PATIENCE`] BTC blocks before `btc_tip`, it pays this node's fee rate `feerate`
+    /// ([`Rescuer::republish_pays`]), and every header it needs from outside its payload has counted or is carried by a
+    /// republish of this node's in flight (`covered`) or by another one that holds this node's back: it lands what it
+    /// carries when it confirms. One that left the mempool holds this node's back only while it is in a BTC block the
+    /// snapshot has not read ([`Rescuer::read_on_btc`]). Anyone
+    /// can put such a transaction into the mempool: one that does not confirm delays this node by
+    /// [`REPUBLISH_PATIENCE`] BTC blocks, and one that confirms has landed the data at its sender's cost. `None` while
+    /// the mempool scan is not finished.
+    fn republished_by_others(
+        &self,
+        state: &mut State,
+        snapshot: &BtcSnapshot,
+        btc_tip: u32,
+        feerate: u64,
+        covered: &BTreeSet<[u8; 32]>,
+    ) -> Result<Option<BTreeMap<[u8; 32], bool>>, NodeError> {
+        if !self.scan_mempool(state, btc_tip)? {
+            return Ok(None);
+        }
+        // Whether a republish pays this node's rate is checked again when that rate has changed
+        if state.republish_feerate != feerate {
+            state.republish_feerate = feerate;
+            for seen in state.mempool.values_mut() {
+                if !seen.republished.is_empty() {
+                    seen.honored = None;
+                }
+            }
+        }
+        let own: BTreeSet<[u8; 32]> = state.headers.values().map(|sent| sent.txid).collect();
+        let mut pays: BTreeMap<[u8; 32], bool> = state
+            .mempool
+            .iter()
+            .filter(|(_, seen)| !seen.republished.is_empty())
+            .filter_map(|(txid, seen)| Some((*txid, seen.honored?)))
+            .collect();
+        let mut waiting = Vec::new();
+        for (txid, seen) in &state.mempool {
+            if seen.republished.is_empty()
+                || own.contains(txid)
+                || btc_tip >= seen.since.saturating_add(REPUBLISH_PATIENCE)
+            {
+                continue;
+            }
+            // One that left the mempool is waited for only while it is in a BTC block the snapshot has not read: what
+            // one the snapshot has read landed is in the snapshot, and one that did not confirm lands nothing
+            if seen.left && self.read_on_btc(snapshot, txid)? != Some(false) {
+                continue;
+            }
+            if self.republish_pays(state, &mut pays, txid, feerate, MAX_CHAINED_REPUBLISHES)? {
+                waiting.push(seen);
+            }
+        }
+        // Until nothing more is added: a republish may need the headers another one carries
+        let mut others: BTreeMap<[u8; 32], bool> = BTreeMap::new();
+        loop {
+            let before = waiting.len();
+            waiting.retain(|seen| {
+                let lands = seen.needs.iter().all(|parent| {
+                    snapshot.counted_at(parent).is_some()
+                        || covered.contains(parent)
+                        || others.contains_key(parent)
+                });
+                if lands {
+                    for (hash, body) in &seen.republished {
+                        *others.entry(*hash).or_default() |= *body;
+                    }
+                }
+                !lands
+            });
+            if waiting.len() == before {
+                break;
+            }
+        }
+        for (txid, pays) in pays {
+            if let Some(seen) = state.mempool.get_mut(&txid) {
+                seen.honored = Some(pays);
+            }
+        }
+        Ok(Some(others))
+    }
+
+    /// Whether the transaction has confirmed in a BTC block the snapshot has read (`Some(true)`) or in one it has not,
+    /// bitcoind being ahead of it (`Some(false)`); `None` when it has not confirmed on the best chain. A transaction
+    /// bitcoind does not know while its txindex is behind its tip may be in a block the index has not reached, which
+    /// the snapshot has not read either: `Some(false)`.
+    fn read_on_btc(
+        &self,
+        snapshot: &BtcSnapshot,
+        txid: &[u8; 32],
+    ) -> Result<Option<bool>, NodeError> {
+        let client = self.chain.btc().client();
+        let info = match client.transaction(txid).map_err(btc)? {
+            Some(info) => info,
+            None => {
+                // txindex follows the tip after a block connects: "unknown" says nothing before it has caught up
+                let tip = client.tip().map_err(btc)?.0;
+                if client
+                    .txindex_height()
+                    .map_err(btc)?
+                    .is_some_and(|indexed| indexed < tip)
+                {
+                    return Ok(Some(false));
+                }
+                // It had caught up with that tip: asked again, the answer covers every block up to it
+                match client.transaction(txid).map_err(btc)? {
+                    Some(info) => info,
+                    None => return Ok(None),
+                }
+            }
+        };
+        let Some(block) = info.block else {
+            return Ok(None);
+        };
+        Ok(client
+            .header(&block)
+            .map_err(btc)?
+            .filter(|header| header.in_best_chain)
+            .map(|header| snapshot.hash_at(header.height) == Some(block)))
+    }
+
+    /// Whether another sender's republish in the mempool (reveal transaction `txid`) pays for what it carries (D-143): a
+    /// commit / reveal pair paying a fee rate not below `feerate`, this node's (a cheaper one may confirm much later, or
+    /// never), whose commit transaction spends confirmed outputs, or outputs of the reveal of another republish that
+    /// pays (a chain, D-139; `depth` links at most). `pays` holds the answers so far.
+    fn republish_pays(
+        &self,
+        state: &State,
+        pays: &mut BTreeMap<[u8; 32], bool>,
+        txid: &[u8; 32],
+        feerate: u64,
+        depth: usize,
+    ) -> Result<bool, NodeError> {
+        if let Some(known) = pays.get(txid) {
+            return Ok(*known);
+        }
+        pays.insert(*txid, false);
+        let client = self.chain.btc().client();
+        let Some(reveal) = client.transaction(txid).map_err(btc)?.map(|info| info.tx) else {
+            return Ok(false);
+        };
+        let Some(commit_txid) = reveal.input.first().map(|txin| txin.previous_output.txid) else {
+            return Ok(false);
+        };
+        if reveal
+            .input
+            .iter()
+            .any(|txin| txin.previous_output.txid != commit_txid)
+        {
+            return Ok(false);
+        }
+        let Some(commit) = client
+            .transaction(&commit_txid.to_byte_array())
+            .map_err(btc)?
+            .map(|info| info.tx)
+        else {
+            return Ok(false);
+        };
+        for txin in &commit.input {
+            let parent = txin.previous_output.txid.to_byte_array();
+            let Some(info) = client.transaction(&parent).map_err(btc)? else {
+                return Ok(false);
+            };
+            if info.block.is_some() {
+                continue;
+            }
+            let chained = depth > 0
+                && state
+                    .mempool
+                    .get(&parent)
+                    .is_some_and(|seen| !seen.republished.is_empty())
+                && self.republish_pays(state, pays, &parent, feerate, depth.saturating_sub(1))?;
+            if !chained {
+                return Ok(false);
+            }
+        }
+        let paid = match self.pair_fee(&SettlementPair { commit, reveal })? {
+            Some((fee, vsize)) => fee >= feerate.saturating_mul(vsize),
+            None => false,
+        };
+        pays.insert(*txid, paid);
+        Ok(paid)
     }
 
     /// Whether a settlement claim in the mempool (reveal transaction `txid`) holds this node's rescue back (D-057, M26):
@@ -1279,6 +1550,16 @@ impl Rescuer {
             .is_some())
     }
 
+    /// This node's turn among the nodes waiting to republish the run that starts with block `first` (D-143): from the
+    /// block and this node's funding script, so the nodes' turns differ from run to run.
+    fn yield_slot(&self, first: &[u8; 32]) -> u8 {
+        let mut engine = sha256::Hash::engine();
+        engine.input(first);
+        engine.input(self.funding.script.as_bytes());
+        let digest = sha256::Hash::from_engine(engine).to_byte_array();
+        digest.first().copied().unwrap_or(0) % REPUBLISH_YIELD_SLOTS
+    }
+
     fn republish(
         &self,
         snapshot: &BtcSnapshot,
@@ -1415,6 +1696,15 @@ impl Rescuer {
             let Some(sent) = state.headers.get(&hash) else {
                 continue;
             };
+            // Confirmed in a BTC block the snapshot has read: no longer in flight, and what it did not land goes out
+            // again (D-143; it lands nothing when a header it needed, carried by another sender's republish, had not
+            // counted)
+            if self.read_on_btc(snapshot, &sent.txid)? == Some(true) {
+                if let Some(sent) = state.headers.remove(&hash) {
+                    chain.linger(sent.txids(), &sent.inputs)?;
+                }
+                continue;
+            }
             if !self.keep_alive(client.as_ref(), sent)? {
                 state.headers.remove(&hash);
                 continue;
@@ -1455,6 +1745,12 @@ impl Rescuer {
         if in_flight >= MAX_CHAINED_REPUBLISHES || (in_flight > 0 && tail.is_none()) {
             return Ok(());
         }
+        // What other senders' republishes in the mempool carry is not carried again (D-143)
+        let Some(others) =
+            self.republished_by_others(&mut state, snapshot, btc_tip, feerate, &covered)?
+        else {
+            return Ok(());
+        };
 
         // From first (up to before end), the blocks whose data has not landed: the header of each that has not counted,
         // and the header and body of each that carries no settlement transactions and needs a body (D-138); the blocks
@@ -1475,6 +1771,12 @@ impl Rescuer {
             }
             let body = b.settles && !chain.carries_settlement(&b.hash)?;
             if !body && snapshot.counted_at(&b.hash).is_some() {
+                continue;
+            }
+            if others
+                .get(&b.hash)
+                .is_some_and(|with_body| *with_body || !body)
+            {
                 continue;
             }
             let block = chain.store().block(&b.hash)?.ok_or_else(|| {
@@ -1524,6 +1826,30 @@ impl Rescuer {
         let count = headers.len();
         let body_count = bodies.len();
         let key = headers.first().map(BlockHeader::hash).unwrap_or(block.hash);
+        // A node starting a chain with a block it did not produce waits its turn (D-143), unless a lighter competing
+        // chain is on BTC (D-091); the republishes sent meanwhile change what is left, and the wait starts again
+        let first_producer = headers.first().map(|header| header.producer);
+        if in_flight == 0
+            && !self.republish_yield.is_zero()
+            && competitor.is_none()
+            && self.producer != first_producer
+        {
+            let wait = self
+                .republish_yield
+                .saturating_mul(u32::from(self.yield_slot(&key)).saturating_add(1));
+            match state.yielding {
+                Some((waited, since)) if waited == key => {
+                    if since.elapsed() < wait {
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    state.yielding = Some((key, crate::monotonic_now()));
+                    return Ok(());
+                }
+            }
+        }
+        state.yielding = None;
         // The last republish's change first: the funding takes a prefix of the list
         let utxos: Vec<ProducerUtxo> = tail
             .into_iter()

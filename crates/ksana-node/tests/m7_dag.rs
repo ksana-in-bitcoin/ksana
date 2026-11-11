@@ -9,6 +9,8 @@
 //! - When the merge limit is exceeded the lighter side is abandoned, its ops return to the entry pool and are
 //!   re-included by later blocks.
 //! - After a restart the DAG, the main chain and the acceptance relation are unchanged.
+//! - A block of this node that left the main chain keeps its funding inputs: the block that merges it funds its own
+//!   settlement with other outputs (D-143).
 
 mod common;
 
@@ -16,6 +18,8 @@ use bitcoin::hashes::Hash as _;
 use common::mock_node::{native_tx, signed_native};
 use common::side::{setup, Side};
 use common::{transfer_op, user};
+use ksana_btc::payload::funding_inputs;
+use ksana_btc::settlement::SettlementPair;
 use ksana_consensus::Consensus;
 use ksana_execution::keys::{self, LockedFee};
 use ksana_node::chain::{Accepted, Chain};
@@ -513,4 +517,72 @@ fn invalid_dag_headers_are_rejected() {
     // A valid block connects as usual
     assert!(d.accept(&good).is_ok());
     assert!(d.chain.contains(&good.header.hash()).unwrap());
+}
+
+/// The funding outputs the block's settlement transactions spend.
+fn funding_of(block: &Block) -> Vec<([u8; 32], u32)> {
+    let txs = block.settlement.as_ref().expect("carries a settlement");
+    let pair = SettlementPair::decode(txs).unwrap();
+    funding_inputs(&pair.commit)
+}
+
+/// A block of this node leaves the main chain before its settlement transactions are broadcast, and the node's next
+/// block merges it (D-143): the two settlements spend different funding outputs, so both pairs can confirm. Before,
+/// the record dropped with the block freed its inputs, the next block funded its settlement with the same output, and
+/// the pair broadcast second was refused as a conflict and had to be rescued.
+#[test]
+fn a_block_that_left_the_main_chain_keeps_its_funding_inputs_until_it_is_merged() {
+    let (alice, bob, carol, dave) = (
+        user("m7/alice"),
+        user("m7/bob"),
+        user("m7/carol"),
+        user("m7/dave"),
+    );
+    let (mock, genesis) = setup(&[(&alice, 1_000), (&carol, 1_000), (&dave, 1_000)]);
+    let a = Side::new(&mock, &genesis, "m56a");
+    let b = Side::new(&mock, &genesis, "m56b");
+
+    a.submit(transfer_op(&alice, 0, 3, bob.account, 10));
+    let a1 = a.mine();
+    let spent = funding_of(&a1);
+    assert!(a.chain.reserved_inputs().unwrap().contains(&spent[0]));
+
+    // B's two blocks, built without A's, outweigh it: A's block leaves the main chain, its settlement not broadcast
+    b.submit(transfer_op(&carol, 0, 3, bob.account, 1));
+    let b1 = b.mine();
+    b.submit(transfer_op(&carol, 1, 3, bob.account, 1));
+    let b2 = b.mine();
+    a.accept(&b1).unwrap();
+    a.accept(&b2).unwrap();
+    assert_eq!(a.chain.tip().unwrap().hash, b2.header.hash());
+    assert_eq!(a.chain.accepted_height(&a1.header.hash()).unwrap(), None);
+    assert!(a
+        .chain
+        .open_settlements()
+        .unwrap()
+        .iter()
+        .all(|(hash, _)| *hash != a1.header.hash()));
+    // Its funding inputs stay reserved while a later block may merge it
+    for input in &spent {
+        assert!(a.chain.reserved_inputs().unwrap().contains(input));
+    }
+    assert!(!a.chain.try_reserve_inputs(&spent).unwrap());
+
+    // A's next block merges it and funds its own settlement with other outputs
+    a.submit(transfer_op(&dave, 0, 3, bob.account, 10));
+    let a2 = a.mine();
+    assert!(a2.header.parents.contains(&a1.header.hash()));
+    assert_eq!(
+        a.chain.accepted_height(&a1.header.hash()).unwrap(),
+        Some(a2.header.height)
+    );
+    let next = funding_of(&a2);
+    assert!(next.iter().all(|input| !spent.contains(input)));
+    // The record of the merged block holds its inputs again
+    assert!(a
+        .chain
+        .open_settlements()
+        .unwrap()
+        .iter()
+        .any(|(hash, record)| *hash == a1.header.hash() && record.funding_inputs == spent));
 }
