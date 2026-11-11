@@ -833,6 +833,10 @@ pub struct Chain {
     /// Funding inputs of transactions this node broadcast for blocks that then left the main chain, with the IDs of
     /// those transactions: reserved while any of them may be in the BTC mempool ([`Chain::linger`], D-104).
     lingering: Mutex<Vec<Lingering>>,
+    /// Funding inputs of the blocks whose settlement record was dropped because the main chain no longer accepts them,
+    /// while a later main-chain block may still merge them (D-143): reserved until the block is accepted again, which
+    /// gives it a record, or is beyond the merge depth of the main-chain tip.
+    detached: Mutex<BTreeMap<Hash, Vec<([u8; 32], u32)>>>,
     /// Reason of each settlement record's latest broadcast failure (the same failure is logged only once).
     broadcast_errors: Mutex<BTreeMap<Hash, String>>,
     /// Accepting blocks and committing this node's blocks are mutually exclusive (the main chain does not change
@@ -1278,6 +1282,7 @@ impl Chain {
             open: Mutex::new(open),
             extra_reserved: Mutex::new(BTreeSet::new()),
             lingering: Mutex::new(Vec::new()),
+            detached: Mutex::new(BTreeMap::new()),
             broadcast_errors: Mutex::new(BTreeMap::new()),
             process: Mutex::new(()),
             invalid: Mutex::new(Invalid::default()),
@@ -2632,8 +2637,9 @@ impl Chain {
     }
 
     /// Funding inputs reserved by settlement transactions not yet confirmed (D-037), by rescue settlements, header
-    /// republishing and CPFP children in flight, and by transactions of blocks that left the main chain while they may
-    /// still be in the BTC mempool (D-104).
+    /// republishing and CPFP children in flight, by transactions of blocks that left the main chain while they may
+    /// still be in the BTC mempool (D-104), and by the settlement transactions of blocks that left the main chain while
+    /// a later main-chain block may still merge them (D-143).
     pub fn reserved_inputs(&self) -> Result<BTreeSet<([u8; 32], u32)>, NodeError> {
         let mut reserved: BTreeSet<([u8; 32], u32)> = self
             .open
@@ -2656,23 +2662,33 @@ impl Chain {
                 .iter()
                 .flat_map(|l| l.inputs.iter().copied()),
         );
+        reserved.extend(
+            self.detached
+                .lock()
+                .map_err(poisoned)?
+                .values()
+                .flat_map(|inputs| inputs.iter().copied()),
+        );
         Ok(reserved)
     }
 
     /// Atomically reserves funding inputs: when any of them is already reserved (an open settlement transaction, a
-    /// rescue settlement or republish transaction in flight, a block template being solved), reserves nothing and
+    /// rescue settlement or republish transaction in flight, a block template being solved, the settlement transactions
+    /// of a block that left the main chain and may be merged again), reserves nothing and
     /// returns false. Called by the block production loop and the rescue thread after each has chosen its funding and
     /// before committing the block or broadcasting, guaranteeing that two of this node's transactions in flight at the
     /// same time never spend the same funding output (D-045, D-047).
     pub fn try_reserve_inputs(&self, inputs: &[([u8; 32], u32)]) -> Result<bool, NodeError> {
-        // Same lock order as reserved_inputs: open first, then extra_reserved, then lingering
+        // Same lock order as reserved_inputs: open first, then extra_reserved, then lingering, then detached
         let open = self.open.lock().map_err(poisoned)?;
         let mut reserved = self.extra_reserved.lock().map_err(poisoned)?;
         let lingering = self.lingering.lock().map_err(poisoned)?;
+        let detached = self.detached.lock().map_err(poisoned)?;
         let taken = inputs.iter().any(|input| {
             reserved.contains(input)
                 || open.values().any(|r| r.funding_inputs.contains(input))
                 || lingering.iter().any(|l| l.inputs.contains(input))
+                || detached.values().any(|d| d.contains(input))
         });
         if !taken {
             reserved.extend(inputs.iter().copied());
@@ -2742,14 +2758,48 @@ impl Chain {
         Ok(())
     }
 
+    /// Releases the funding inputs of the blocks that left the main chain (`detached`, D-143) once no main-chain block
+    /// can merge them any more: pruned from the DAG, or beyond the merge depth of the main-chain tip (a merged block
+    /// needs `blue_score + MERGE_DEPTH ≥ blue_score(SP)`). A block accepted again has a settlement record instead.
+    fn release_detached(&self) -> Result<(), NodeError> {
+        let hashes: Vec<Hash> = self
+            .detached
+            .lock()
+            .map_err(poisoned)?
+            .keys()
+            .copied()
+            .collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let tip = self.tip()?.hash;
+        let gone: BTreeSet<Hash> = {
+            let dag = self.dag()?;
+            let tip_score = dag.data(&tip).map_or(0, |d| d.blue_score);
+            let mergeable = |hash: &Hash| {
+                dag.data(hash).is_some_and(|d| {
+                    d.blue_score.saturating_add(self.params.merge_depth) >= tip_score
+                })
+            };
+            hashes.into_iter().filter(|h| !mergeable(h)).collect()
+        };
+        self.detached
+            .lock()
+            .map_err(poisoned)?
+            .retain(|hash, _| !gone.contains(hash));
+        Ok(())
+    }
+
     /// Delayed broadcast and rebroadcast of settlement transactions (D-037, D-063): broadcast when the main-chain block
     /// that accepted the block has `SETTLEMENT_DEPTH` confirmations; rebroadcast those already broadcast but neither in
     /// the mempool nor confirmed (e.g. evicted after a BTC reorg); close the record once all the data the settlement
     /// carries has landed with `BTC_FINALITY_CONFS` confirmations. A settlement that confirmed and counted without
     /// landing it (D-135) keeps its record open for the rescuer, which sends its payload again. First releases the
-    /// lingering funding inputs of transactions no longer in the mempool ([`Chain::linger`], D-104).
+    /// lingering funding inputs of transactions no longer in the mempool ([`Chain::linger`], D-104) and those of the
+    /// blocks that left the main chain and can no longer be merged (D-143).
     pub fn process_settlements(&self) -> Result<(), NodeError> {
         self.release_lingering()?;
+        self.release_detached()?;
         let snapshot = self.btc.snapshot()?;
         let btc_tip = snapshot.tip().map(|(h, _)| h).unwrap_or(0);
         let tip_height = self.tip()?.header.height;
@@ -2758,8 +2808,16 @@ impl Chain {
         for (block_hash, mut record) in records {
             if self.accepted_height(&block_hash)? != Some(record.height) {
                 // The block is no longer accepted by the main chain (e.g. cleanup unfinished before a crash): stop
-                // broadcasting
-                self.open.lock().map_err(poisoned)?.remove(&block_hash);
+                // broadcasting; its funding inputs stay reserved while it may be merged again (D-143)
+                let mut open = self.open.lock().map_err(poisoned)?;
+                if open.remove(&block_hash).is_some()
+                    && self.accepted_height(&block_hash)?.is_none()
+                {
+                    self.detached
+                        .lock()
+                        .map_err(poisoned)?
+                        .insert(block_hash, record.funding_inputs.clone());
+                }
                 continue;
             }
             let landed = match self.store.block(&block_hash)? {
@@ -4764,7 +4822,10 @@ impl Chain {
         }
         {
             let mut open = self.open.lock().map_err(poisoned)?;
+            let mut detached = self.detached.lock().map_err(poisoned)?;
             for (block_hash, record) in records {
+                // Accepted again: the record holds the funding inputs from here on (D-143)
+                detached.remove(&block_hash);
                 open.insert(block_hash, record);
             }
         }
@@ -4858,7 +4919,10 @@ impl Chain {
 
     /// Drops the settlement records of the blocks the main chain no longer accepts (the caller holds `open`), with an
     /// alert for those already broadcast: their transactions may be in the BTC mempool, or come back to it with a BTC
-    /// reorg, so their funding inputs stay reserved meanwhile ([`Chain::linger`], D-104).
+    /// reorg, so their funding inputs stay reserved meanwhile ([`Chain::linger`], D-104). A later main-chain block may
+    /// merge such a block and its settlement transactions go out then, so their funding inputs stay reserved as well
+    /// until it is accepted again or beyond the merge depth (`detached`, D-143): the block this node produces next
+    /// would otherwise fund its own settlement with the same outputs, and only one of the two pairs can confirm.
     fn drop_records(
         &self,
         open: &mut BTreeMap<Hash, SettlementRecord>,
@@ -4868,6 +4932,10 @@ impl Chain {
             let Some(record) = open.remove(&block.header.hash()) else {
                 continue;
             };
+            self.detached
+                .lock()
+                .map_err(poisoned)?
+                .insert(block.header.hash(), record.funding_inputs.clone());
             if !record.broadcast {
                 continue;
             }
