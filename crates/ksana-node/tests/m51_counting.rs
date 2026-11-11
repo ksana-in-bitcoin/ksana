@@ -7,15 +7,17 @@
 //!   later block's payload has counted the child's header in the meantime;
 //! - a settlement that has not confirmed `IN_FLIGHT_BTC_BLOCKS` after its anchor no longer stops the next payload's
 //!   search: that payload carries its header, so the next block's data lands without waiting for it, and its own body
-//!   lands when it confirms after its header has counted.
+//!   lands when it confirms after its header has counted;
+//! - a settlement known to land nothing is not waited for (D-143): the next payload carries the header of a block whose
+//!   settlement bitcoind refused, and that of a block whose settlement relied on it, so the blocks after them land.
 
 mod common;
 
 use bitcoin::hashes::Hash;
-use bitcoin::Transaction;
+use bitcoin::{absolute, transaction, Amount, Sequence, Transaction, TxIn, TxOut, Witness};
 use common::side::{setup, Side};
 use common::{transfer_op, user};
-use ksana_btc::mock::MockBtc;
+use ksana_btc::mock::{coinbase_script, MockBtc};
 use ksana_btc::payload::{attached_payload, envelope_payload};
 use ksana_btc::settlement::SettlementPair;
 use ksana_node::rescue::Rescuer;
@@ -282,4 +284,96 @@ fn a_settlement_late_by_more_than_the_in_flight_window_has_its_header_carried_by
         snapshot.block_data_height(&late.header.hash()),
         Some(height + 1)
     );
+}
+
+/// Confirms a transaction spending the funding output of the block's settlement: bitcoind refuses the settlement from
+/// then on.
+fn spend_funding(mock: &MockBtc, pair: &SettlementPair) {
+    mock.mine_block(vec![Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: pair.commit.input[0].previous_output,
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: coinbase_script(),
+        }],
+    }])
+    .unwrap();
+}
+
+/// The next block with entries, after the op is submitted.
+fn mine_with(side: &Side, op: ksana_primitives::VmOp) -> Block {
+    side.submit(op);
+    loop {
+        let block = side.mine();
+        if !block.entries.is_empty() {
+            return block;
+        }
+    }
+}
+
+/// bitcoind refuses a block's settlement after the next block's payload was built relying on it (D-143). The payloads
+/// after that carry the header of the refused block and that of the block relying on it, whose settlement is still in
+/// the mempool: both count with the first of them, and the settlements after it land instead of landing nothing one
+/// after another.
+#[test]
+fn a_settlement_known_to_land_nothing_is_not_waited_for() {
+    let (alice, bob) = (user("m56/doom/alice"), user("m56/doom/bob"));
+    let (mock, genesis) = setup(&[(&alice, 1_000)]);
+    let a = Side::new(&mock, &genesis, "m56-doom");
+    let refused = mine_with(&a, transfer_op(&alice, 0, 2, bob.account, 7));
+    // Built while the first settlement is taken to be in flight: its payload relies on it
+    let relying = mine_with(&a, transfer_op(&alice, 1, 2, bob.account, 8));
+    assert_eq!(payload_headers(&relying), vec![relying.header.clone()]);
+
+    spend_funding(&mock, &pair_of(&refused));
+    for _ in 0..DEVNET.settlement_depth {
+        a.mine();
+    }
+    a.chain.process_settlements().unwrap();
+    assert!(!mock
+        .mempool()
+        .iter()
+        .any(|tx| tx.compute_txid().to_byte_array() == pair_of(&refused).txid()));
+    assert!(mock
+        .mempool()
+        .iter()
+        .any(|tx| tx.compute_txid().to_byte_array() == pair_of(&relying).txid()));
+
+    // The next payload waits for neither: it carries both headers, and those of the empty blocks in between
+    let next = mine_with(&a, transfer_op(&alice, 2, 2, bob.account, 9));
+    let carried = payload_headers(&next);
+    assert_eq!(carried.first(), Some(&refused.header));
+    assert!(carried.contains(&relying.header));
+    assert_eq!(carried.last(), Some(&next.header));
+    // The one after it relies on a settlement that lands: it carries no header twice
+    let after = mine_with(&a, transfer_op(&alice, 3, 2, bob.account, 10));
+    let carried = payload_headers(&after);
+    assert!(!carried.contains(&refused.header) && !carried.contains(&relying.header));
+    assert!(!carried.contains(&next.header));
+
+    for _ in 0..DEVNET.settlement_depth {
+        a.mine();
+    }
+    a.chain.process_settlements().unwrap();
+    mock.mine(1);
+    a.sync();
+    let snapshot = a.chain.btc().snapshot().unwrap();
+    let height = mock.tip_height();
+    for block in [&refused, &relying, &next, &after] {
+        assert_eq!(snapshot.counted_at(&block.header.hash()), Some(height));
+    }
+    // The refused block's body waits for a rescue; the others landed with their own settlements
+    assert_eq!(snapshot.block_data_height(&refused.header.hash()), None);
+    for block in [&relying, &next, &after] {
+        assert_eq!(
+            snapshot.block_data_height(&block.header.hash()),
+            Some(height)
+        );
+    }
 }

@@ -339,6 +339,25 @@ pub struct BlockInfo {
 
 type Dag = BlockDag<BlockInfo>;
 
+/// What [`Chain::payload_carry`] reads from the settlement transactions a block carries (D-143): the reveal's txid and
+/// the hashes of the headers in the payload.
+struct CarrierPayload {
+    txid: [u8; 32],
+    headers: BTreeSet<Hash>,
+}
+
+/// The state of one search of [`Chain::payload_carry`] for settlements that will land nothing (D-143).
+struct Doom<'a> {
+    snapshot: &'a BtcSnapshot,
+    btc_tip: u32,
+    /// The blocks whose settlement transactions bitcoind refused.
+    refused: BTreeSet<Hash>,
+    /// The verdicts so far.
+    known: BTreeMap<Hash, bool>,
+    /// Blocks still to examine, [`PAYLOAD_HEADER_SEARCH`] in all.
+    budget: usize,
+}
+
 /// Options for opening the chain (local, not consensus).
 #[derive(Clone, Default)]
 pub struct ChainOptions {
@@ -837,7 +856,11 @@ pub struct Chain {
     /// while a later main-chain block may still merge them (D-143): reserved until the block is accepted again, which
     /// gives it a record, or is beyond the merge depth of the main-chain tip.
     detached: Mutex<BTreeMap<Hash, Vec<([u8; 32], u32)>>>,
-    /// Reason of each settlement record's latest broadcast failure (the same failure is logged only once).
+    /// The settlement payloads [`Chain::payload_carry`] last examined (D-143), `None` for a block without a readable
+    /// one: decoded once per block, kept while the search still reaches the block.
+    carrier_payloads: Mutex<BTreeMap<Hash, Option<Arc<CarrierPayload>>>>,
+    /// Reason of each settlement record's latest broadcast failure (the same failure is logged only once), removed once
+    /// a broadcast succeeds: while it is there the block's settlement is known not to be in flight (D-143).
     broadcast_errors: Mutex<BTreeMap<Hash, String>>,
     /// Accepting blocks and committing this node's blocks are mutually exclusive (the main chain does not change
     /// between validation and connection).
@@ -1283,6 +1306,7 @@ impl Chain {
             extra_reserved: Mutex::new(BTreeSet::new()),
             lingering: Mutex::new(Vec::new()),
             detached: Mutex::new(BTreeMap::new()),
+            carrier_payloads: Mutex::new(BTreeMap::new()),
             broadcast_errors: Mutex::new(BTreeMap::new()),
             process: Mutex::new(()),
             invalid: Mutex::new(Invalid::default()),
@@ -2858,6 +2882,10 @@ impl Chain {
                 .map_err(|e| NodeError::Btc(e.to_string()))?
             {
                 Ok(()) => {
+                    self.broadcast_errors
+                        .lock()
+                        .map_err(poisoned)?
+                        .remove(&block_hash);
                     if !record.broadcast {
                         eprintln!(
                             "[ksana-node] broadcast settlement transactions height={} block={} commit txid={} reveal txid={}",
@@ -3316,6 +3344,132 @@ impl Chain {
         parents: &[Hash],
         snapshot: &BtcSnapshot,
     ) -> Result<Carry, NodeError> {
+        let btc_tip = snapshot.tip().map_or(0, |(h, _)| h);
+        let mut doom = Doom {
+            snapshot,
+            btc_tip,
+            refused: self
+                .broadcast_errors
+                .lock()
+                .map_err(poisoned)?
+                .keys()
+                .copied()
+                .collect(),
+            known: BTreeMap::new(),
+            budget: PAYLOAD_HEADER_SEARCH,
+        };
+        let (carry, complete, doomed) = self.search_carry(parents, snapshot, Some(&mut doom))?;
+        // The payloads decoded for blocks the search no longer reaches are dropped
+        self.carrier_payloads
+            .lock()
+            .map_err(poisoned)?
+            .retain(|hash, _| doom.known.contains_key(hash));
+        if complete || !doomed {
+            return Ok(carry);
+        }
+        // The headers a settlement known to land nothing leaves uncounted do not all fit: this payload would land
+        // nothing with or without them, so it stays small and republishing lands the headers first (D-143)
+        Ok(self.search_carry(parents, snapshot, None)?.0)
+    }
+
+    /// Whether the settlement of block `hash`, which carries one, whose header has not counted and whose anchor is
+    /// recent, is known to land nothing when it confirms (local policy, D-143): bitcoind refused it, or it confirmed
+    /// already, or a header it needs from outside its payload is that of a block whose own settlement did not confirm
+    /// in time or is known to land nothing. Its payload relies on the settlements in flight when it was built: the
+    /// search goes from its parents through the blocks whose header has not counted and stops at a block that carries a
+    /// settlement and is not in the payload, which is examined in the same way. `false` when the payload cannot be read
+    /// or the search budget is spent: the settlement is then taken to be in flight, as before D-143.
+    fn lands_nothing(
+        &self,
+        dag: &Dag,
+        doom: &mut Doom<'_>,
+        hash: &Hash,
+    ) -> Result<bool, NodeError> {
+        if let Some(known) = doom.known.get(hash) {
+            return Ok(*known);
+        }
+        doom.known.insert(*hash, false);
+        let Some(payload) = self.carrier_payload(hash)? else {
+            return Ok(false);
+        };
+        let mut nothing =
+            doom.refused.contains(hash) || doom.snapshot.ksn1_height(&payload.txid).is_some();
+        let mut stack: Vec<Hash> = dag.get(hash).map_or_else(Vec::new, |b| b.parents.clone());
+        let mut seen = BTreeSet::new();
+        while let Some(next) = stack.pop().filter(|_| !nothing) {
+            if !seen.insert(next) || doom.snapshot.counted_at(&next).is_some() {
+                continue;
+            }
+            let Some(block) = dag.get(&next) else {
+                continue;
+            };
+            if next == *dag.genesis() {
+                continue;
+            }
+            let Some(left) = doom.budget.checked_sub(1) else {
+                break;
+            };
+            doom.budget = left;
+            if block.payload.carries && !payload.headers.contains(&next) {
+                let recent = doom
+                    .btc_tip
+                    .saturating_sub(block.payload.header.btc_anchor.height)
+                    <= IN_FLIGHT_BTC_BLOCKS;
+                nothing = !recent || self.lands_nothing(dag, doom, &next)?;
+                continue;
+            }
+            stack.extend(block.parents.iter().copied());
+        }
+        doom.known.insert(*hash, nothing);
+        Ok(nothing)
+    }
+
+    /// The reveal txid and the payload's header hashes of the settlement transactions block `hash` carries, from
+    /// [`Chain::carrier_payloads`] or the block store; `None` when it has no readable settlement payload.
+    fn carrier_payload(&self, hash: &Hash) -> Result<Option<Arc<CarrierPayload>>, NodeError> {
+        if let Some(cached) = self.carrier_payloads.lock().map_err(poisoned)?.get(hash) {
+            return Ok(cached.clone());
+        }
+        let read = || -> Result<Option<CarrierPayload>, NodeError> {
+            let Some(block) = self.store.block(hash)? else {
+                return Ok(None);
+            };
+            let Some(pair) = block
+                .settlement
+                .as_ref()
+                .and_then(|txs| settlement::decode(txs).ok())
+            else {
+                return Ok(None);
+            };
+            let headers = match settlement::attached_payload(&self.params, &pair)
+                .and_then(|payload| Payload::decode(&payload, &self.params).ok())
+            {
+                Some(Payload::Settlement { headers, .. }) => headers,
+                _ => return Ok(None),
+            };
+            Ok(Some(CarrierPayload {
+                txid: pair.txid(),
+                headers: headers.iter().map(BlockHeader::hash).collect(),
+            }))
+        };
+        let payload = read()?.map(Arc::new);
+        self.carrier_payloads
+            .lock()
+            .map_err(poisoned)?
+            .insert(*hash, payload.clone());
+        Ok(payload)
+    }
+
+    /// The search of [`Chain::payload_carry`]. With `doom`, a block whose settlement is known to land nothing
+    /// ([`Chain::lands_nothing`]) is not taken to be in flight. Returns the data to carry, whether it holds every header
+    /// the search found (none left out for the header count, the search limit or the header budget), and whether a
+    /// settlement known to land nothing was found.
+    fn search_carry(
+        &self,
+        parents: &[Hash],
+        snapshot: &BtcSnapshot,
+        mut doom: Option<&mut Doom<'_>>,
+    ) -> Result<(Carry, bool, bool), NodeError> {
         let keep = self.params.max_settlement_headers.saturating_sub(1);
         let dag = self.dag()?;
         let genesis = *dag.genesis();
@@ -3340,9 +3494,12 @@ impl Chain {
         }
         let mut found = Vec::new();
         let mut in_flight = false;
+        let mut complete = true;
+        let mut doomed = false;
         let btc_tip = snapshot.tip().map_or(0, |(h, _)| h);
         while let Some((work, hash)) = heap.pop() {
             if found.len() >= keep || seen.len() > PAYLOAD_HEADER_SEARCH {
+                complete = false;
                 break;
             }
             if hash == genesis {
@@ -3361,10 +3518,17 @@ impl Chain {
                 // confirm in time, or confirmed before a header it needs counted
                 let recent = btc_tip.saturating_sub(block.payload.header.btc_anchor.height)
                     <= IN_FLIGHT_BTC_BLOCKS;
-                if recent {
+                // A settlement known to land nothing is not waited for (D-143): the blocks after it would rely on it
+                // one after another, and each of their settlements would land nothing in turn
+                let nothing = match doom.as_deref_mut() {
+                    Some(doom) if recent => self.lands_nothing(&dag, doom, &hash)?,
+                    _ => false,
+                };
+                if recent && !nothing {
                     in_flight = true;
                     continue;
                 }
+                doomed |= nothing;
                 found.push((work, block.payload.header.clone(), None));
                 bodies = false;
             } else {
@@ -3404,11 +3568,13 @@ impl Chain {
             }
         }
         found.sort_by_key(|(work, _, _)| *work);
-        let items = found.into_iter().map(|(_, h, b)| (h, b)).collect();
+        let items: Vec<_> = found.into_iter().map(|(_, h, b)| (h, b)).collect();
         let max = self.params.max_block_data_bytes;
+        let count = items.len();
         let mut carry = trim_carry(items, max / PAYLOAD_HEADER_SHARE, max / PAYLOAD_BODY_SHARE)?;
         carry.in_flight = in_flight;
-        Ok(carry)
+        complete &= carry.headers.len() == count;
+        Ok((carry, complete, doomed))
     }
 
     /// Accepts a block (D-041, D-063): `now` as the local time means a newly received block (checked by the acceptance
