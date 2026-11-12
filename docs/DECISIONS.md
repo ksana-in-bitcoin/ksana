@@ -5229,3 +5229,30 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   machine; the hosted signet's two producers logged none in 431 settlements. So this entry removes the failure's effect, not its cause, and the producer logs each occurrence with the two
   lengths so that the next one can be examined. The test covers `redraft` with a payload made not to fit; the producer's branch itself is not covered by a test.
 - **Impact**: `crates/ksana-btc` (`settlement::redraft`); `crates/ksana-node` (`producer.rs`); tests (`settlement.rs`); SPEC (the version history, §7.2); D-141.
+
+## D-145 Settlement transactions bitcoind learns during the check are accepted (fourth load test of the public signet, 2026-11-12; revises D-081's check; local policy, M58)
+
+- **Problem**: a node that receives a block checks its settlement transactions with bitcoind (D-034, D-081): `test_settlement` looks the reveal and the commit transaction up, and has
+  `testmempoolaccept` check what bitcoind does not know. The nodes that have the block broadcast the pair once it is `SETTLEMENT_DEPTH` (2) deep (D-037). A node that receives the block
+  about then, one behind the tip, may find its bitcoind learning the pair after the lookups and before the check: bitcoind refuses it as `txn-already-in-mempool`, the
+  node takes that for a rejection and does not accept the block for now, and falls further behind until it gets the block again. In the fourth load test (v0.2.1, 15 nodes behind one
+  bitcoind, 8 of them funded) the nodes logged this refusal 390 times in two hours (89 in the third, where only the two seed nodes were funded): 373 of them
+  within a second of a node logging the broadcast of the pair of a block at that height, most on the nodes in Frankfurt, Virginia and São Paulo and none on the four in Tokyo and Seoul, the nearest to
+  that bitcoind.
+- **Decision**: `test_settlement` takes "bitcoind already has it" for what the lookup would have found. When the package is refused because bitcoind knows a transaction (the reason
+  starts with `txn-already-in-mempool` or `txn-already-known`; a package is refused at its first transaction, the commit), the reveal transaction is checked alone, as when the lookup
+  finds the commit transaction; and a reveal transaction refused for that reason is accepted, as when the lookup finds it. Any other reason is a rejection as before, and the check
+  that the commit transaction's inputs are unspent in bitcoind's UTXO set is unchanged. The rescue's test of a block's attached pair (`Rescuer`) uses the same function. Separately, the
+  producer logs a block it solved and then dropped because the tip changed before the block was committed (`Chain::commit_block` returning `TipChanged`), with the time since the solution
+  and since the template was started; until now that was silent.
+- **Rationale**: a transaction in bitcoind's mempool has passed the very check the node was about to ask for, so the refusal carries no information against the block; the lookup already
+  accepted the same state when it came first, and only the order of two calls decided between accepting and refusing. Reading the reason costs one more call on that path only, and no
+  call on the others. The log is there because the fourth test's funded nodes in Frankfurt and São Paulo produced 31 and 26 blocks in two hours, against 163 and 185 in the third
+  test, where they were not funded, and the nodes said nothing about why.
+- **Costs and limitations**: the reasons are Bitcoin Core's strings (28.4 on regtest: `txn-already-in-mempool` for the package and for the reveal alone; `txn-already-known` for a
+  confirmed reveal whose output is unspent); another implementation, or a change of wording, brings the old behavior back, not a wrong acceptance. A pair that a BTC block confirms
+  between the lookups and the check is not covered: the commit transaction's only output is spent by the reveal, so bitcoind refuses the package as `missing-inputs`, and the node does
+  not accept the block for now, as before. That the dropped blocks of the funded nodes far from bitcoind are tip changes during the calls to bitcoind is a reading of the code, not
+  measured: the log is what will show it. The log line itself has no test.
+- **Impact**: `crates/ksana-node` (`chain.rs`: `test_settlement`, `known_to_bitcoind`; `producer.rs`); tests (`m58_settlement_check.rs`, `tests/integration/tests/m5_regtest.rs`); SPEC
+  (the version history, §7.2).
