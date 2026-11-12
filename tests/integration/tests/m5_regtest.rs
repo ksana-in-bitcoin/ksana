@@ -319,6 +319,50 @@ fn offline_producers_settlement_is_broadcast_by_other_nodes() {
     assert_eq!(net.nodes[2].ksa(&bob), 7);
 }
 
+/// D-145 on real bitcoind: a node looks a block's settlement transactions up and has `testmempoolaccept` check the
+/// ones bitcoind does not know; bitcoind may learn them in between (the nodes that have the block broadcast them once
+/// it is `SETTLEMENT_DEPTH` deep), and refuses what it has as `txn-already-in-mempool`, or `txn-already-known` once
+/// confirmed. The check accepts those, and still refuses a reveal transaction bitcoind would not take.
+#[test]
+fn settlement_transactions_bitcoind_learns_during_the_check_are_accepted() {
+    use ksana_btc::client::BtcClient;
+    use ksana_node::chain::test_settlement;
+
+    let btc = Btc::from_env().funded_wallet("ksana-it-m5");
+    let bob = user("known/bob");
+    let (net, _, attached) = offline_setup(&btc, "m5/known", &bob);
+    let client = &net.nodes[1].recorder;
+    let unseen = |txids: &[[u8; 32]]| *client.unseen.lock().unwrap() = txids.to_vec();
+    let check = |pair: &SettlementPair| test_settlement(client.as_ref(), pair).unwrap();
+    let both = [attached.commit_txid(), attached.txid()];
+    unseen(&both);
+    assert_eq!(check(&attached), Ok(()), "bitcoind has neither");
+
+    // The commit transaction arrived after the lookups: the package is refused at it, the reveal transaction alone
+    // is accepted
+    btc.send(&attached.commit);
+    let refused = client.inner.test_accept(&attached.txs()).unwrap();
+    assert!(refused.is_err_and(|reason| reason.starts_with("txn-already-in-mempool")));
+    assert_eq!(check(&attached), Ok(()));
+    let mut invalid = attached.clone();
+    invalid.reveal.input[0].previous_output.vout = 7;
+    let refused = check(&invalid).unwrap_err();
+    assert!(!refused.starts_with("txn-already"), "{refused}");
+
+    // Both arrived after the lookups
+    btc.send(&attached.reveal);
+    let refused = client.inner.test_accept(&[&attached.reveal]).unwrap();
+    assert!(refused.is_err_and(|reason| reason.starts_with("txn-already-in-mempool")));
+    assert_eq!(check(&attached), Ok(()));
+
+    // A BTC block confirmed both between the lookup of the reveal transaction and that of the commit transaction
+    mine(&btc, 1);
+    unseen(&[attached.txid()]);
+    let refused = client.inner.test_accept(&[&attached.reveal]).unwrap();
+    assert!(refused.is_err_and(|reason| reason.starts_with("txn-already-known")));
+    assert_eq!(check(&attached), Ok(()));
+}
+
 /// Acceptance 3 (rescue): producer A goes offline right after including the op, and the settlement transaction
 /// carried by the block is invalid (its funding input was spent elsewhere): the other nodes start a rescue settlement
 /// in fast-lane order (D-057: the producer of the k-th block after that block waits k BTC blocks after finding it
