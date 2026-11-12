@@ -831,6 +831,7 @@ impl Producer {
             }
         }
 
+        let solved = monotonic_now();
         let settlement = match (draft, &self.funding) {
             (Some(draft), Some(funding)) => {
                 let mut payload_headers = payload_headers;
@@ -888,7 +889,19 @@ impl Producer {
             entries,
             settlement,
         };
-        chain.commit_block(&block, outcome)?;
+        if let Err(e) = chain.commit_block(&block, outcome) {
+            if matches!(e, NodeError::TipChanged) {
+                // The tip moved while the block was being solved or its settlement checked with bitcoind: the block is
+                // dropped (D-145 has it logged, a node dropping many being too far from the others or from bitcoind)
+                eprintln!(
+                    "[ksana-node] dropping a solved block at height {}: the tip changed {} ms after it was solved, {} ms after its template was started",
+                    block.header.height,
+                    solved.elapsed().as_millis(),
+                    building.elapsed().as_millis()
+                );
+            }
+            return Err(e);
+        }
         drop(reserved);
         self.after_commit(template.merged, &block)?;
         if let Some(announce) = &self.announce {
