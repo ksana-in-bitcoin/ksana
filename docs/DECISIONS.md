@@ -5256,3 +5256,22 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   measured: the log is what will show it. The log line itself has no test.
 - **Impact**: `crates/ksana-node` (`chain.rs`: `test_settlement`, `known_to_bitcoind`; `producer.rs`); tests (`m58_settlement_check.rs`, `tests/integration/tests/m5_regtest.rs`); SPEC
   (the version history, §7.2).
+
+## D-146 The nonce alone can take the final payload past its draft (fourth load test of the public signet, 2026-11-12; follows D-144; a log line only, M58)
+
+- **Problem**: D-144 left the cause of a final payload not fitting its draft open and had the producer log each occurrence. The fourth load test logged one, on the funded node in
+  São Paulo: "payload 17851 bytes, 13875 reserved". The two figures cannot be compared: the first is the payload before compression, the second the draft's envelope data, its zstd
+  frame of 13 843 bytes plus `SLACK`. So the line says only that the final frame was at least 33 bytes longer than the draft's, not by how much; and the node did not get that block
+  onto the chain (its peers were ahead by then), so the payload cannot be read back from Bitcoin.
+- **Decision**: nothing changes but the log. The producer logs the occurrence after drafting again, with the payload's length and the envelope data's length in both drafts; the two
+  are padded alike, so their difference is the difference of the two frames. `SLACK` stays 32 and the redraft of D-144 stays the answer.
+- **Rationale**: between the draft and the final payload only the nonce of the last header changes (the template has it 0 and solving writes nothing else), and that is enough. Measured
+  with the node's compressor on the 386 settlement payloads the fourth test confirmed on Bitcoin, with the last header's nonce replaced: the frame's length is a step function of the
+  nonce's bytes, not a smooth one (one payload: 2 433 of the nonces 1 to 3 000 at +6 bytes from nonce 0, 254 at 0, 249 at −23). Over those 1 158 000 samples it moved by −34 to +20
+  bytes, and by at most +22 with random nonces of one to eight significant bytes, so none of these payloads would have needed a second draft. On the 3 544 payloads made from them by
+  ending the list of headers at each header in turn, 25 nonces each, 14 have a nonce that moves the frame by more than 32 bytes, up to +54, and 2 do so with the header's own nonce
+  (+39 and +43). A bound that holds for every payload would cost every settlement its bytes, where the second draft costs one more compression in a fraction of a percent of them.
+- **Costs and limitations**: the payload of the occurrence is lost, so that it was this and nothing else is an inference from the code and from the rate (one occurrence beside
+  the test's 385 confirmed settlements, against 2 in 3 544 measured); the shortened payloads are not ones a node made, their entries belonging to another header; and the two failures
+  of D-144 (payloads of about 1.3 kB) were not measured again. The measurement was made beside the repository and is not among its tests.
+- **Impact**: `crates/ksana-node` (`producer.rs`: the log line); D-144.

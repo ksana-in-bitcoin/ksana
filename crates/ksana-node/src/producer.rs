@@ -848,11 +848,6 @@ impl Producer {
                     // The final payload does not fit what the draft reserved (D-144): the block is solved, so the pair
                     // is drafted again for the final payload over the same inputs, which stay reserved
                     Err(SettlementError::Invalid(why)) => {
-                        eprintln!(
-                            "[ksana-node] the final settlement payload does not fit its draft ({why}; payload {} bytes, {} reserved): drafting the settlement transactions again over the same inputs",
-                            payload.len(),
-                            draft.data_len
-                        );
                         let again = redraft(
                             params,
                             &draft,
@@ -861,6 +856,14 @@ impl Producer {
                             drafted_at.max(params.min_settlement_feerate_sat_vb),
                         )
                         .map_err(signing)?;
+                        // Both lengths are of the envelope's data, each a zstd frame and the same padding (or the
+                        // payload itself): their difference is how far the two frames are apart
+                        eprintln!(
+                            "[ksana-node] the final settlement payload does not fit its draft ({why}): the payload is {} bytes, its envelope data {} bytes drafted again where the draft had {}; drafting the settlement transactions again over the same inputs",
+                            payload.len(),
+                            again.data_len,
+                            draft.data_len
+                        );
                         finalize(params, again, &payload, &funding.keypair).map_err(signing)?
                     }
                     Err(e) => return Err(signing(e)),
