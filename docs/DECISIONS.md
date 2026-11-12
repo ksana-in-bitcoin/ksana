@@ -5229,3 +5229,49 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   machine; the hosted signet's two producers logged none in 431 settlements. So this entry removes the failure's effect, not its cause, and the producer logs each occurrence with the two
   lengths so that the next one can be examined. The test covers `redraft` with a payload made not to fit; the producer's branch itself is not covered by a test.
 - **Impact**: `crates/ksana-btc` (`settlement::redraft`); `crates/ksana-node` (`producer.rs`); tests (`settlement.rs`); SPEC (the version history, §7.2); D-141.
+
+## D-145 Settlement transactions bitcoind learns during the check are accepted (fourth load test of the public signet, 2026-11-12; revises D-081's check; local policy, M58)
+
+- **Problem**: a node that receives a block checks its settlement transactions with bitcoind (D-034, D-081): `test_settlement` looks the reveal and the commit transaction up, and has
+  `testmempoolaccept` check what bitcoind does not know. The nodes that have the block broadcast the pair once it is `SETTLEMENT_DEPTH` (2) deep (D-037). A node that receives the block
+  about then, one behind the tip, may find its bitcoind learning the pair after the lookups and before the check: bitcoind refuses it as `txn-already-in-mempool`, the
+  node takes that for a rejection and does not accept the block for now, and falls further behind until it gets the block again. In the fourth load test (v0.2.1, 15 nodes behind one
+  bitcoind, 8 of them funded) the nodes logged this refusal 390 times in two hours (89 in the third, where only the two seed nodes were funded): 373 of them
+  within a second of a node logging the broadcast of the pair of a block at that height, most on the nodes in Frankfurt, Virginia and São Paulo and none on the four in Tokyo and Seoul, the nearest to
+  that bitcoind.
+- **Decision**: `test_settlement` takes "bitcoind already has it" for what the lookup would have found. When the package is refused because bitcoind knows a transaction (the reason
+  starts with `txn-already-in-mempool` or `txn-already-known`; a package is refused at its first transaction, the commit), the reveal transaction is checked alone, as when the lookup
+  finds the commit transaction; and a reveal transaction refused for that reason is accepted, as when the lookup finds it. Any other reason is a rejection as before, and the check
+  that the commit transaction's inputs are unspent in bitcoind's UTXO set is unchanged. The rescue's test of a block's attached pair (`Rescuer`) uses the same function. Separately, the
+  producer logs a block it solved and then dropped because the tip changed before the block was committed (`Chain::commit_block` returning `TipChanged`), with the time since the solution
+  and since the template was started; until now that was silent.
+- **Rationale**: a transaction in bitcoind's mempool has passed the very check the node was about to ask for, so the refusal carries no information against the block; the lookup already
+  accepted the same state when it came first, and only the order of two calls decided between accepting and refusing. Reading the reason costs one more call on that path only, and no
+  call on the others. The log is there because the fourth test's funded nodes in Frankfurt and São Paulo produced 31 and 26 blocks in two hours, against 163 and 185 in the third
+  test, where they were not funded, and the nodes said nothing about why.
+- **Costs and limitations**: the reasons are Bitcoin Core's strings (28.4 on regtest: `txn-already-in-mempool` for the package and for the reveal alone; `txn-already-known` for a
+  confirmed reveal whose output is unspent); another implementation, or a change of wording, brings the old behavior back, not a wrong acceptance. A pair that a BTC block confirms
+  between the lookups and the check is not covered: the commit transaction's only output is spent by the reveal, so bitcoind refuses the package as `missing-inputs`, and the node does
+  not accept the block for now, as before. That the dropped blocks of the funded nodes far from bitcoind are tip changes during the calls to bitcoind is a reading of the code, not
+  measured: the log is what will show it. The log line itself has no test.
+- **Impact**: `crates/ksana-node` (`chain.rs`: `test_settlement`, `known_to_bitcoind`; `producer.rs`); tests (`m58_settlement_check.rs`, `tests/integration/tests/m5_regtest.rs`); SPEC
+  (the version history, §7.2).
+
+## D-146 The nonce alone can take the final payload past its draft (fourth load test of the public signet, 2026-11-12; follows D-144; a log line only, M58)
+
+- **Problem**: D-144 left the cause of a final payload not fitting its draft open and had the producer log each occurrence. The fourth load test logged one, on the funded node in
+  São Paulo: "payload 17851 bytes, 13875 reserved". The two figures cannot be compared: the first is the payload before compression, the second the draft's envelope data, its zstd
+  frame of 13 843 bytes plus `SLACK`. So the line says only that the final frame was at least 33 bytes longer than the draft's, not by how much; and the node did not get that block
+  onto the chain (its peers were ahead by then), so the payload cannot be read back from Bitcoin.
+- **Decision**: nothing changes but the log. The producer logs the occurrence after drafting again, with the payload's length and the envelope data's length in both drafts; the two
+  are padded alike, so their difference is the difference of the two frames. `SLACK` stays 32 and the redraft of D-144 stays the answer.
+- **Rationale**: between the draft and the final payload only the nonce of the last header changes (the template has it 0 and solving writes nothing else), and that is enough. Measured
+  with the node's compressor on the 386 settlement payloads the fourth test confirmed on Bitcoin, with the last header's nonce replaced: the frame's length is a step function of the
+  nonce's bytes, not a smooth one (one payload: 2 433 of the nonces 1 to 3 000 at +6 bytes from nonce 0, 254 at 0, 249 at −23). Over those 1 158 000 samples it moved by −34 to +20
+  bytes, and by at most +22 with random nonces of one to eight significant bytes, so none of these payloads would have needed a second draft. On the 3 544 payloads made from them by
+  ending the list of headers at each header in turn, 25 nonces each, 14 have a nonce that moves the frame by more than 32 bytes, up to +54, and 2 do so with the header's own nonce
+  (+39 and +43). A bound that holds for every payload would cost every settlement its bytes, where the second draft costs one more compression in a fraction of a percent of them.
+- **Costs and limitations**: the payload of the occurrence is lost, so that it was this and nothing else is an inference from the code and from the rate (one occurrence beside
+  the test's 385 confirmed settlements, against 2 in 3 544 measured); the shortened payloads are not ones a node made, their entries belonging to another header; and the two failures
+  of D-144 (payloads of about 1.3 kB) were not measured again. The measurement was made beside the repository and is not among its tests.
+- **Impact**: `crates/ksana-node` (`producer.rs`: the log line); D-144.

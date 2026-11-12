@@ -17,6 +17,10 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-12, settlement transactions bitcoind learns during the check are accepted (M58, D-145)**: no consensus change, from the fourth load test of the public signet. A node that
+  receives a block looks its settlement transactions up in bitcoind and has `testmempoolaccept` check the ones bitcoind does not know; when they reach bitcoind in between (they are
+  broadcast once the block is `SETTLEMENT_DEPTH` deep, which is when a node behind the tip receives it), bitcoind refuses them as already known, and the node now takes that as it takes
+  a transaction the lookup finds instead of not accepting the block (§7.2).
 - **2026-11-11, a final payload that does not fit its draft is drafted again (M57, D-144)**: no consensus change. A producer's settlement is drafted before the PoW and the final payload
   written into the length the draft reserved (D-141); when its compressed form does not fit, the producer now drafts the pair again over the same funding inputs instead of failing the
   block it solved (§7.2).
@@ -930,7 +934,8 @@ Validation rules (the settlement transactions a block carries, D-034, D-081):
 - **Settlement transactions may not spend one another**: guaranteed by "producer inputs must be confirmed before the anchor height"; settlement transactions in the mempool have no parent-child relationships, which avoids the BTC mempool's
   limit of 25 unconfirmed ancestors. The producer's change can be used for funding again once the settlement it belongs to is confirmed.
 - When receiving a new block (and before the producer submits its own block), additionally check: all inputs of the commit transaction are unspent in bitcoind's UTXO set, and the two transactions, as one package, pass
-  `testmempoolaccept` (only the reveal transaction is submitted when the commit transaction is already in the mempool or confirmed).
+  `testmempoolaccept` (only the reveal transaction is submitted when the commit transaction is already in the mempool or confirmed; a transaction bitcoind refuses only because it already
+  has it, having learned it after the node looked it up, counts as known, local policy, D-145).
 - Construction: producer inputs are always the P2TR key-path of the funding key tweaked per BIP86, the public key in the envelope leaf and the internal key of the commitment output are both the funding key itself (untweaked), the signature is
   `SIGHASH_DEFAULT`, the inputs' `nSequence` is `0xFFFFFFFD` (BIP68 not enabled, RBF allowed); the reveal transaction's fee and the commitment amount are first computed from the final witness length,
   after the PoW is solved the final payload is written in (length unchanged), then the commit is signed first and the reveal after.

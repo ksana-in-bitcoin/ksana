@@ -5291,8 +5291,11 @@ impl KnownBlocks for Chain {
 
 /// `testmempoolaccept` for settlement transactions (D-081): when the commit transaction is already in the mempool or
 /// confirmed, only the reveal transaction is submitted for checking, otherwise both as one package; when the reveal
-/// transaction is already in the mempool or confirmed, accept directly (bitcoind reports `txn-already-in-mempool` /
-/// `txn-already-known` for known transactions).
+/// transaction is already in the mempool or confirmed, accept directly. bitcoind may learn the transactions between
+/// these lookups and the check (the nodes that have the block broadcast them once it is `SETTLEMENT_DEPTH` deep, and a
+/// node behind the tip receives it about then): it then reports the commit transaction as known and the reveal
+/// transaction is checked alone, and a reveal transaction it reports as known is accepted like one the lookup found
+/// (D-145).
 pub fn test_settlement(
     client: &dyn ksana_btc::client::BtcClient,
     pair: &SettlementPair,
@@ -5300,11 +5303,31 @@ pub fn test_settlement(
     if client.transaction(&pair.txid())?.is_some() {
         return Ok(Ok(()));
     }
-    if client.transaction(&pair.commit_txid())?.is_some() {
-        client.test_accept(&[&pair.reveal])
+    let mut result = if client.transaction(&pair.commit_txid())?.is_some() {
+        client.test_accept(&[&pair.reveal])?
     } else {
-        client.test_accept(&pair.txs())
+        // A package fails at its first transaction: a known one here is the commit transaction
+        match client.test_accept(&pair.txs())? {
+            Err(reason) if known_to_bitcoind(&reason) => client.test_accept(&[&pair.reveal])?,
+            result => result,
+        }
+    };
+    if result
+        .as_ref()
+        .is_err_and(|reason| known_to_bitcoind(reason))
+    {
+        result = Ok(());
     }
+    Ok(result)
+}
+
+/// Whether `testmempoolaccept` refused a transaction only because bitcoind has it already: in its mempool
+/// (`txn-already-in-mempool`) or in a block, with an output still unspent (`txn-already-known`). The reason may be
+/// followed by details (Bitcoin Core 29).
+fn known_to_bitcoind(reason: &str) -> bool {
+    ["txn-already-in-mempool", "txn-already-known"]
+        .iter()
+        .any(|known| reason.starts_with(known))
 }
 
 fn settlement_err(e: SettlementError) -> NodeError {

@@ -512,6 +512,9 @@ impl Drop for Fast {
 pub struct Recorder {
     pub inner: RpcClient,
     pub broadcasts: Mutex<Vec<Transaction>>,
+    /// Transactions `transaction` does not know, as when they reach bitcoind right after the node looked them up
+    /// (D-145).
+    pub unseen: Mutex<Vec<[u8; 32]>>,
 }
 
 impl BtcClient for Recorder {
@@ -532,6 +535,9 @@ impl BtcClient for Recorder {
     }
 
     fn transaction(&self, txid: &[u8; 32]) -> Result<Option<TxInfo>, BtcError> {
+        if self.unseen.lock().unwrap().contains(txid) {
+            return Ok(None);
+        }
         self.inner.transaction(txid)
     }
 
@@ -731,6 +737,7 @@ impl Net {
             let recorder = Arc::new(Recorder {
                 inner: RpcClient::new(&url, &rpc_user, &rpc_pass).unwrap(),
                 broadcasts: Mutex::default(),
+                unseen: Mutex::default(),
             });
             let dir = tempfile::tempdir().unwrap();
             let keypair = ksana_p2p::Keypair::ed25519_from_bytes(sha256(

@@ -831,6 +831,7 @@ impl Producer {
             }
         }
 
+        let solved = monotonic_now();
         let settlement = match (draft, &self.funding) {
             (Some(draft), Some(funding)) => {
                 let mut payload_headers = payload_headers;
@@ -847,11 +848,6 @@ impl Producer {
                     // The final payload does not fit what the draft reserved (D-144): the block is solved, so the pair
                     // is drafted again for the final payload over the same inputs, which stay reserved
                     Err(SettlementError::Invalid(why)) => {
-                        eprintln!(
-                            "[ksana-node] the final settlement payload does not fit its draft ({why}; payload {} bytes, {} reserved): drafting the settlement transactions again over the same inputs",
-                            payload.len(),
-                            draft.data_len
-                        );
                         let again = redraft(
                             params,
                             &draft,
@@ -860,6 +856,14 @@ impl Producer {
                             drafted_at.max(params.min_settlement_feerate_sat_vb),
                         )
                         .map_err(signing)?;
+                        // Both lengths are of the envelope's data, each a zstd frame and the same padding (or the
+                        // payload itself): their difference is how far the two frames are apart
+                        eprintln!(
+                            "[ksana-node] the final settlement payload does not fit its draft ({why}): the payload is {} bytes, its envelope data {} bytes drafted again where the draft had {}; drafting the settlement transactions again over the same inputs",
+                            payload.len(),
+                            again.data_len,
+                            draft.data_len
+                        );
                         finalize(params, again, &payload, &funding.keypair).map_err(signing)?
                     }
                     Err(e) => return Err(signing(e)),
@@ -888,7 +892,19 @@ impl Producer {
             entries,
             settlement,
         };
-        chain.commit_block(&block, outcome)?;
+        if let Err(e) = chain.commit_block(&block, outcome) {
+            if matches!(e, NodeError::TipChanged) {
+                // The tip moved while the block was being solved or its settlement checked with bitcoind: the block is
+                // dropped (D-145 has it logged, a node dropping many being too far from the others or from bitcoind)
+                eprintln!(
+                    "[ksana-node] dropping a solved block at height {}: the tip changed {} ms after it was solved, {} ms after its template was started",
+                    block.header.height,
+                    solved.elapsed().as_millis(),
+                    building.elapsed().as_millis()
+                );
+            }
+            return Err(e);
+        }
         drop(reserved);
         self.after_commit(template.merged, &block)?;
         if let Some(announce) = &self.announce {
