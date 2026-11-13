@@ -5327,3 +5327,43 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `ROOMY_BLOCK_WEIGHT`, `ROOM_DISTRUST_BLOCKS`, `FeePolicy::room_reading`, `trusts_room`, `misjudged`, `with_cap`, `with_target`, the policy is no longer `Copy`; `rescue.rs`:
   `BUMP_GRACE`, `Rescuer::with_bump_grace`, `Rescuer::bump`); tests (`adversarial_liveness.rs`, `crates/ksana-btc/tests/mock.rs`, `tests/integration/tests/m3_client.rs`); SPEC (the
   version history, §7.2, §7.7, §14), `docs/ARCHITECTURE.md`, `docs/RPC.md`; ksana-site (the parameters page).
+
+## D-148 The gas table is measured: instructions and host functions fit the block time, fresh memory and code not yet compiled do not (2026-11-13, the calibration SPEC §13.1 and §14 left open; D-013, F-07; no value changes, M60)
+
+- **Problem**: D-013 set the gas table and `BLOCK_GAS_LIMIT` by order of magnitude and left the time a unit of gas takes on real hardware unmeasured; §13.1 marked the limit "unverified, to be
+  measured" and §14 kept the calibration as work before mainnet. The first audit's F-07 (D-098 h) asked for the cold compilation of adversarial modules to be measured with it. The question is how
+  long a node takes over a block that spends its gas, or fills its data, with the one thing that is slowest for its price, against the 5 seconds of `TARGET_BLOCK_TIME`.
+- **Decision**: the measurement is made and recorded; no gas value, no limit and no other consensus rule changes with this entry. Two test files hold it, both ignored by default and asserting
+  nothing about the times: `ksana-vm/tests/gas_calibration.rs` measures the VM alone on the in-memory host (instructions, host functions, instances, compilation), and
+  `ksana-execution/tests/gas_calibration.rs` executes whole blocks with the executor on the node's state store (`ksana-state`, RocksDB and the Merkle tree), timing the execution, the root a
+  node computes to check a block (`preview_root`) and the commit. What they found:
+  1. **Instructions and host functions are priced within the block time.** 100 000 000 gas of any one instruction took 0.01 to 0.04 s (0.12 to 0.45 ns per gas; `memory.fill` and
+     `memory.copy` of long ranges less). The slowest host functions for their price: `sha256` over 60 000 bytes 0.45 s, `call_funds` 0.27 s, `verify_schnorr` 0.08 s, the rest under 0.1 s.
+     A block's data full of transfers (377) executed in 20 ms, full of calls of a small contract (450) in 64 ms, and 76 ops of 63 contract instances each (99.0M gas) in 0.17 s.
+  2. **The state's writes take most of the block time and grow with the state.** 9 300 `storage_set` of new keys in one op (99.2M gas) on a state of 930 000 keys: execution 6 ms, the root
+     1.4 to 2.2 s, the commit 1.5 to 2.2 s, together 3.0 to 3.8 s for a node that checks the block and then commits it; overwriting 9 300 keys 3.1 s. The root alone took 0.49 s at 186 000
+     keys and 1.47 s at 930 000. 47 000 `storage_get` (98.7M gas) took 0.61 to 0.68 s, of missing keys 0.66 s; 149 values of 64 KiB 0.22 s.
+  3. **The first touch of an instance's memory is not priced.** An instance may have 16 MiB and an op 64 instances and 256 MiB (D-013); a store to each page of 16 MiB costs about 45 000
+     gas and took about 11 ms, the kernel mapping each page on its first touch. A block of 99 ops, each calling 15 instances that touch their 16 MiB (98.5M gas), executed in 16.4 to 17.6 s;
+     450 ops of one such instance each, all a block's data holds (29.2M gas), in 4.1 s. Measured beside the tests on the same machine: mapping, touching and unmapping 16 MiB 10.6 ms, the
+     same after `madvise(DONTNEED)` 10.2 ms, touching 16 MiB already resident 0.03 ms, clearing it 0.57 ms.
+  4. **Compiling code that is not in the cache is not priced, and the cache can be overrun.** A call pays 20 000 gas and 1 per byte of code whether or not the node has the code compiled,
+     about 80 000 gas for 60 KiB. Compiling one module of that size took 10 to 26 ms for plain shapes, 0.18 to 0.32 s for nested branches, 0.23 s for a long run of branches, 0.72 s for
+     branches over 1 000 locals and 1.04 s over 8 000. The cache holds the 256 codes compiled last and drops the oldest, so calls that go round 260 contracts never find one compiled: with
+     260 such contracts deployed, a block of 450 calls in turn (35 to 38M gas, the data's limit) executed in 55.2 s for the run of branches and in 342.9 s for the 1 000 locals; the same
+     calls over 200 of the contracts in 1.3 and 7.4 s while part was compiled and in 72 and 74 ms once all were. Deploying compiles as well: 0.14 and 0.76 s a deployment, of which a
+     block's data holds one.
+- **Rationale**: (1) says the table's instruction and host function prices need no change for the block time: nothing among them reaches a tenth of it. (2) to (4) are not prices that are
+  too low but costs the table does not see at all, and each has a remedy in the node that changes no rule, which is where D-098 h put F-07: for (4) keeping the compiled code of every
+  deployed contract instead of the last 256, so that only a deployment compiles and a block holds one; for (3) giving instances memory that is already resident; for (2) committing the tree
+  the check computed instead of computing it again, which takes about half of the time. Whether those are enough, or whether consensus must price memory by the page and code by what it
+  costs to compile, can only be answered by measuring them, and a price is a consensus change (§6.9, or before mainnet a restart from genesis) that is the project owner's to decide. So
+  this entry changes nothing and §14 lists what follows from it.
+- **Costs and limitations**: one machine, 8 virtual cores of an Intel Xeon under KVM with 31 GB of memory, Linux 6.8, x86_64, a release build with rustc 1.98.1 and wasmtime 49.0.1; no
+  aarch64, no machine of the size a node is expected to run on, and the times of a virtual machine are not those of hardware. The slow modules are the worst shapes found by hand, not a bound:
+  the compiler's time has no proven limit in the size of the code, and a slower shape may exist. The state was measured up to 930 000 keys with the node's memory bounds (D-103); the
+  growth beyond it is not measured. The block of 342.9 s needs 260 deployments first, one a block, and its 450 calls are ops someone signs and pays for at the local fee market's price
+  or a producer includes in its own block; what the attack costs is not worked out here. Until the remedies are in, a node of this release can be made to take minutes over a block by
+  whoever deploys such contracts; the public signet runs with that.
+- **Impact**: tests only (`crates/ksana-vm/tests/gas_calibration.rs`, `crates/ksana-execution/tests/gas_calibration.rs`); SPEC (the version history, §13.1's `BLOCK_GAS_LIMIT`, §14);
+  CONTRIBUTING (the two measurements); D-013, D-098 h (F-07).
