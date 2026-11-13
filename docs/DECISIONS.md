@@ -3904,7 +3904,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     every round, and the pair waits for other nodes, which, with room, judge it at the floor and hold their rescues back for `CLAIM_PATIENCE` BTC blocks, longer than the settlement backlog limit
     allows (the review of the change). Closed with D-102's by D-131 (2026-10-28).
   - The relay probe (`crates/ksana-btc/examples/relay_probe.rs`) keeps its automatic rate, bitcoind's estimate plus 1 (D-107): it is run by hand, and `--feerate` sets its rate.
-  - Before mainnet (the review of the change, SPEC §14; the signet's margins do not need them):
+  - Before mainnet (the review of the change, SPEC §14; the signet's margins do not need them). The first three are closed by D-147 (2026-11-13), which also keeps a block found before a pair
+    reached its miner out of its own, earlier bump; the doubling of the fourth is unchanged:
     - The bump comes late for mainnet. A pair the room misjudged lands in the third BTC block after it was sent at the earliest, while under steady path B traffic with settlement batching a
       pair has 3 BTC blocks on mainnet before the settlement backlog limit (`SETTLEMENT_TIMEOUT` less `ANCHOR_DEPTH`, less the wait of the pair in flight before it; on signet 4 after a pair
       that landed in the next block, 3 after a slow one). A pair sent at the room rate is to be bumped after one missed BTC block, to the next-block estimate.
@@ -5275,3 +5276,54 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   the test's 385 confirmed settlements, against 2 in 3 544 measured); the shortened payloads are not ones a node made, their entries belonging to another header; and the two failures
   of D-144 (payloads of about 1.3 kB) were not measured again. The measurement was made beside the repository and is not among its tests.
 - **Impact**: `crates/ksana-node` (`producer.rs`: the log line); D-144.
+
+## D-147 The room is read from the last BTC block as well, and a pair it misjudged is bumped after one BTC block and remembered (2026-11-13, the three items SPEC §14 kept from the review of D-117, with the data of the fifth load test of the public signet; revises D-117 and SPEC §7.2, §7.7, §14, `docs/RPC.md`; local policy, no consensus change, M59)
+
+- **Problem**: D-117 lets a node pay the floor while bitcoind's mempool holds at most half a block, and its review left three things for mainnet (D-117's limitations, SPEC §14). The
+  bump comes late: a pair the room misjudged waits `BUMP_AFTER` (2) BTC blocks and lands in the third at the earliest, which is all the time a pair has on mainnet before the settlement
+  backlog limit. The room has no memory: under a steady mismatch (miners taking nothing below a rate above the floor, block space sold outside the public mempool) every pair is sent at
+  the floor and waits for its bump. And the reading is biased low: it is usually taken just after a BTC block, when the mempool is smallest, and a bitcoind that lost its `mempool.dat`
+  reads as roomy for a long time.
+- **Decision**:
+  - a. The room is read from bitcoind's best block as well. `BtcClient::tip_stats` asks `getblockstats` for the best block's `height` and `total_weight` (the weight of its
+    transactions without the coinbase; kept per best block, so one call a BTC block), and the next BTC block has room only while the mempool holds at most `ROOMY_MEMPOOL_VSIZE` and
+    that block took at most `ROOMY_BLOCK_WEIGHT` (2 000 000 weight units, half a block, the same half). When the block's statistics cannot be read there is no room, and the node pays
+    the estimate, as when the mempool cannot be read.
+  - b. A pair the room misjudged is bumped after one BTC block. A pair that every round of the rescuer has seen waiting while the room showed, outside a race, and that a BTC block
+    leaves out after a round in which the pair had waited `BUMP_GRACE` (2 minutes from the round that first saw it), is bumped in that round to at least the next-block estimate
+    (`URGENT_FEE_TARGET`), within the floor and the cap. The bumps of D-102 and D-117 are unchanged beside it: the estimate after `BUMP_AFTER` BTC blocks, and the pair's own rate
+    doubled from the `BUMP_AFTER`-th block with room on, which is what bumps the pair when bitcoind has no next-block estimate above its rate.
+  - c. The node remembers it. Such a pair is reported to the fee policy (`FeePolicy::misjudged`), and while bitcoind's best block is the last one that left such a pair out or one of
+    the `ROOM_DISTRUST_BLOCKS` (6, the figure D-117's review gave) after it, new transactions pay the estimate whatever the room reads (`room_rate`; `room_reading` is what bitcoind shows). In the round
+    that finds it, the rescues and republishes are sent before the bumps and still pay by the room (they are pairs, and are bumped like any other); the funding split and the
+    revenue sweep, which are never bumped, come after them and pay the estimate.
+    The bumps keep counting the blocks with room by what bitcoind shows, so the memory does not stop the doubling of a pair still waiting, and a pair sent at the estimate while the
+    memory holds counts like one sent at the floor: while bitcoind shows room and BTC blocks keep leaving the node's pairs out, the memory lasts. The memory is one number shared by the
+    copies of a node's policy (the producer, the rescuer, `ksana_estimateFee`), kept in memory only.
+  - d. A pair whose block's data has landed through other transactions is left waiting on purpose (D-131) and is not held against the room.
+- **Rationale**:
+  - The block rather than its `minfeerate`: of the signet's 1 500 BTC blocks 329 192 to 330 691, none took more than 2 000 000 weight units (the largest 1 946 784, the median 218 962,
+    41 above 1 000 000), so the signet reads as before; their `minfeerate` was 0 or 1 in all but 13, which says nothing a half-empty block does not say, and D-117 already takes
+    `mempoolminfee`. A block more than half full is the case mempool.space prices above the minimum, where D-117 takes the estimate.
+  - Two minutes of grace: in the fifth load test, of the 1 120 settlements of the run's main-chain blocks 78 were not in the first BTC block after their block's timestamp, and each of
+    those blocks reached the measuring bitcoind within 71 seconds of that timestamp (all 27 of the settlements whose block was at most 10 seconds old, 1 of the 64 between 60 and 90
+    seconds, none of the 905 older ones; a pair is broadcast two blocks after its own, about 10 seconds later). Those BTC blocks say nothing about the fee, and without the grace each
+    of them would cost a bump and six blocks at the estimate.
+  - Six blocks is about an hour on mainnet: long enough that a steady mismatch costs one waiting pair an hour rather than every pair, short enough that a passing one is forgotten.
+- **Costs and limitations**:
+  - The constants come from the signet: its blocks are found by one signer on a schedule and are mostly empty. On mainnet most blocks take more than half their weight, so the room
+    will seldom show there and the node will mostly pay the estimate; whether half a block is the right line, and whether two minutes cover the time a pair needs to reach mainnet's
+    miners, is to be looked at again with mainnet's blocks before launch (SPEC §14).
+  - Block space sold out of band shows in the block's weight but not in what it would have cost, and a miner filtering envelope transactions leaves a pair out with every reading
+    roomy: both are now remembered for six blocks after the fact, not foreseen.
+  - The memory is lost on a restart, and the grace starts again: a node restarted during a mismatch pays the floor once more before it learns again.
+  - The grace is counted from the rescuer's first round that saw the pair, not from its broadcast, and a pair first seen during a race or a round without room is not counted at all:
+    both err toward not reporting.
+  - A reorg between asking for the best block and for its statistics, or a pruned or still-loading bitcoind without them, reads as no room for that round. A `BtcClient` that does not
+    implement `tip_stats` answers nothing, which is no room.
+  - The doubling of D-117 still reads every BTC block as a price signal (D-117's limitations); only the bump of this decision has the grace.
+  - The public signet's seed nodes run the release before this one until they are next upgraded; nothing in it needs a restart from genesis.
+- **Impact**: local policy only, no new flags; `crates/ksana-btc` (`BtcClient::tip_stats`, `TipStats`, `RpcClient`, `MockBtc::set_tip_weight`); `crates/ksana-node` (`producer.rs`:
+  `ROOMY_BLOCK_WEIGHT`, `ROOM_DISTRUST_BLOCKS`, `FeePolicy::room_reading`, `trusts_room`, `misjudged`, `with_cap`, `with_target`, the policy is no longer `Copy`; `rescue.rs`:
+  `BUMP_GRACE`, `Rescuer::with_bump_grace`, `Rescuer::bump`); tests (`adversarial_liveness.rs`, `crates/ksana-btc/tests/mock.rs`, `tests/integration/tests/m3_client.rs`); SPEC (the
+  version history, §7.2, §7.7, §14), `docs/ARCHITECTURE.md`, `docs/RPC.md`; ksana-site (the parameters page).

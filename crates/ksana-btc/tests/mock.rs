@@ -15,7 +15,7 @@ use bitcoin::{
     TxOut, Txid, WPubkeyHash, Witness,
 };
 use ksana_btc::client::{
-    BtcClient, BtcError, HeaderInfo, MempoolInfo, ScannedUtxo, TxInfo, UtxoInfo,
+    BtcClient, BtcError, HeaderInfo, MempoolInfo, ScannedUtxo, TipStats, TxInfo, UtxoInfo,
 };
 use ksana_btc::mock::{
     coinbase_script, MockBtc, BLOCK_INTERVAL_SECS, COINBASE_MATURITY, COINBASE_VALUE_SAT,
@@ -866,6 +866,46 @@ fn the_mempool_info_is_what_the_test_set() {
     // Through Arc as a trait object as well
     let client: Arc<dyn BtcClient> = Arc::new(btc);
     assert_eq!(client.mempool_info().unwrap(), None);
+}
+
+/// The best block's statistics are its height and the weight of its transactions without the coinbase, or the weight
+/// the test set (D-147).
+#[test]
+fn the_tip_stats_are_the_best_blocks_own_or_what_the_test_set() {
+    let btc = MockBtc::new();
+    let s = script(1);
+    let f = btc.fund(&s, &[10_000]);
+    let (height, _) = btc.tip().unwrap();
+    let tx = spend(&[f[0]], &[(9_000, &s)]);
+    assert_eq!(btc.broadcast(&tx).unwrap(), Ok(()));
+    btc.mine(1);
+    let own = TipStats {
+        height: height + 1,
+        weight: tx.weight().to_wu(),
+    };
+    assert_eq!(btc.tip_stats().unwrap(), Some(own));
+    btc.mine(1);
+    assert_eq!(
+        btc.tip_stats().unwrap(),
+        Some(TipStats {
+            height: height + 2,
+            weight: 0
+        }),
+        "only the coinbase"
+    );
+    btc.set_tip_weight(Some(3_990_000));
+    btc.mine(1);
+    let set = TipStats {
+        height: height + 3,
+        weight: 3_990_000,
+    };
+    assert_eq!(btc.tip_stats().unwrap(), Some(set));
+    btc.set_offline(true);
+    assert!(btc.tip_stats().is_err());
+    btc.set_offline(false);
+    // Through Arc as a trait object as well
+    let client: Arc<dyn BtcClient> = Arc::new(btc);
+    assert_eq!(client.tip_stats().unwrap(), Some(set));
 }
 
 #[test]
