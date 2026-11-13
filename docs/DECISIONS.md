@@ -5294,7 +5294,9 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     (`URGENT_FEE_TARGET`), within the floor and the cap. The bumps of D-102 and D-117 are unchanged beside it: the estimate after `BUMP_AFTER` BTC blocks, and the pair's own rate
     doubled from the `BUMP_AFTER`-th block with room on, which is what bumps the pair when bitcoind has no next-block estimate above its rate.
   - c. The node remembers it. Such a pair is reported to the fee policy (`FeePolicy::misjudged`), and while bitcoind's best block is the last one that left such a pair out or one of
-    the `ROOM_DISTRUST_BLOCKS` (6, the figure D-117's review gave) after it, new transactions pay the estimate whatever the room reads (`room_rate`; `room_reading` is what bitcoind shows).
+    the `ROOM_DISTRUST_BLOCKS` (6, the figure D-117's review gave) after it, new transactions pay the estimate whatever the room reads (`room_rate`; `room_reading` is what bitcoind shows). In the round
+    that finds it, the rescues and republishes are sent before the bumps and still pay by the room (they are pairs, and are bumped like any other); the funding split and the
+    revenue sweep, which are never bumped, come after them and pay the estimate.
     The bumps keep counting the blocks with room by what bitcoind shows, so the memory does not stop the doubling of a pair still waiting, and a pair sent at the estimate while the
     memory holds counts like one sent at the floor: while bitcoind shows room and BTC blocks keep leaving the node's pairs out, the memory lasts. The memory is one number shared by the
     copies of a node's policy (the producer, the rescuer, `ksana_estimateFee`), kept in memory only.

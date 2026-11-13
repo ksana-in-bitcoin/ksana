@@ -407,9 +407,11 @@ impl Rescuer {
         self.rescue_settlements(&snapshot, btc_tip, feerate)?;
         self.republish(&snapshot, btc_tip, feerate, competitor)?;
         self.bump(&snapshot, btc_tip, estimated, urgent, reading.is_some())?;
-        // A funding split does not race: it keeps the policy's own target while a competing chain is on BTC
+        // A funding split does not race: it keeps the policy's own target while a competing chain is on BTC. A split
+        // and a sweep are not bumped, so they do not pay by the room a bump of this round found misjudged (D-147)
         let split_rate = match competitor {
             Some(_) => fees.rate(params, client, false),
+            None if reading.is_some_and(|(_, height)| !fees.trusts_room(height)) => estimated,
             None => feerate,
         };
         self.maintain_pool(btc_tip, split_rate)?;

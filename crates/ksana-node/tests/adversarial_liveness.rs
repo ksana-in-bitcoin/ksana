@@ -1830,6 +1830,67 @@ fn a_settlement_the_room_misjudged_is_bumped_after_one_btc_block_and_remembered(
     );
 }
 
+/// A funding split is not bumped, so the one sent in the round whose bump finds the room misjudged pays the estimate
+/// already, not the floor the round read before it (D-147).
+#[test]
+fn a_split_in_the_round_that_finds_the_room_misjudged_pays_the_estimate() {
+    let (mock, a, _, pair, _) = room_block_within("room-split", Some(4), 5, Duration::ZERO);
+    let funding = a.producer.funding.clone().unwrap();
+    let script = funding.script.clone();
+    let splits = || -> Vec<Transaction> {
+        mock.mempool()
+            .into_iter()
+            .filter(|tx| {
+                tx.output.len() >= 2 && tx.output.iter().all(|o| o.script_pubkey == script)
+            })
+            .collect()
+    };
+    // Three of the four funding UTXOs are left: a pool of three is full
+    let rescuer = Rescuer::new(
+        a.chain.clone(),
+        Funding {
+            pool_target: 3,
+            ..funding
+        },
+        Some(a.producer.producer),
+        None,
+    )
+    .with_bump_grace(Duration::ZERO);
+    rescuer.run_once().unwrap();
+    assert!(splits().is_empty(), "the pool is full");
+
+    // A second settlement takes one more, at the floor: the room is still paid by
+    let (alice, bob) = (
+        user("adv/liveness/room-split/alice"),
+        user("adv/liveness/room-split/bob"),
+    );
+    a.submit(transfer_op(&alice, 1, 2, bob.account, 7));
+    let block = a.produce().unwrap();
+    let second = SettlementPair::decode(block.settlement.as_ref().unwrap()).unwrap();
+    assert_eq!(pair_feerate(&mock, &second), 2, "the floor");
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+    rescuer.run_once().unwrap();
+    assert_eq!(children(&mock, &pair).len(), 1, "the first pair is bumped");
+    let split = splits();
+    assert_eq!(split.len(), 1, "the pool is made up in the same round");
+    let input: u64 = split[0]
+        .input
+        .iter()
+        .map(|i| {
+            let utxo = mock.utxo(&i.previous_output, false).unwrap().unwrap();
+            utxo.txout.value.to_sat()
+        })
+        .sum();
+    let output: u64 = split[0].output.iter().map(|o| o.value.to_sat()).sum();
+    assert_eq!(
+        (input - output) / split[0].vsize() as u64,
+        4,
+        "the estimate, not the floor"
+    );
+}
+
 /// A BTC block found before the pair has waited `BUMP_GRACE` was assembled before the pair reached its miner and
 /// says nothing of the room (D-147): the pair is not bumped for it, and the room is still paid by.
 #[test]
