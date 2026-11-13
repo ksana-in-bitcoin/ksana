@@ -17,6 +17,11 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-13, the room for the floor fee rate is read from the last BTC block as well, and a pair it misjudged is bumped after one BTC block and remembered (M59, D-147)**: no
+  consensus change; the three items §14 kept from the review of D-117. The next BTC block has room only while bitcoind's mempool holds at most half a block and bitcoind's best block took
+  at most half a block's weight (`getblockstats`). A pair that waited while that room showed and that a BTC block found two minutes or more later leaves out is bumped at once to the
+  next-block estimate, and for the 6 BTC blocks after it the node's new transactions pay the estimate whatever the room reads (§7.2, §7.7, §14). The signet's seed nodes keep running the
+  release before it until they are next upgraded.
 - **2026-11-12, settlement transactions bitcoind learns during the check are accepted (M58, D-145)**: no consensus change, from the fourth load test of the public signet. A node that
   receives a block looks its settlement transactions up in bitcoind and has `testmempoolaccept` check the ones bitcoind does not know; when they reach bitcoind in between (they are
   broadcast once the block is `SETTLEMENT_DEPTH` deep, which is when a node behind the tip receives it), bitcoind refuses them as already known, and the node now takes that as it takes
@@ -930,7 +935,7 @@ Validation rules (the settlement transactions a block carries, D-034, D-081):
   and so confirms above it, and the payload then always counts (§7.1).
 - Fees: each transaction's own fee (sum of prevout amounts − sum of output amounts) ≥ `vsize × MIN_SETTLEMENT_FEERATE`, `vsize = ⌈weight / 4⌉`; without relying on package relay
   each can still enter the mempool on its own; above that, the node pays the rate of its fee policy (§7.7: the floor while the next BTC block has room, otherwise `estimatesmartfee` within a floor and a cap,
-  D-117) and bumps a pair left waiting in the mempool through the reveal's change (D-102, D-140).
+  D-117, D-147) and bumps a pair left waiting in the mempool through the reveal's change (D-102, D-140).
 - **Settlement transactions may not spend one another**: guaranteed by "producer inputs must be confirmed before the anchor height"; settlement transactions in the mempool have no parent-child relationships, which avoids the BTC mempool's
   limit of 25 unconfirmed ancestors. The producer's change can be used for funding again once the settlement it belongs to is confirmed.
 - When receiving a new block (and before the producer submits its own block), additionally check: all inputs of the commit transaction are unspent in bitcoind's UTXO set, and the two transactions, as one package, pass
@@ -1079,14 +1084,19 @@ Local policy (D-037, D-060, D-075, D-109):
 - **Funding UTXO pool**: settlement transactions can only be funded with confirmed UTXOs and cannot spend each other, so within one BTC block interval the number of transactions that can be funded is at most the number of confirmed UTXOs. When the available confirmed
   UTXOs are fewer than the target count (`--funding-pool-target`, default 64, 0 means no splitting), a split transaction is sent that splits the largest one into several equal outputs (each at least 100 000 sats),
   with at most one split transaction unconfirmed at a time.
-- **Fee rate** (D-102, D-117): every BTC transaction of the node (settlements, rescues, republishes, split transactions, CPFP children) pays bitcoind's `estimatesmartfee` for the confirmation target
+- **Fee rate** (D-102, D-117, D-147): every BTC transaction of the node (settlements, rescues, republishes, split transactions, CPFP children) pays bitcoind's `estimatesmartfee` for the confirmation target
   (`--settlement-conf-target`, default 3 BTC blocks), kept within the floor `--settlement-feerate` (default 2 sat/vB, not below `MIN_SETTLEMENT_FEERATE`) and the cap `--max-settlement-feerate`
-  (default 100 sat/vB); the floor when bitcoind has no estimate. While bitcoind's mempool holds at most half a block (500 000 vB, `getmempoolinfo`'s `bytes`), the next block has room for all of it, and a new
-  transaction pays the floor instead, or the mempool's minimum (`mempoolminfee`) when that is higher, up to the cap (D-117). While a lighter competing chain is on BTC (§7.6) the target is the next block, whatever
+  (default 100 sat/vB); the floor when bitcoind has no estimate. While bitcoind's mempool holds at most half a block (500 000 vB, `getmempoolinfo`'s `bytes`) and bitcoind's best block took at most half a block's weight
+  (2 000 000 weight units, `getblockstats`' `total_weight`; the mempool alone reads low just after a block), the next block has room for all that waits, and a new
+  transaction pays the floor instead, or the mempool's minimum (`mempoolminfee`) when that is higher, up to the cap (D-117, D-147); not so for the 6 BTC blocks after one that left out a pair
+  the room misjudged (below), nor when either cannot be read. While a lighter competing chain is on BTC (§7.6) the target is the next block, whatever
   room the mempool has, so that this node's data lands before the other side's is final (a split transaction keeps the confirmation target: it does not race).
   A commit / reveal pair this node sent (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for 2 BTC blocks (at once during such a race) and pays less than the
   estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's change, lifting the package to the rate; once a later republish chained on the pair spends the change (§7.6), only that one's child can lift it. Once it has waited 2 BTC blocks while the mempool
-  had room (outside a race), the rate is at least the pair's own rate doubled, and doubled again for every further such block, up to the cap, whatever the estimate (D-117). When the rate rises again, a child
+  had room (outside a race), the rate is at least the pair's own rate doubled, and doubled again for every further such block, up to the cap, whatever the estimate (D-117).
+  A pair that every round of the node has seen waiting while the room showed (outside a race) does not wait for the second block: once a BTC block, found 2 minutes or more after the node first saw the
+  pair waiting (a block found sooner was assembled before the pair reached its miner), leaves it out, the room misjudged it, and the rate is at least the next-block estimate; the node remembers it, in memory
+  only, and for the 6 BTC blocks after the last such block its new transactions pay the estimate (D-147). When the rate rises again, a child
   paying more replaces it (full RBF). A child that left the mempool is sent again only while its pair still waits there and is still one this node settles (its block has not left the main chain, D-104).
   Only the producer's key spends the change, so no other party can attach a child and pin the pair (D-140). Nothing more is spent on a pair whose block's
   carried data has all landed.
@@ -1830,7 +1840,8 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
 - The measurements marked "unverified, to be measured" in §13.1: the GPU advantage of Argon2id (the retuning path of D-094), the propagation delay of a real network (`GHOSTDAG_K`), the calibration of the gas table
   (`BLOCK_GAS_LIMIT`), and the observation of `SETTLEMENT_TIMEOUT` and the carrier reward on signet; a simulation of the BTC fee market against the landing race of §6.5 (D-101, D-102).
 - The node's fee policy (local policy): for the floor paid while the mempool has room (D-117's limitations), a bump after one missed BTC block to the next-block estimate, a memory of a pair the room
-  misjudged, and a reading of the room that is not biased low (`getblockstats`). P2A pinning (D-102's limitations) is closed (M48, D-131).
+  misjudged, and a reading of the room that is not biased low (`getblockstats`) are done (M59, D-147); their constants come from the signet and are to be looked at again against mainnet's blocks (D-147's
+  limitations). P2A pinning (D-102's limitations) is closed (M48, D-131).
 - Security audit (§16): the internal audit is done (M26, D-098) and the consensus fixes the project owner adopted have landed (M27, D-100); the path assessment's finding 1 and the second audit's A2-09 are fixed
   (M28, D-101, D-102; A2-09's pinning residual in M48, D-131), and so is D-101's known limitation (M29, D-104); the second audit's A2-08, entry-pool churn, is fixed as local policy (M47, D-130), and so are the first audit's F-28 and F-29, the limits of the P2P layer and the RPC servers (M49, D-132); an external audit follows. Withholding a heavy empty block (§16) is narrowed by `GHOSTDAG_K` 16; what remains on an idle chain is in §16 and §17.4.
 - Update the web explorer's parameter table and settlement page per D-095.

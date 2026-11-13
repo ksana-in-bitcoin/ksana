@@ -177,9 +177,9 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
     the current main chain; consensus decides by the anchor chain and the main chain at unlock time, and the two may differ after a BTC reorg or a main-chain switch.
 
 - `ksana_estimateFee` (§8.2, D-054, D-078; a suggestion only, it does not change the conditions under which the node accepts ops; no parameters):
-  - `feerate_sat_vb`: the fee rate at which this node funds settlements now (sat/vB, D-102, D-117): bitcoind's `estimatesmartfee` for `--settlement-conf-target` kept within `--settlement-feerate` (the floor, not below
+  - `feerate_sat_vb`: the fee rate at which this node funds settlements now (sat/vB, D-102, D-117, D-147): bitcoind's `estimatesmartfee` for `--settlement-conf-target` kept within `--settlement-feerate` (the floor, not below
     `MIN_SETTLEMENT_FEERATE`) and `--max-settlement-feerate` (the cap), the floor when bitcoind has no estimate; the floor, or bitcoind's `mempoolminfee` when that is higher, while bitcoind's mempool holds at most
-    half a block (500 000 vB); path C native transactions and top-up transactions can use it as a reference.
+    half a block (500 000 vB) and its best block took at most half a block's weight, except for the 6 BTC blocks after one that left out a pair this node had sent on that reading; path C native transactions and top-up transactions can use it as a reference.
   - `path_b.per_kib` (the local-policy patch of D-095): the suggested fee rate -- the token amount per KiB of cost. Cost = max(encoded VmOp bytes, `max_gas × MAX_BLOCK_DATA_BYTES /
     BLOCK_GAS_LIMIT`), the same as used for ordering this node's packing candidates (local policy: ordered by fee rate rather than absolute amount, so an op whose `max_gas` fills a whole block cannot squeeze out other ops with a slightly higher
     amount). It is the median, over the last 20 main-chain blocks, of each block's lowest path B entry fee rate (the larger middle value for an even count; blocks without path B entries
