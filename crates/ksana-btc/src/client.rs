@@ -91,6 +91,16 @@ pub struct MempoolInfo {
     pub min_feerate: u64,
 }
 
+/// What bitcoind's best block took (`getblockstats`). Only the node's local fee policy reads it (D-147), never
+/// consensus code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TipStats {
+    /// The height of the block.
+    pub height: u32,
+    /// The weight of the block's transactions without the coinbase (weight units, `total_weight`).
+    pub weight: u64,
+}
+
 /// All of the node's access to bitcoind. Implementations must be shareable between threads.
 ///
 /// All hashes are in Bitcoin's internal byte order (D-001). `Err` only denotes a local data source fault, to be
@@ -155,6 +165,12 @@ pub trait BtcClient: Send + Sync {
     /// kept across a restart, which may hold less than it will. Only the node's local fee policy reads it (D-117),
     /// never consensus code. Without an implementation it is not known.
     fn mempool_info(&self) -> Result<Option<MempoolInfo>, BtcError> {
+        Ok(None)
+    }
+    /// What bitcoind's best block took (`getblockstats`); `None` when bitcoind cannot tell (the block is no longer
+    /// its best one, or its data is pruned). Only the node's local fee policy reads it (D-147), never consensus code.
+    /// Without an implementation it is not known.
+    fn tip_stats(&self) -> Result<Option<TipStats>, BtcError> {
         Ok(None)
     }
 }
@@ -223,6 +239,10 @@ impl<T: BtcClient + ?Sized> BtcClient for Arc<T> {
     fn mempool_info(&self) -> Result<Option<MempoolInfo>, BtcError> {
         (**self).mempool_info()
     }
+
+    fn tip_stats(&self) -> Result<Option<TipStats>, BtcError> {
+        (**self).tip_stats()
+    }
 }
 
 /// Retry count and interval when `scantxoutset` hits "another scan is in progress".
@@ -264,6 +284,8 @@ pub struct RpcClient {
     txouts: Mutex<BTreeMap<OutPoint, TxOut>>,
     /// The last scan of each locking script.
     scans: Mutex<BTreeMap<ScriptBuf, Scan>>,
+    /// The statistics of the last best block asked for, with its hash: a block's statistics never change.
+    tip_stats: Mutex<Option<([u8; 32], TipStats)>>,
     wallet: Option<Watch>,
 }
 
@@ -326,6 +348,7 @@ impl RpcClient {
             client,
             txouts: Mutex::new(BTreeMap::new()),
             scans: Mutex::new(BTreeMap::new()),
+            tip_stats: Mutex::new(None),
             wallet: None,
         })
     }
@@ -912,6 +935,36 @@ impl BtcClient for RpcClient {
             vsize: u64_field(&info, "bytes", METHOD)?,
             min_feerate,
         }))
+    }
+
+    fn tip_stats(&self) -> Result<Option<TipStats>, BtcError> {
+        const METHOD: &str = "getblockstats";
+        let (_, tip) = self.tip()?;
+        let cached = |slot: &Option<([u8; 32], TipStats)>| slot.filter(|(hash, _)| *hash == tip);
+        if let Some((_, stats)) = self.tip_stats.lock().ok().and_then(|slot| cached(&slot)) {
+            return Ok(Some(stats));
+        }
+        // Not found once a reorg has dropped the block; a pruned block or a failed read is a miscellaneous error, which
+        // the fee policy takes as no reading
+        let Some(answer) = self.call_opt(
+            METHOD,
+            &[
+                json!(to_display_hex(&tip)),
+                json!(["height", "total_weight"]),
+            ],
+            RPC_INVALID_ADDRESS_OR_KEY,
+        )?
+        else {
+            return Ok(None);
+        };
+        let stats = TipStats {
+            height: u32_field(&answer, "height", METHOD)?,
+            weight: u64_field(&answer, "total_weight", METHOD)?,
+        };
+        if let Ok(mut slot) = self.tip_stats.lock() {
+            *slot = Some((tip, stats));
+        }
+        Ok(Some(stats))
     }
 }
 
@@ -1624,6 +1677,45 @@ mod tests {
         assert_eq!(client.mempool_info(), Ok(None), "still loading");
         answer.store(2, Ordering::SeqCst);
         assert!(matches!(client.mempool_info(), Err(BtcError::Decode(_))));
+    }
+
+    /// `getblockstats` of the best block: its height and the weight of its transactions, asked once per block; not
+    /// known once a reorg has dropped the block.
+    #[test]
+    fn the_tip_stats_are_the_best_blocks_height_and_weight() {
+        let answer = Arc::new(AtomicU8::new(0));
+        let shown = answer.clone();
+        let asked = Arc::new(AtomicU8::new(0));
+        let counted = asked.clone();
+        let url = fake_bitcoind(move |method, args| {
+            let kind = shown.load(Ordering::SeqCst);
+            let hash = if kind == 0 { "11" } else { "22" }.repeat(32);
+            match method {
+                "getblockchaininfo" => Ok(json!({ "blocks": 330_691, "bestblockhash": hash })),
+                "getblockstats" => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(args, &json!([hash, ["height", "total_weight"]]));
+                    match kind {
+                        0 => Ok(json!({ "height": 330_691, "total_weight": 204_925 })),
+                        1 => Err((-5, "Block not found".into())),
+                        _ => Ok(json!({ "height": 330_691 })),
+                    }
+                }
+                _ => Err((-32601, "Method not found".into())),
+            }
+        });
+        let client = RpcClient::new(&url, "ksana", "ksana").unwrap();
+        let stats = TipStats {
+            height: 330_691,
+            weight: 204_925,
+        };
+        assert_eq!(client.tip_stats(), Ok(Some(stats)));
+        assert_eq!(client.tip_stats(), Ok(Some(stats)));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "asked once per block");
+        answer.store(1, Ordering::SeqCst);
+        assert_eq!(client.tip_stats(), Ok(None), "no longer bitcoind's block");
+        answer.store(2, Ordering::SeqCst);
+        assert!(matches!(client.tip_stats(), Err(BtcError::Decode(_))));
     }
 
     #[test]
