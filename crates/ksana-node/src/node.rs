@@ -178,7 +178,7 @@ impl Node {
             fees: config
                 .funding
                 .as_ref()
-                .map_or(FeePolicy::new(0), |f| f.fees),
+                .map_or(FeePolicy::new(0), |f| f.fees.clone()),
             calls: AtomicUsize::new(0),
         });
         let (rpc_addr, rpc_handle) = runtime

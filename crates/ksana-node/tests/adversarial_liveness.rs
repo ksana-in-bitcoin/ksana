@@ -50,9 +50,10 @@ use ksana_mempool::{Mempool, Policy};
 use ksana_node::chain::{Accepted, Chain};
 use ksana_node::genesis::GenesisFile;
 use ksana_node::producer::{
-    FeePolicy, Funding, Producer, TemplateSync, DEFAULT_FEE_TARGET, ROOMY_MEMPOOL_VSIZE,
+    FeePolicy, Funding, Producer, TemplateSync, DEFAULT_FEE_TARGET, ROOMY_BLOCK_WEIGHT,
+    ROOMY_MEMPOOL_VSIZE, ROOM_DISTRUST_BLOCKS, URGENT_FEE_TARGET,
 };
-use ksana_node::rescue::{Rescuer, BUMP_AFTER, CLAIM_PATIENCE, REPUBLISH_PATIENCE};
+use ksana_node::rescue::{Rescuer, BUMP_AFTER, BUMP_GRACE, CLAIM_PATIENCE, REPUBLISH_PATIENCE};
 use ksana_node::rpc::NodeRpc;
 use ksana_node::NodeError;
 use ksana_primitives::hash::sha256;
@@ -1297,11 +1298,7 @@ fn a_settlement_confirmed_at_its_anchor_height_after_a_btc_reorg_leaves_its_bloc
 #[test]
 fn the_fee_rate_follows_the_estimate_within_the_floor_and_the_cap() {
     let mock = MockBtc::new();
-    let fees = FeePolicy {
-        floor: 2,
-        cap: 50,
-        target: DEFAULT_FEE_TARGET,
-    };
+    let fees = FeePolicy::new(2).with_cap(50);
     assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "no estimate");
     mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(7));
     assert_eq!(fees.rate(&DEVNET, &mock, false), 7);
@@ -1323,11 +1320,7 @@ fn the_fee_rate_follows_the_estimate_within_the_floor_and_the_cap() {
 #[test]
 fn the_fee_rate_is_the_floor_while_the_mempool_has_room() {
     let mock = MockBtc::new();
-    let fees = FeePolicy {
-        floor: 2,
-        cap: 50,
-        target: DEFAULT_FEE_TARGET,
-    };
+    let fees = FeePolicy::new(2).with_cap(50);
     mock.set_fee_estimate(1, Some(30));
     mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(100));
     let mempool = |vsize, min_feerate| {
@@ -1363,15 +1356,66 @@ fn the_fee_rate_is_the_floor_while_the_mempool_has_room() {
     assert_eq!(fees.rate(&DEVNET, &mock, false), 2);
 }
 
+/// The room is read from bitcoind's best block as well (D-147): just after a block the mempool is at its emptiest, so
+/// a best block that took more than half a block's weight leaves no room whatever the mempool holds.
+#[test]
+fn the_fee_rate_is_the_estimate_after_a_block_more_than_half_full() {
+    let mock = MockBtc::new();
+    let fees = FeePolicy::new(2).with_cap(50);
+    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(20));
+    mock.set_mempool_info(Some(ROOM));
+    mock.mine(1);
+    assert_eq!(fees.room_reading(&DEVNET, &mock), Some((2, 1)));
+    mock.set_tip_weight(Some(ROOMY_BLOCK_WEIGHT));
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "half a block");
+    mock.set_tip_weight(Some(ROOMY_BLOCK_WEIGHT + 1));
+    assert_eq!(fees.room_reading(&DEVNET, &mock), None);
+    assert_eq!(fees.room_rate(&DEVNET, &mock), None);
+    assert_eq!(
+        fees.rate(&DEVNET, &mock, false),
+        20,
+        "more than half a block"
+    );
+    mock.set_tip_weight(None);
+    mock.mine(1);
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "an empty block again");
+}
+
+/// A pair the room misjudged is remembered for `ROOM_DISTRUST_BLOCKS` BTC blocks (D-147): until that many more have
+/// come, new transactions pay the estimate whatever the room reads, and every copy of the policy remembers alike.
+#[test]
+fn the_fee_rate_is_the_estimate_while_a_misjudged_pair_is_remembered() {
+    let mock = MockBtc::new();
+    let fees = FeePolicy::new(2).with_cap(50);
+    let copy = fees.clone();
+    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(20));
+    mock.set_mempool_info(Some(ROOM));
+    mock.mine(3);
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 2);
+    assert!(copy.misjudged(3));
+    assert!(!copy.misjudged(3), "already remembered");
+    assert!(!copy.misjudged(2), "an earlier block does not shorten it");
+    for _ in 0..ROOM_DISTRUST_BLOCKS {
+        assert_eq!(fees.room_rate(&DEVNET, &mock), None);
+        assert_eq!(fees.rate(&DEVNET, &mock, false), 20, "the estimate");
+        assert_eq!(
+            fees.room_reading(&DEVNET, &mock).map(|(rate, _)| rate),
+            Some(2),
+            "what bitcoind shows is unchanged"
+        );
+        mock.mine(1);
+    }
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 20, "the last of them");
+    mock.mine(1);
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "the room again");
+    assert_eq!(copy.rate(&DEVNET, &mock, false), 2);
+}
+
 /// A pair the room left waiting is bumped to at least its own rate doubled for every BTC block it has waited from
 /// `BUMP_AFTER` on, kept within the floor and the cap (D-117).
 #[test]
 fn the_escalated_rate_doubles_within_the_floor_and_the_cap() {
-    let fees = FeePolicy {
-        floor: 2,
-        cap: 50,
-        target: DEFAULT_FEE_TARGET,
-    };
+    let fees = FeePolicy::new(2).with_cap(50);
     assert_eq!(fees.escalated(&DEVNET, 2, 1), 4);
     assert_eq!(fees.escalated(&DEVNET, 2, 3), 16);
     assert_eq!(fees.escalated(&DEVNET, 2, 5), 50, "the cap");
@@ -1545,6 +1589,17 @@ fn room_block(
     estimate: Option<u64>,
     min_feerate: u64,
 ) -> (Arc<MockBtc>, Instance, Block, SettlementPair, Rescuer) {
+    room_block_within(seed, estimate, min_feerate, BUMP_GRACE)
+}
+
+/// [`room_block`] with a rescuer for which a BTC block found `grace` after it first saw the pair waiting had the time
+/// to take it (D-147).
+fn room_block_within(
+    seed: &str,
+    estimate: Option<u64>,
+    min_feerate: u64,
+    grace: Duration,
+) -> (Arc<MockBtc>, Instance, Block, SettlementPair, Rescuer) {
     let (alice, bob) = (
         user(&format!("adv/liveness/{seed}/alice")),
         user(&format!("adv/liveness/{seed}/bob")),
@@ -1568,9 +1623,15 @@ fn room_block(
         a.producer.funding.clone().unwrap(),
         Some(a.producer.producer),
         None,
-    );
+    )
+    .with_bump_grace(grace);
     rescuer.run_once().unwrap();
     (mock, a, block, pair, rescuer)
+}
+
+/// The fee policy the producer and its rescuer share.
+fn fees_of(a: &Instance) -> &FeePolicy {
+    &a.producer.funding.as_ref().unwrap().fees
 }
 
 /// Whether the pair confirmed in the BTC tip.
@@ -1702,6 +1763,105 @@ fn a_pair_the_room_left_waiting_longer_is_bumped_further() {
     mock.mine(1);
     a.sync();
     assert!(landed_at_tip(&a, &pair), "the pair landed");
+}
+
+/// A settlement sent while the next BTC block showed room that a BTC block then leaves out was misjudged by the room
+/// (D-147): it is bumped after that one block, not after `BUMP_AFTER`, to the next-block estimate (here 10 sat/vB,
+/// above the 4 of the node's own target, with miners taking nothing below 5), and lands with its child. For
+/// `ROOM_DISTRUST_BLOCKS` BTC blocks the node's new settlements then pay the estimate although bitcoind still shows
+/// room, and the floor again after them.
+#[test]
+fn a_settlement_the_room_misjudged_is_bumped_after_one_btc_block_and_remembered() {
+    let (mock, a, _, pair, rescuer) = room_block_within("room-missed", Some(4), 5, Duration::ZERO);
+    mock.set_fee_estimate(URGENT_FEE_TARGET, Some(10));
+    assert!(children(&mock, &pair).is_empty(), "no block missed yet");
+    assert_eq!(fees_of(&a).room_rate(&DEVNET, mock.as_ref()), Some(2));
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+    rescuer.run_once().unwrap();
+    let child = children(&mock, &pair);
+    assert_eq!(child.len(), 1, "bumped after one BTC block");
+    assert_eq!(
+        package_feerate(&mock, &pair, &child[0]),
+        10,
+        "to the next-block estimate"
+    );
+    mock.mine(1);
+    a.sync();
+    assert!(landed_at_tip(&a, &pair), "the pair landed");
+    rescuer.run_once().unwrap();
+
+    // The first BTC block of the six has come: the next settlement pays the estimate of the node's target
+    let (alice, bob) = (
+        user("adv/liveness/room-missed/alice"),
+        user("adv/liveness/room-missed/bob"),
+    );
+    assert_eq!(fees_of(&a).room_rate(&DEVNET, mock.as_ref()), None);
+    assert_eq!(
+        fees_of(&a)
+            .room_reading(&DEVNET, mock.as_ref())
+            .map(|(rate, _)| rate),
+        Some(2),
+        "bitcoind still shows room"
+    );
+    a.submit(transfer_op(&alice, 1, 2, bob.account, 7));
+    let block = a.produce().unwrap();
+    let wary = SettlementPair::decode(block.settlement.as_ref().unwrap()).unwrap();
+    assert_eq!(pair_feerate(&mock, &wary), 4, "the estimate, not the floor");
+    mock.mine(ROOM_DISTRUST_BLOCKS - 1);
+    a.sync();
+    assert_eq!(
+        fees_of(&a).room_rate(&DEVNET, mock.as_ref()),
+        None,
+        "the sixth BTC block after the one that left the pair out"
+    );
+    mock.mine(1);
+    a.sync();
+    assert_eq!(
+        fees_of(&a).room_rate(&DEVNET, mock.as_ref()),
+        Some(2),
+        "the room again"
+    );
+    assert_eq!(
+        fees_of(&a).rate(&DEVNET, mock.as_ref(), false),
+        2,
+        "the floor"
+    );
+}
+
+/// A BTC block found before the pair has waited `BUMP_GRACE` was assembled before the pair reached its miner and
+/// says nothing of the room (D-147): the pair is not bumped for it, and the room is still paid by.
+#[test]
+fn a_btc_block_found_within_the_grace_does_not_count_against_the_room() {
+    let (mock, a, _, pair, rescuer) = room_block("room-early", Some(4), 5);
+    mock.set_fee_estimate(URGENT_FEE_TARGET, Some(10));
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+    rescuer.run_once().unwrap();
+    assert!(children(&mock, &pair).is_empty(), "not bumped");
+    assert_eq!(fees_of(&a).room_rate(&DEVNET, mock.as_ref()), Some(2));
+}
+
+/// Only a pair that waited with room in every round was sent on the room (D-147): after a round without room, a BTC
+/// block that leaves the pair out is not held against the room, and the pair waits for `BUMP_AFTER` as before.
+#[test]
+fn a_pair_that_waited_without_room_is_not_taken_as_misjudged() {
+    let (mock, a, _, pair, rescuer) = room_block_within("room-lost", Some(4), 5, Duration::ZERO);
+    mock.set_fee_estimate(URGENT_FEE_TARGET, Some(10));
+    mock.set_mempool_info(Some(MempoolInfo {
+        vsize: ROOMY_MEMPOOL_VSIZE + 1,
+        min_feerate: 1,
+    }));
+    rescuer.run_once().unwrap();
+    mock.set_mempool_info(Some(ROOM));
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+    rescuer.run_once().unwrap();
+    assert!(children(&mock, &pair).is_empty(), "not bumped");
+    assert_eq!(fees_of(&a).room_rate(&DEVNET, mock.as_ref()), Some(2));
 }
 
 /// While bitcoind's mempool has room, a rescue pays the floor like a settlement whatever the estimate (D-117): it is a
@@ -1864,6 +2024,35 @@ fn a_settlement_whose_data_landed_otherwise_is_not_bumped() {
         rescues(&mock, &block, &[pair.txid()]).is_empty(),
         "nor sent again"
     );
+}
+
+/// Nor is its waiting held against the room (D-147): the pair is left where it is on purpose, so the BTC blocks that
+/// leave it out, with room showing and the grace over, do not make this node's new transactions pay the estimate.
+#[test]
+fn a_settlement_whose_data_landed_otherwise_is_not_taken_as_misjudged() {
+    let (mock, a, block, pair) = waiting_block("landed-room", true);
+    send_claim(&mock, "landed-room/claim", &payload_of(&block), 10);
+    mock.mine(1);
+    a.sync();
+    mock.set_mempool_info(Some(ROOM));
+    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(10));
+    mock.set_fee_estimate(URGENT_FEE_TARGET, Some(10));
+    let rescuer = Rescuer::new(
+        a.chain.clone(),
+        a.producer.funding.clone().unwrap(),
+        Some(a.producer.producer),
+        None,
+    )
+    .with_bump_grace(Duration::ZERO);
+    rescuer.run_once().unwrap();
+    for _ in 0..=BUMP_AFTER {
+        mock.mine(1);
+        a.sync();
+        rescuer.run_once().unwrap();
+    }
+    assert!(in_mempool(&mock, &pair.txid()));
+    assert!(children(&mock, &pair).is_empty(), "not bumped");
+    assert_eq!(fees_of(&a).room_rate(&DEVNET, mock.as_ref()), Some(2));
 }
 
 /// A block's own settlement waiting in the BTC mempool below this node's fee rate does not hold this node's rescue back

@@ -140,7 +140,8 @@ pub fn unix_now() -> u64 {
 }
 
 /// Monotonic clock (used by the block production loop to decide whether the template is stale, by the chain to age the
-/// refusals it remembers and by the republishing to wait its turn, never enters block contents).
+/// refusals it remembers, by the republishing to wait its turn and by the bumps to age a waiting pair, never enters block
+/// contents).
 #[allow(clippy::disallowed_methods)]
 pub fn monotonic_now() -> std::time::Instant {
     std::time::Instant::now()
