@@ -338,9 +338,17 @@ impl Seeds {
                 let mut unanswered = sealed.clone();
                 unanswered.pop();
                 lists.push((unanswered, Vec::new()));
-                let mut first = sealed;
+                let mut first = sealed.clone();
                 first.rotate_right(1);
                 lists.push((first, Vec::new()));
+                // A path C op in a path B entry: in no aggregate, and both sides must say so rather than fail
+                let mut native = sealed;
+                for entry in &mut native {
+                    if let Entry::Sponsored { op } = entry {
+                        op.fee = FeeMode::BtcNative;
+                    }
+                }
+                lists.push((native, Vec::new()));
             }
             lists.extend(entries("signed").map(|signed| (signed, Vec::new())));
             for failing in case["failing"].as_array().into_iter().flatten() {

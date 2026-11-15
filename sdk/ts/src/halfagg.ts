@@ -67,9 +67,11 @@ function randomizers(items: readonly HalfSigned[]): bigint[] {
 /**
  * The item of a path B op (SPEC §4.5), from the op with half its signature or with the whole one: for BIP340 the message
  * is the VmOp sighash, for the two BIP322 forms the BIP341 sighash of BIP322's `to_sign` with `SIGHASH_DEFAULT` or
- * `SIGHASH_ALL`. `null` for a signature without a half form.
+ * `SIGHASH_ALL`. `null` for a signature without a half form, and for a path C op (`fee` is `BtcNative`), whose signature is
+ * bound to its BTC transaction and is in no aggregate.
  */
 export function halfSigned(op: VmOp): HalfSigned | null {
+  if (op.fee.kind === 'BtcNative') return null;
   const half = splitVmOp(op)?.half ?? op;
   switch (half.sig.kind) {
     case 'HalfBip340':

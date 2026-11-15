@@ -123,4 +123,8 @@ test('the rule on where the aggregate entry stands', () => {
   assert.equal(verifyEntriesAggregate([...sealed, aggregateEntry]), false);
   // whole signatures are not what a block holds
   assert.equal(verifyEntriesAggregate([...signed, aggregateEntry]), false);
+  // a path C op in a path B entry is in no aggregate: the answer is false, not an exception
+  const native = sealed.map((e): Entry => (e.kind === 'Sponsored' ? { kind: 'Sponsored', op: { ...e.op, fee: { kind: 'BtcNative' } } } : e));
+  assert.equal(verifyEntriesAggregate(native), false);
+  assert.equal(halfSigned(native.find((e) => e.kind === 'Sponsored')!.op), null);
 });
