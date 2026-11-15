@@ -11,7 +11,7 @@
  */
 import {
   DEVNET, SIGNET, VMOP_VERSION, RPC_ERROR_CODES, RpcError,
-  decodeAddress, encodeVmOp, feeFor, fromHex, opCost, opId, sha256, signVmopWithWallet, toHex,
+  decodeAddress, encodeVmOp, fromHex, opId, pathBFee, sha256, signVmopWithWallet, toHex,
   type Action, type BtcNetwork, type Funds, type KsanaRpcClient, type OpStatus, type Params, type UnsignedVmOp, type VmOp,
   type WalletAccount, type WalletAdapter,
 } from '@ksana/sdk';
@@ -320,7 +320,7 @@ export async function prepare(c: Context, action: Action, maxGas: bigint): Promi
   };
   const size = encodedSize(unsigned);
   if (size > c.params.max_op_bytes) fail('wasmSize');
-  const fee = feeFor(estimate.path_b.per_kib, opCost(c.params, size, maxGas), estimate.path_b.amount);
+  const fee = pathBFee(c.params, estimate.path_b, size, maxGas);
   unsigned.fee = { kind: 'Token', amount: fee };
   checkBalances(account.balances, amountsNeeded(snapshot, fee));
   const contract = snapshot.kind === 'Deploy' ? contractIdOf(unsigned.account, unsigned.nonce, sha256(snapshot.code)) :
@@ -332,7 +332,7 @@ async function recheck(c: Context, p: Prepared): Promise<void> {
   if (p.endpoint !== c.endpoint || p.unsigned.chain_id !== c.params.chain_id ||
     toHex(p.unsigned.account) !== c.wallet.account.account || p.unsigned.fee.kind !== 'Token' || p.unsigned.fee.amount !== p.fee) fail('changed');
   const { account, estimate } = await fresh(c, p.unsigned);
-  const required = feeFor(estimate.path_b.per_kib, opCost(c.params, encodedSize(p.unsigned), p.unsigned.max_gas), estimate.path_b.amount);
+  const required = pathBFee(c.params, estimate.path_b, encodedSize(p.unsigned), p.unsigned.max_gas);
   if (required > p.fee) fail('feeChanged');
   checkBalances(account.balances, amountsNeeded(p.unsigned.action, p.fee));
 }

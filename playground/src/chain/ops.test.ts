@@ -24,7 +24,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 async function setup() {
   const values = new Map<string, string>();
   const state = {
-    nonce: 0n, balance: 10_000_000_000n, token: 0n, rate: 1000n, chainId: DEVNET.chain_id, current: true,
+    nonce: 0n, balance: 10_000_000_000n, token: 0n, rate: 1000n, dataRate: 0n, chainId: DEVNET.chain_id, current: true,
     signing: 0, sent: 0, writes: 0, failStorageAfter: Infinity,
     outcome: 'accepted', afterSign: () => {}, afterSubmit: () => {}, notified: 0,
     pending: [] as { opId: string; nonce: bigint }[], submitted: null as VmOp | null,
@@ -57,7 +57,8 @@ async function setup() {
       case 'ksana_getAccount': result = { account: account.account, nonce: state.nonce.toString(),
         balances: [{ asset: '00'.repeat(32), amount: state.balance.toString() },
           ...(state.token ? [{ asset: toHex(TOKEN), amount: state.token.toString() }] : [])], locked_fees: [], at }; break;
-      case 'ksana_estimateFee': result = { feerate_sat_vb: '2', path_b: { amount: '1', per_kib: state.rate.toString() }, at }; break;
+      case 'ksana_estimateFee': result = { feerate_sat_vb: '2', path_b: { amount: '1', per_kib: state.rate.toString(),
+        ...(state.dataRate ? { per_kib_data: state.dataRate.toString() } : {}) }, at }; break;
       case 'ksana_submitOp': {
         state.sent += 1;
         state.submitted = decodeVmOp(fromHex(request.params[0]), DEVNET);
@@ -151,6 +152,19 @@ describe('wallet-signed path B operations', () => {
   it('accepts a zero per-KiB quote with the node minimum as the fee floor', async () => {
     const { c, state } = await setup(); state.rate = 0n;
     expect((await prepare(c, deploy(), 1_000_000n)).fee).toBe(1n);
+  });
+  it('pays the rate per KiB of bytes when a node asks more by it than by the cost, and refuses once it rises (D-153)', async () => {
+    const { c, state } = await setup(); state.rate = 0n; state.dataRate = 4096n;
+    const maxGas = DEVNET.block_gas_limit / 2n;
+    const p = await prepare(c, deploy(), maxGas);
+    // By bytes, not by the cost in the packing budget, which this max_gas makes several times the bytes
+    const size = BigInt(wasm.length);
+    expect(opCost(DEVNET, wasm.length + 512, maxGas)).toBeGreaterThan(size * 2n);
+    expect(p.fee).toBeGreaterThanOrEqual(size * 4n);
+    expect(p.fee).toBeLessThan((size + 512n) * 4n);
+    state.dataRate *= 2n;
+    await expect(submit(c, p)).rejects.toThrow();
+    expect(state.sent).toBe(0);
   });
   it('records the method of a call and the asset of a transfer', async () => {
     const { c, state } = await setup(); state.token = 10n;
