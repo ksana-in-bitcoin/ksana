@@ -635,7 +635,7 @@ impl Producer {
         else {
             return Ok(());
         };
-        cache.floor_at = Some((tip, std::time::Instant::now()));
+        cache.floor_at = Some((tip, monotonic_now()));
         let mut pool = self.mempool()?;
         if pool.raise_fee_floor(floor) {
             eprintln!(
