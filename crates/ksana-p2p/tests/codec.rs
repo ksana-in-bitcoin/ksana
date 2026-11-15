@@ -2,7 +2,9 @@
 //! limits, locator, work comparison, node key.
 
 use std::io;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use ksana_p2p::wire::{
     self, Request, Response, SyncCodec, MAX_BLOCKS_PER_REQUEST, MAX_GOSSIP_BYTES, MAX_LOCATOR_LEN,
@@ -16,6 +18,7 @@ use ksana_primitives::{
 };
 use libp2p::futures::executor::block_on;
 use libp2p::futures::io::Cursor;
+use libp2p::futures::AsyncRead;
 use libp2p::request_response::Codec;
 
 /// The devnet's `MAX_OP_BYTES` (every network has the same).
@@ -348,6 +351,81 @@ fn truncated_frames_are_rejected() {
     let (result, _) = read_request(bytes);
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
     let (result, _) = read_request(vec![1, 0]);
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+}
+
+/// A stream that hands out `piece` bytes at a time with a `Pending` before each piece, and records the longest buffer
+/// a read offered it.
+struct Trickle {
+    bytes: Vec<u8>,
+    position: usize,
+    piece: usize,
+    ready: bool,
+    longest_offer: usize,
+}
+
+impl AsyncRead for Trickle {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.longest_offer = self.longest_offer.max(buf.len());
+        if !self.ready {
+            self.ready = true;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        self.ready = false;
+        let n = self
+            .piece
+            .min(buf.len())
+            .min(self.bytes.len() - self.position);
+        let start = self.position;
+        buf[..n].copy_from_slice(&self.bytes[start..start + n]);
+        self.position += n;
+        Poll::Ready(Ok(n))
+    }
+}
+
+/// A frame that arrives in small pieces is read whole and no further, and the buffer runs at most 64 KiB ahead of the
+/// bytes received: a frame of several MiB does not cost a pass over the whole buffer per piece.
+#[test]
+fn frames_arriving_in_pieces_are_read_in_bounded_steps() {
+    let first = Response::Block(Some(block(1, 700_000)));
+    let second = Response::Block(Some(block(2, 3)));
+    let bytes = [
+        write_response(first.clone()),
+        write_response(second.clone()),
+    ]
+    .concat();
+    let first_len = write_response(first.clone()).len();
+    for piece in [1021, 64 * 1024, 100_000] {
+        let mut io = Trickle {
+            bytes: bytes.clone(),
+            position: 0,
+            piece,
+            ready: false,
+            longest_offer: 0,
+        };
+        let mut codec = SyncCodec::default();
+        let got = block_on(codec.read_response(&wire::SYNC_PROTOCOL, &mut io)).unwrap();
+        assert_eq!(got, first);
+        assert_eq!(io.position, first_len);
+        assert!(io.longest_offer <= 64 * 1024, "{}", io.longest_offer);
+        let got = block_on(codec.read_response(&wire::SYNC_PROTOCOL, &mut io)).unwrap();
+        assert_eq!(got, second);
+        assert_eq!(io.position, bytes.len());
+    }
+    // The stream ends inside the frame
+    let mut io = Trickle {
+        bytes: bytes[..first_len - 1].to_vec(),
+        position: 0,
+        piece: 4096,
+        ready: false,
+        longest_offer: 0,
+    };
+    let result = block_on(SyncCodec::default().read_response(&wire::SYNC_PROTOCOL, &mut io));
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
 }
 

@@ -135,6 +135,9 @@ pub fn locator_heights(tip: u64) -> Vec<u64> {
     }
 }
 
+/// How far ahead of the bytes received the buffer of a frame being read grows.
+const FRAME_READ_STEP: usize = 64 * 1024;
+
 /// Read one frame: 4-byte little-endian length ‖ content. When the length exceeds `max`, the content is not read and
 /// `InvalidData` is returned right away.
 pub async fn read_frame<T>(io: &mut T, max: usize) -> io::Result<Vec<u8>>
@@ -167,17 +170,23 @@ where
         )));
     }
     // Grow the buffer as data arrives: a peer that declares a length but does not send does not tie up that much
-    // memory.
+    // memory. The buffer runs at most `FRAME_READ_STEP` bytes ahead of the bytes received and each byte of it is
+    // zeroed once (`read_to_end` zeroes the spare capacity again on every poll that finds no data: seconds for a
+    // frame of 10 MiB in an unoptimized build).
     let mut buf = Vec::new();
-    io.take(u64::from(len)).read_to_end(&mut buf).await?;
-    if buf.len() != len_usize {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!(
-                "incomplete frame: {len} bytes declared, {} bytes received",
-                buf.len()
-            ),
-        ));
+    let mut filled = 0usize;
+    while filled < len_usize {
+        if filled == buf.len() {
+            buf.resize(len_usize.min(filled.saturating_add(FRAME_READ_STEP)), 0);
+        }
+        let read = io.read(buf.get_mut(filled..).unwrap_or_default()).await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("incomplete frame: {len} bytes declared, {filled} bytes received"),
+            ));
+        }
+        filled = filled.saturating_add(read).min(buf.len());
     }
     Ok(buf)
 }
