@@ -141,6 +141,10 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
   `funds` (D-073): attached funds `[{ "asset", "amount" }]` (`amount` is a decimal string), simulated as a transfer from `caller` to the contract, empty by default;
   the receipt is a failure when the balance of `caller` is insufficient.
 - Receipt: `{ "op_id", "success", "error", "gas_used", "output", "events": [{ "contract", "data" }], "asset_changes" }`; on failure `gas_used` is `max_gas`.
+- Signatures in a block (D-154, SPEC §4.5): `ksana_submitOp` takes an op with its whole signature, and answers the op ID, which for a path B op is the hash of the op with half its
+  signature. A block's `entries` hold each path B op with that half (`"sig": { "HalfBip340": "<64 hex chars>" }`, `HalfBip322`, `HalfBip322All`) and end with one entry
+  `{ "Aggregate": { "s": "<64 hex chars>" } }` when the block has a path B op; the aggregate entry has a receipt like every entry, a success without an `op_id`. An op with half a
+  signature is refused by `ksana_submitOp` (`-32010`, an invalid signature).
   - `asset_changes` (D-122): the changes the op made to built-in assets, in the order it made them, each with its `kind`, the `asset` and `events`, the number of the op's events
     recorded before it (a JSON number), so that the two lists interleave as the op made them. The kinds, with their other fields (accounts in hex, amounts as decimal strings):
     - `transfer` (`from`, `to`, `amount`): the `AssetTransfer` action, from its signer;
