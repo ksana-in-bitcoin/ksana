@@ -1,7 +1,7 @@
 //! The wasmtime engine and contract calls (SPEC §9.1–9.3, docs/ABI.md).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use ksana_primitives::asset::{STATUS_ALLOWED, STATUS_FROZEN};
@@ -116,6 +116,28 @@ pub struct VmOptions {
     /// waits for one of them to end. 0 takes every instance's memory from the operating system and returns it.
     /// Each may leave up to `MAX_INSTANCES_PER_OP × MAX_WASM_MEMORY` (1 GiB) resident for as long as the VM lives.
     pub pooled_calls: u32,
+}
+
+impl VmOptions {
+    /// The size limit of the compiled code a node keeps on disk by default, in MiB.
+    pub const DEFAULT_CODE_CACHE_MIB: u64 = 16_384;
+    /// The top-level calls a node runs on pooled memory at once by default.
+    pub const DEFAULT_POOLED_CALLS: u32 = 1;
+    /// The directory of the compiled code inside a node's data directory.
+    pub const CODE_CACHE_DIR: &'static str = "vm-cache";
+
+    /// The options of a node with the given data directory: compiled code of at most `code_cache_mib` MiB under
+    /// [`VmOptions::CODE_CACHE_DIR`] (0 keeps none) and `pooled_calls` calls on pooled memory (0 for no pool).
+    pub fn in_data_dir(data_dir: &Path, code_cache_mib: u64, pooled_calls: u32) -> Self {
+        let code_cache = (code_cache_mib > 0).then(|| CodeCache {
+            dir: data_dir.join(Self::CODE_CACHE_DIR),
+            max_bytes: code_cache_mib.saturating_mul(1024 * 1024),
+        });
+        VmOptions {
+            code_cache,
+            pooled_calls,
+        }
+    }
 }
 
 /// The compiled code kept on disk. The files are loaded as code without a check of their own: the directory is

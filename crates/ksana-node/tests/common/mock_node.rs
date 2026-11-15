@@ -256,6 +256,7 @@ impl MockNode {
             net: None,
             pow_algorithm,
             pruning: ksana_node::chain::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap();
         let client = HttpClientBuilder::default()

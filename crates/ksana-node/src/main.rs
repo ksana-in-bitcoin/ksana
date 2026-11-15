@@ -26,6 +26,7 @@ use std::time::Duration;
 use bitcoin::secp256k1::{Keypair, Secp256k1};
 use clap::Parser;
 use ksana_btc::client::RpcClient;
+use ksana_execution::VmOptions;
 use ksana_mempool::Policy;
 use ksana_node::chain::Pruning;
 use ksana_node::genesis::GenesisFile;
@@ -154,6 +155,17 @@ struct Cli {
     /// can still switch to need, and each pruning writes a checkpoint the next start continues from.
     #[arg(long)]
     no_pruning: bool,
+    /// Size limit, in MiB, of the compiled contract code kept in `vm-cache` under the data directory (D-151); 0 keeps
+    /// none. A contract the node compiled once is read back from there instead of compiled again after a restart or
+    /// once it left the 256 contracts kept in memory. Past the limit the files used least recently are deleted. The
+    /// files are loaded as code: protect the directory as you protect the node's binary.
+    #[arg(long, default_value_t = VmOptions::DEFAULT_CODE_CACHE_MIB)]
+    vm_code_cache_mib: u64,
+    /// Contract calls that run at once on memory the node keeps and reuses instead of asking the operating system for
+    /// new pages each time (D-151); a further call waits; 0 turns the reuse off. Each may keep up to 1 GiB resident
+    /// once contracts have used that much. When the pool cannot be set up the node says so and runs without it.
+    #[arg(long, default_value_t = VmOptions::DEFAULT_POOLED_CALLS)]
+    vm_pooled_calls: u32,
     /// Interval of syncing with bitcoind (milliseconds).
     #[arg(long, default_value_t = 500)]
     btc_poll_ms: u64,
@@ -348,6 +360,7 @@ fn run(cli: Cli) -> Result<(), NodeError> {
     } else {
         Pruning::default()
     };
+    let vm = VmOptions::in_data_dir(&cli.data_dir, cli.vm_code_cache_mib, cli.vm_pooled_calls);
     let config = NodeConfig {
         data_dir: cli.data_dir,
         genesis: GenesisFile::load(&cli.genesis)?,
@@ -369,6 +382,7 @@ fn run(cli: Cli) -> Result<(), NodeError> {
         net,
         pow_algorithm: None,
         pruning,
+        vm,
     };
     let node = Node::start(config)?;
     let tip = node.chain().tip()?;

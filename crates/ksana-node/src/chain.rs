@@ -78,7 +78,7 @@ use ksana_consensus::{
 use ksana_crypto::entries_root;
 use ksana_execution::{
     check_entries_static, BlockEnv, BlockError, BlockOutcome, Executor, MergedBlock, StateSource,
-    UnlockItem,
+    UnlockItem, VmOptions,
 };
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{
@@ -368,6 +368,8 @@ pub struct ChainOptions {
     pub algorithm: Option<Arc<dyn PowAlgorithm>>,
     /// Pruning (D-097).
     pub pruning: Pruning,
+    /// How the VM runs (D-151); by default as [`VmOptions::default`], neither compiled code on disk nor a pool.
+    pub vm: VmOptions,
 }
 
 /// Where pruning stands (D-097).
@@ -1305,7 +1307,7 @@ impl Chain {
             ),
         };
         Ok(Chain {
-            exec: Executor::new(params.clone())?,
+            exec: executor(&params, &options.vm)?,
             params,
             consensus,
             store,
@@ -5636,6 +5638,18 @@ fn rewind_store(store: &ChainStore, dag: &Dag, to: u64, old_height: u64) -> Resu
         high = fork_height;
     }
     Ok(())
+}
+
+/// The executor, its VM run the way `vm` says; without the pool when the machine refuses it (D-151).
+fn executor(params: &Params, vm: &VmOptions) -> Result<Executor, NodeError> {
+    let (executor, no_pool) = Executor::with_options_or_no_pool(params.clone(), vm)?;
+    if let Some(reason) = no_pool {
+        eprintln!(
+            "[ksana-node] the VM's memory pool could not be set up, contracts run without it (slower when they use \
+             much memory; --vm-pooled-calls 0 turns it off): {reason}"
+        );
+    }
+    Ok(executor)
 }
 
 /// Clears the state store and re-runs genesis (D-093): the root of the genesis state must equal the genesis block's

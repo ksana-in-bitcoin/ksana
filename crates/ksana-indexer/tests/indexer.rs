@@ -795,6 +795,7 @@ fn restart_with_bitcoind_behind_waits_instead_of_rebuilding() {
             btc: lagging.clone(),
             pow_algorithm: None,
             pruning: ksana_btc::prune::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap()
     };

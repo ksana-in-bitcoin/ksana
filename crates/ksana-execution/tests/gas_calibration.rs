@@ -400,6 +400,22 @@ fn instances_that_touch_their_memory() {
     let entries = b.fill(usize::MAX, 200_000, |_| call(toucher, "x", vec![], vec![]));
     b.measure("top-level calls touching 16 MiB, a block's data", &entries);
 
+    // the largest memory declared and left alone: what a node pays that clears a memory it hands out again
+    let idle = b.deploy(wasm(
+        r#"(memory (export "memory") 256)
+  (func (export "ksana_call") (param i32 i32) (result i64) (call $ok))"#,
+    ));
+    let one = b.entry(5_000_000, call(driver, "x", calls(idle, 15), vec![]));
+    let t = b.measure("one call of 15 instances of 16 MiB left alone", &[one]);
+    let max_gas = t.gas + t.gas / 100;
+    let most = usize::try_from(100_000_000 / max_gas).unwrap();
+    for _ in 0..2 {
+        let entries = b.fill(most, max_gas, |_| {
+            call(driver, "x", calls(idle, 15), vec![])
+        });
+        b.measure("a block of such calls", &entries);
+    }
+
     let small = b.deploy(wasm(
         r#"(memory (export "memory") 8)
   (func (export "ksana_call") (param i32 i32) (result i64) (call $ok))"#,

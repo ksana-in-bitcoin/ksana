@@ -46,6 +46,7 @@ fn open_pruned(dir: &Path, genesis: &GenesisFile, mock: &Arc<MockBtc>) -> Indexe
             btc_margin: 2,
             step: 5,
         },
+        vm: Default::default(),
     })
     .unwrap()
 }

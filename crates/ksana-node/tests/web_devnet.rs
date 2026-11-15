@@ -153,6 +153,7 @@ fn web_devnet() {
             }),
             pow_algorithm: None,
             pruning: ksana_node::chain::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap();
         let network = node.network().unwrap();

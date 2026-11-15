@@ -18,7 +18,7 @@ use ksana_btc::tracker::{
 };
 use ksana_btc::verdict::{self, Judge, Verdict};
 use ksana_consensus::{GhostdagError, PowAlgorithm, PowConsensus};
-use ksana_execution::{Executor, GenesisFile};
+use ksana_execution::{Executor, GenesisFile, VmOptions};
 use ksana_primitives::{BlockHeader, Params};
 use ksana_state::{DbMemory, StateDb};
 
@@ -88,6 +88,8 @@ pub struct IndexerConfig {
     pub pow_algorithm: Option<Arc<dyn PowAlgorithm>>,
     /// Pruning (D-097): on by default ([`Pruning::default`]).
     pub pruning: Pruning,
+    /// How the VM runs (D-151): whether compiled code is kept on disk and instance memory comes from a pool.
+    pub vm: VmOptions,
 }
 
 /// Indexer status.
@@ -371,6 +373,7 @@ impl Indexer {
             btc,
             pow_algorithm,
             pruning,
+            vm,
         } = config;
         params
             .check_upgrades()
@@ -480,8 +483,14 @@ impl Indexer {
                 None,
             ),
         };
-        let exec = Executor::new(params.clone())
+        let (exec, no_pool) = Executor::with_options_or_no_pool(params.clone(), &vm)
             .map_err(|e| internal(format!("creating the executor: {e}")))?;
+        if let Some(reason) = no_pool {
+            eprintln!(
+                "[ksana-indexer] the VM's memory pool could not be set up, contracts run without it (slower when \
+                 they use much memory; --vm-pooled-calls 0 turns it off): {reason}"
+            );
+        }
 
         let status = if reconciled {
             index.clear()?;

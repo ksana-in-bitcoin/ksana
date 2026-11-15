@@ -393,6 +393,7 @@ impl Fast {
             net: None,
             pow_algorithm: pow_algorithm.clone(),
             pruning: ksana_node::chain::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap();
         let client = HttpClientBuilder::default()
@@ -766,6 +767,7 @@ impl Net {
                 }),
                 pow_algorithm: None,
                 pruning: ksana_node::chain::Pruning::default(),
+                vm: Default::default(),
             })
             .unwrap();
             node.set_paused(true);
@@ -887,6 +889,7 @@ pub fn indexer(fast: &Fast) -> (Indexer, tempfile::TempDir) {
         btc: Arc::new(RpcClient::new(&url, &rpc_user, &rpc_pass).unwrap()),
         pow_algorithm: fast.pow_algorithm.clone(),
         pruning: ksana_btc::prune::Pruning::default(),
+        vm: Default::default(),
     })
     .unwrap();
     (indexer, dir)

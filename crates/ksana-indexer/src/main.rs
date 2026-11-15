@@ -34,7 +34,7 @@ use std::time::Duration;
 use clap::Parser;
 use ksana_btc::client::RpcClient;
 use ksana_btc::prune::Pruning;
-use ksana_execution::GenesisFile;
+use ksana_execution::{GenesisFile, VmOptions};
 use ksana_indexer::{Indexer, IndexerConfig, IndexerError};
 use ksana_primitives::Network;
 
@@ -86,11 +86,23 @@ struct Cli {
     /// disk, and each pruning writes a checkpoint the next start continues from.
     #[arg(long)]
     no_pruning: bool,
+    /// Size limit, in MiB, of the compiled contract code kept in `vm-cache` under the data directory (D-151); 0 keeps
+    /// none. A contract the indexer compiled once is read back from there instead of compiled again after a restart or
+    /// once it left the 256 contracts kept in memory. Past the limit the files used least recently are deleted. The
+    /// files are loaded as code: protect the directory as you protect the indexer's binary.
+    #[arg(long, default_value_t = VmOptions::DEFAULT_CODE_CACHE_MIB)]
+    vm_code_cache_mib: u64,
+    /// Contract calls that run at once on memory the indexer keeps and reuses instead of asking the operating system for
+    /// new pages each time (D-151); a further call waits; 0 turns the reuse off. Each may keep up to 1 GiB resident
+    /// once contracts have used that much. When the pool cannot be set up the indexer says so and runs without it.
+    #[arg(long, default_value_t = VmOptions::DEFAULT_POOLED_CALLS)]
+    vm_pooled_calls: u32,
 }
 
 fn run(cli: Cli) -> Result<(), IndexerError> {
     let btc = RpcClient::new(&cli.btc_rpc_url, &cli.btc_rpc_user, &cli.btc_rpc_pass)
         .map_err(|e| IndexerError::Config(format!("connecting to bitcoind: {e}")))?;
+    let vm = VmOptions::in_data_dir(&cli.data_dir, cli.vm_code_cache_mib, cli.vm_pooled_calls);
     let indexer = Arc::new(Indexer::open(IndexerConfig {
         data_dir: cli.data_dir,
         genesis: GenesisFile::load(&cli.genesis)?,
@@ -110,6 +122,7 @@ fn run(cli: Cli) -> Result<(), IndexerError> {
         } else {
             Pruning::default()
         },
+        vm,
     })?);
     eprintln!(
         "[ksana-indexer] upgrade table (D-076): {}",

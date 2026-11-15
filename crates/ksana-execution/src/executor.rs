@@ -85,7 +85,7 @@ use ksana_primitives::{
     KSA_ASSET_ID,
 };
 use ksana_vm::limits::EXECUTION_THREAD_STACK;
-use ksana_vm::{gas, CallOutcome, CallRequest, FailureReason, Vm, INIT_METHOD};
+use ksana_vm::{gas, CallOutcome, CallRequest, FailureReason, Vm, VmOptions, INIT_METHOD};
 
 use crate::builtin::{self, Fault};
 use crate::host::OpHost;
@@ -296,6 +296,8 @@ type ActionResult = Result<(Vec<u8>, u64), String>;
 /// Block executor: shared by the node and indexer (SPEC §10).
 pub struct Executor {
     vm: Vm,
+    /// The VM of the read-only calls when they have one of their own ([`Executor::with_options`]).
+    reads: Option<Vm>,
     params: Params,
 }
 
@@ -312,12 +314,60 @@ impl Executor {
     /// Creates an executor (with a new VM engine).
     pub fn new(params: Params) -> Result<Self, BlockError> {
         let vm = Vm::new(&params).map_err(|e| BlockError::Fatal(e.to_string()))?;
-        Ok(Executor { vm, params })
+        Ok(Executor {
+            vm,
+            reads: None,
+            params,
+        })
+    }
+
+    /// Creates an executor whose VM runs the way `options` say (D-151): local to the node, with no effect on what a
+    /// block computes. With a pool, the read-only calls of the RPC ([`Executor::simulate_call`]) run on a VM of their
+    /// own without one, sharing the compiled code on disk, so that they never hold a place a block's execution waits
+    /// for.
+    pub fn with_options(params: Params, options: &VmOptions) -> Result<Self, BlockError> {
+        let fatal = |e: ksana_vm::VmError| BlockError::Fatal(e.to_string());
+        let vm = Vm::with_options(&params, options).map_err(fatal)?;
+        let reads = if options.pooled_calls > 0 {
+            let plain = VmOptions {
+                pooled_calls: 0,
+                ..options.clone()
+            };
+            Some(Vm::with_options(&params, &plain).map_err(fatal)?)
+        } else {
+            None
+        };
+        Ok(Executor { vm, reads, params })
+    }
+
+    /// Same as [`Executor::with_options`], for a node's start: when the pool cannot be set up (it reserves address
+    /// space the machine may refuse), the executor runs without one and the reason is returned for the log.
+    pub fn with_options_or_no_pool(
+        params: Params,
+        options: &VmOptions,
+    ) -> Result<(Self, Option<String>), BlockError> {
+        if options.pooled_calls == 0 {
+            return Ok((Self::with_options(params, options)?, None));
+        }
+        match Self::with_options(params.clone(), options) {
+            Ok(executor) => Ok((executor, None)),
+            Err(e) => {
+                let plain = VmOptions {
+                    pooled_calls: 0,
+                    ..options.clone()
+                };
+                Ok((Self::with_options(params, &plain)?, Some(e.to_string())))
+            }
+        }
     }
 
     /// Uses the given VM (e.g. an engine with parallel compilation turned off).
     pub fn with_vm(params: Params, vm: Vm) -> Self {
-        Executor { vm, params }
+        Executor {
+            vm,
+            reads: None,
+            params,
+        }
     }
 
     /// Protocol parameters.
@@ -418,6 +468,7 @@ impl Executor {
         funds: Vec<Funds>,
         max_gas: u64,
     ) -> Result<Receipt, BlockError> {
+        let reads = self.reads.as_ref().unwrap_or(&self.vm);
         on_execution_thread(move || {
             if let Err(e) = check_funds(&funds) {
                 return Ok(simulated_failure(max_gas, e.into()));
@@ -438,7 +489,7 @@ impl Executor {
                 funds,
                 allow_init: false,
             };
-            let (mut ov, result) = self.call_vm(ov, &btc, env, req, remaining, None)?;
+            let (mut ov, result) = Self::call_vm(reads, ov, &btc, env, req, remaining, None)?;
             Ok(match result {
                 Ok((output, used)) => {
                     let (events, asset_changes) = ov.commit_op();
@@ -831,7 +882,7 @@ impl Executor {
                     funds: funds.clone(),
                     allow_init: true,
                 };
-                let (ov, result) = self.call_vm(ov, btc, env, req, remaining, native)?;
+                let (ov, result) = Self::call_vm(&self.vm, ov, btc, env, req, remaining, native)?;
                 let result = result.map(|(output, used)| (output, used.saturating_add(intrinsic)));
                 Ok((ov, result))
             }
@@ -859,7 +910,7 @@ impl Executor {
                     funds: funds.clone(),
                     allow_init: false,
                 };
-                let (ov, result) = self.call_vm(ov, btc, env, req, remaining, native)?;
+                let (ov, result) = Self::call_vm(&self.vm, ov, btc, env, req, remaining, native)?;
                 let result = result.map(|(output, used)| (output, used.saturating_add(intrinsic)));
                 Ok((ov, result))
             }
@@ -867,7 +918,7 @@ impl Executor {
     }
 
     fn call_vm(
-        &self,
+        vm: &Vm,
         ov: Overlay,
         btc: &Arc<dyn BtcView>,
         env: &BlockEnv,
@@ -884,7 +935,7 @@ impl Executor {
             native,
             native_cache: None,
         };
-        let (host, outcome) = self.vm.call(host, req, gas_limit);
+        let (host, outcome) = vm.call(host, req, gas_limit);
         let outcome = outcome.map_err(|e| BlockError::Fatal(e.to_string()))?;
         let result = match outcome {
             CallOutcome::Success { output, gas_used } => Ok((output, gas_used)),

@@ -23,6 +23,7 @@ use crate::producer::{Announce, FeePolicy, Funding, Producer, TemplateSync};
 use crate::rescue::Rescuer;
 use crate::rpc::NodeRpc;
 use crate::NodeError;
+use ksana_execution::VmOptions;
 
 /// Network layer config (D-040).
 #[derive(Clone)]
@@ -73,6 +74,8 @@ pub struct NodeConfig {
     pub pow_algorithm: Option<Arc<dyn PowAlgorithm>>,
     /// Pruning (D-097): on by default ([`Pruning::default`]).
     pub pruning: Pruning,
+    /// How the VM runs (D-151): whether compiled code is kept on disk and instance memory comes from a pool.
+    pub vm: VmOptions,
 }
 
 /// A running node.
@@ -100,6 +103,7 @@ impl Node {
             ChainOptions {
                 algorithm: config.pow_algorithm.clone(),
                 pruning: config.pruning,
+                vm: config.vm.clone(),
             },
         )?);
         // Sync to bitcoind's tip first so the block production loop has an anchor available; on failure the background

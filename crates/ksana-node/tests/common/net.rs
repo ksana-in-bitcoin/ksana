@@ -395,6 +395,7 @@ impl Net {
             }),
             pow_algorithm: self.pow_algorithm.clone(),
             pruning: ksana_node::chain::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap();
         node.set_paused(true);
