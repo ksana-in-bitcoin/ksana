@@ -455,6 +455,24 @@ mod tests {
     }
 
     #[test]
+    fn a_ksa_price_is_only_taken_with_a_funding_key_and_above_zero() {
+        let base = ["ksana-node", "--data-dir", "d", "--genesis", "g"];
+        let with = |more: &[&str]| Cli::try_parse_from(base.iter().chain(more).copied());
+        assert!(with(&[]).unwrap().ksa_price_sat.is_none());
+        let refused = with(&["--ksa-price-sat", "0.5"]).unwrap_err().to_string();
+        assert!(refused.contains("--btc-funding-key-file"), "{refused}");
+        let funded = ["--btc-funding-key-file", "k", "--ksa-price-sat"];
+        let price = |price: &'static str| with(&[funded.as_slice(), &[price]].concat());
+        assert_eq!(
+            price("0.5").unwrap().ksa_price_sat,
+            Some("0.5".parse().unwrap())
+        );
+        for bad in ["0", "0.000", "-1", "1e3", "0.123456789", "sat"] {
+            assert!(price(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_funding_key_on_signet_or_mainnet_needs_a_wallet() {
         for network in [Network::Signet, Network::Mainnet] {
             let refused = check_funding_listing(network, true, false).unwrap_err();
