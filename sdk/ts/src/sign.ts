@@ -48,9 +48,12 @@ export type VerifyResult = 'valid' | 'invalid' | 'unsupported';
  * - `Bip340`: BIP340 verification.
  * - `Bip322Simple`: returns `unsupported`; consensus verification is on the Rust side (`ksana-crypto::bip322`), and the SDK's
  *   `verifyVmopBip322` is only a local self-check.
+ * - Half a signature (`HalfBip340`, `HalfBip322`, `HalfBip322All`, D-154): `invalid`. It is the form a path B op has in a
+ *   block, where the block's aggregate answers for it; alone it proves nothing.
  */
 export function verifyVmop(op: VmOp, firstInput?: OutPoint): VerifyResult {
   if (op.sig.kind === 'Bip322Simple') return 'unsupported';
+  if (op.sig.kind !== 'Bip340') return 'invalid';
   try {
     return schnorr.verify(op.sig.bytes, vmopSighash(op, firstInput), op.account) ? 'valid' : 'invalid';
   } catch {

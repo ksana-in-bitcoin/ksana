@@ -209,6 +209,14 @@ export function verifyBip322Simple(messageChallenge: Uint8Array, message: string
 }
 
 /**
+ * The 32-byte message a BIP322 simple signature of `message` by account `account` is over (D-154): the BIP341 key-path
+ * sighash of `to_sign` for the account's Taproot address, with `SIGHASH_ALL` when `hashAll` and `SIGHASH_DEFAULT` otherwise.
+ */
+export function accountSighash(account: Uint8Array, message: string | Uint8Array, hashAll: boolean): Uint8Array {
+  return toSignSighash(p2trScriptFromOutputKey(account), message, hashAll ? SIGHASH_ALL : SIGHASH_DEFAULT);
+}
+
+/**
  * The `message_challenge` of an account signature (D-092): the account's Taproot address `OP_1 <account>`; the witness must
  * have exactly 1 element (P2TR key path). Returns `null` when the witness has the wrong shape or the account is not a valid
  * x-only public key (for example a contract ID).
