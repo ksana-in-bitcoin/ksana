@@ -42,7 +42,9 @@ use bitcoin::{
     Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Txid, Witness,
 };
 
-use crate::client::{BtcClient, BtcError, HeaderInfo, MempoolInfo, ScannedUtxo, TxInfo, UtxoInfo};
+use crate::client::{
+    BtcClient, BtcError, HeaderInfo, MempoolInfo, ScannedUtxo, TipStats, TxInfo, UtxoInfo,
+};
 
 /// regtest's difficulty target (compact format).
 pub const REGTEST_BITS: u32 = 0x207f_ffff;
@@ -319,6 +321,9 @@ struct Chain {
     min_feerate: u64,
     /// [`MockBtc::set_mempool_info`]: what bitcoind tells of its mempool.
     mempool_info: Option<MempoolInfo>,
+    /// [`MockBtc::set_tip_weight`]: the weight bitcoind tells of its best block's transactions in place of the
+    /// block's own.
+    tip_weight: Option<u64>,
     /// [`MockBtc::set_txindex_lag`]: how many blocks the txindex is behind the tip.
     txindex_lag: u32,
 }
@@ -352,6 +357,7 @@ impl Chain {
             min_feerate: 0,
             txindex_lag: 0,
             mempool_info: None,
+            tip_weight: None,
         }
     }
 
@@ -931,6 +937,12 @@ impl MockBtc {
         self.lock().mempool_info = info;
     }
 
+    /// Sets the weight bitcoind tells of its best block's transactions ([`BtcClient::tip_stats`], D-147), whatever
+    /// the block holds and for every later best block as well; `None`, the default, tells the block's own.
+    pub fn set_tip_weight(&self, weight: Option<u64>) {
+        self.lock().tip_weight = weight;
+    }
+
     /// Clears the mempool (simulating a bitcoind restart without keeping the mempool).
     pub fn clear_mempool(&self) {
         self.lock().mempool = Mempool::default();
@@ -1080,5 +1092,24 @@ impl BtcClient for MockBtc {
     /// What [`MockBtc::set_mempool_info`] set.
     fn mempool_info(&self) -> Result<Option<MempoolInfo>, BtcError> {
         Ok(self.online()?.mempool_info)
+    }
+
+    /// The best block's height and the weight of its transactions without the coinbase, or the weight
+    /// [`MockBtc::set_tip_weight`] set.
+    fn tip_stats(&self) -> Result<Option<TipStats>, BtcError> {
+        let chain = self.online()?;
+        let Some(stored) = chain.blocks.get(&chain.tip()) else {
+            return Ok(None);
+        };
+        let own = stored
+            .block
+            .txdata
+            .iter()
+            .skip(1)
+            .fold(0u64, |sum, tx| sum.saturating_add(tx.weight().to_wu()));
+        Ok(Some(TipStats {
+            height: stored.height,
+            weight: chain.tip_weight.unwrap_or(own),
+        }))
     }
 }

@@ -1,6 +1,7 @@
 //! M3: the behavior of `ksana_btc::client::RpcClient` on a real regtest bitcoind (`tests/integration/run.sh`).
 //!
-//! Covers every method of `BtcClient`: tip and block queries (`-8` / `-5` → `None`, internal byte order),
+//! Covers every method of `BtcClient`: tip and block queries (`-8` / `-5` → `None`, internal byte order), the best
+//! block's statistics,
 //! transactions in the mempool and confirmed, UTXOs with / without the mempool, UTXO scan of a fresh address
 //! (including coinbase), testmempoolaccept rejection reasons, the various results of sendrawtransaction (already in
 //! the mempool, already confirmed, a confirmed transaction with all outputs spent, rejected, undecodable), blocks
@@ -170,6 +171,35 @@ fn chain_queries_match_bitcoind() {
         vout: 0,
     };
     assert_eq!(c.utxo(&nowhere, true).unwrap(), None);
+}
+
+/// `tip_stats` is the best block's height and the weight of its transactions without the coinbase (`getblockstats`,
+/// D-147): nothing for a block of the coinbase alone, the weight of the wallet's transaction in the block that
+/// confirms it.
+#[test]
+fn the_tip_stats_are_the_best_blocks_height_and_weight() {
+    let wallet = wallet();
+    let c = client();
+    let (addr, script) = fresh(&wallet);
+
+    let (height, _) = c.tip().unwrap();
+    let stats = c.tip_stats().unwrap().unwrap();
+    assert_eq!(
+        (stats.height, stats.weight),
+        (height, 0),
+        "the coinbase alone"
+    );
+    assert_eq!(c.tip_stats().unwrap(), Some(stats), "asked again");
+
+    let tx = wallet.fund_and_sign(vec![pay(100_000, &script)]);
+    assert_eq!(c.broadcast(&tx).unwrap(), Ok(()));
+    wallet.mine(1, &addr);
+    let stats = c.tip_stats().unwrap().unwrap();
+    assert_eq!(stats.height, height + 1);
+    assert_eq!(stats.weight, tx.weight().to_wu());
+    let (_, hash) = c.tip().unwrap();
+    let block = c.block(&hash).unwrap().unwrap();
+    assert_eq!(block.txdata.len(), 2, "the coinbase and the transaction");
 }
 
 #[test]

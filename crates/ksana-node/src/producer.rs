@@ -19,7 +19,7 @@
 //! `MAX_BLOCK_DATA_BYTES` carries this block's data only, or is not carried at all when even that does not fit.
 
 use std::collections::{btree_map, BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -107,12 +107,22 @@ pub const URGENT_FEE_TARGET: u16 = 1;
 /// The most virtual bytes bitcoind's mempool holds while the next BTC block still has room for all of it (vB, D-117):
 /// half of a block's 1 000 000 vB, the size up to which mempool.space suggests the minimum fee for the next block.
 pub const ROOMY_MEMPOOL_VSIZE: u64 = 500_000;
+/// The most weight bitcoind's best block took while the next one still has room (weight units, D-147): half of a
+/// block's 4 000 000, the same half as [`ROOMY_MEMPOOL_VSIZE`], read from what the miner of the last block had to
+/// take rather than from what this bitcoind holds just after it.
+pub const ROOMY_BLOCK_WEIGHT: u64 = 2_000_000;
+/// For how many BTC blocks after a pair the room misjudged the node pays the estimate whatever the room reads
+/// (D-147).
+pub const ROOM_DISTRUST_BLOCKS: u32 = 6;
 
-/// The fee rate policy of this node's BTC transactions (local policy, D-102, D-117): its settlements, rescues,
+/// The fee rate policy of this node's BTC transactions (local policy, D-102, D-117, D-147): its settlements, rescues,
 /// republishes, funding splits and CPFP bumps pay bitcoind's estimate for confirming within `target` BTC blocks, kept
-/// within [`floor`, `cap`]; outside a race, its new transactions pay the floor instead while bitcoind's mempool has
-/// room, and a pair that room left waiting is bumped to at least an [`escalated`](Self::escalated) rate of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// within [`floor`, `cap`]; outside a race, its new transactions pay the floor instead while bitcoind's mempool and
+/// its best block show room, and a pair that room left waiting is bumped to the next-block estimate after one BTC
+/// block and to at least an [`escalated`](Self::escalated) rate of its own from the second on. A pair the room left
+/// waiting is remembered ([`misjudged`](Self::misjudged)): the copies of a policy share that memory, so the producer,
+/// the rescuer and `ksana_estimateFee` of one node read the room alike.
+#[derive(Clone, Debug)]
 pub struct FeePolicy {
     /// The lowest fee rate (sat/vB, `--settlement-feerate`), also paid when bitcoind has no estimate and while its
     /// mempool has room (D-117); never below `MIN_SETTLEMENT_FEERATE`.
@@ -121,6 +131,9 @@ pub struct FeePolicy {
     pub cap: u64,
     /// The confirmation target (BTC blocks, `--settlement-conf-target`).
     pub target: u16,
+    /// The BTC height from which the room is paid by again after a pair it misjudged (D-147); 0 when there was
+    /// none. Kept in memory only: a restart forgets it.
+    room_from: Arc<AtomicU32>,
 }
 
 impl FeePolicy {
@@ -130,7 +143,20 @@ impl FeePolicy {
             floor,
             cap: DEFAULT_MAX_FEERATE.max(floor),
             target: DEFAULT_FEE_TARGET,
+            room_from: Arc::default(),
         }
+    }
+
+    /// Replaces the cap (`--max-settlement-feerate`).
+    pub fn with_cap(mut self, cap: u64) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    /// Replaces the confirmation target (`--settlement-conf-target`).
+    pub fn with_target(mut self, target: u16) -> Self {
+        self.target = target;
+        self
     }
 
     /// The fee rate (sat/vB) to pay now: [`room_rate`](Self::room_rate) while bitcoind's mempool has room, unless
@@ -145,22 +171,60 @@ impl FeePolicy {
         self.estimated_rate(params, client, urgent)
     }
 
-    /// The fee rate (sat/vB) while bitcoind's mempool has room (D-117): when it holds at most
-    /// [`ROOMY_MEMPOOL_VSIZE`], the next BTC block takes all of it, so the floor is enough, or the mempool's own
-    /// minimum when that is higher, up to the cap. `None` when the mempool holds more, is still loading or cannot be
-    /// asked.
+    /// The fee rate (sat/vB) of a new transaction while the next BTC block has room (D-117, D-147):
+    /// [`room_reading`](Self::room_reading), unless a pair the room left waiting was reported
+    /// ([`misjudged`](Self::misjudged)) within the last [`ROOM_DISTRUST_BLOCKS`] BTC blocks.
     pub fn room_rate(&self, params: &Params, client: &dyn BtcClient) -> Option<u64> {
+        let (rate, height) = self.room_reading(params, client)?;
+        self.trusts_room(height).then_some(rate)
+    }
+
+    /// Whether a [`room_reading`](Self::room_reading) at the BTC height `height` is paid by: not within
+    /// [`ROOM_DISTRUST_BLOCKS`] BTC blocks of a pair the room misjudged ([`misjudged`](Self::misjudged), D-147).
+    pub fn trusts_room(&self, height: u32) -> bool {
+        height >= self.room_from.load(Ordering::Relaxed)
+    }
+
+    /// What bitcoind shows of the next BTC block's room, whatever is remembered (D-117, D-147): when its mempool holds
+    /// at most [`ROOMY_MEMPOOL_VSIZE`] and its best block took at most [`ROOMY_BLOCK_WEIGHT`], the next block takes
+    /// all that waits, so the floor is enough, or the mempool's own minimum when that is higher, up to the cap; with
+    /// it the height of that best block. `None` when the mempool holds more or is still loading, when the best block
+    /// took more, or when either cannot be read.
+    pub fn room_reading(&self, params: &Params, client: &dyn BtcClient) -> Option<(u64, u32)> {
         let (floor, cap) = self.bounds(params);
-        match client.mempool_info() {
+        let rate = match client.mempool_info() {
             Ok(Some(info)) if info.vsize <= ROOMY_MEMPOOL_VSIZE => {
-                Some(info.min_feerate.clamp(floor, cap))
+                info.min_feerate.clamp(floor, cap)
             }
-            Ok(_) => None,
+            Ok(_) => return None,
             Err(e) => {
                 eprintln!("[ksana-node] cannot read bitcoind's mempool ({e}); paying the estimate");
+                return None;
+            }
+        };
+        // The mempool is at its emptiest just after a block, and a bitcoind may hold less than the miners do: the
+        // block itself tells what its miner had to take
+        match client.tip_stats() {
+            Ok(Some(stats)) if stats.weight <= ROOMY_BLOCK_WEIGHT => Some((rate, stats.height)),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!(
+                    "[ksana-node] cannot read bitcoind's best block ({e}); paying the estimate"
+                );
                 None
             }
         }
+    }
+
+    /// Remembers that a pair sent while the room showed has missed a BTC block that had the time to take it, seen at
+    /// the BTC height `btc_tip` (D-147): while bitcoind's best block is that one or one of the
+    /// [`ROOM_DISTRUST_BLOCKS`] after it, [`room_rate`](Self::room_rate) answers nothing and new transactions pay the
+    /// estimate. Returns whether this moved the height from which the room is paid by again.
+    pub fn misjudged(&self, btc_tip: u32) -> bool {
+        let from = btc_tip
+            .saturating_add(ROOM_DISTRUST_BLOCKS)
+            .saturating_add(1);
+        self.room_from.fetch_max(from, Ordering::Relaxed) < from
     }
 
     /// bitcoind's estimate (sat/vB) for confirming within `target` BTC blocks, or within [`URGENT_FEE_TARGET`] when

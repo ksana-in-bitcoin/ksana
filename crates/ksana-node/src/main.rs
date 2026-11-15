@@ -262,11 +262,9 @@ fn run(cli: Cli) -> Result<(), NodeError> {
         .map(|p| {
             load_funding(
                 p,
-                FeePolicy {
-                    floor: cli.settlement_feerate,
-                    cap: cli.max_settlement_feerate,
-                    target: cli.settlement_conf_target,
-                },
+                FeePolicy::new(cli.settlement_feerate)
+                    .with_cap(cli.max_settlement_feerate)
+                    .with_target(cli.settlement_conf_target),
             )
         })
         .transpose()?
