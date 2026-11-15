@@ -5500,3 +5500,58 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `NodeConfig::vm`, `IndexerConfig::vm`, `--vm-code-cache-mib`, `--vm-pooled-calls`); tests (`ksana-vm/tests/options.rs`, the state store's preview tests, the determinism and
   random-sequence tests run a third engine configuration, every other node of the multi-node tests runs with the options); SPEC (the version history, §9.1, §13.1's `BLOCK_GAS_LIMIT`, §14);
   ARCHITECTURE; CONTRIBUTING; D-148.
+
+## D-152 A waiting pair is raised per BTC block with or without room, a race pays the cap at once, and the default cap is 1 000 sat/vB (2026-11-15, the three changes D-150 named, the cap decided by the project owner; revises D-102, D-117 and SPEC §7.7, §14, `docs/RPC.md`; local policy, no consensus change, M64)
+
+- **Problem**: D-150 replayed the node's fee policy over mainnet's fee history and found three gaps. The cap of 100 sat/vB (D-102) paused path B at up to a fifth of the BTC tips in the
+  two busiest months on record. A waiting pair was doubled per BTC block only while the mempool showed room (D-117), which on mainnet is rare (0.3% to 2.1% of the blocks): a pair that
+  paid an estimate that turned out too low waited for bitcoind's estimate to rise. And while a competing chain was on BTC (D-091) the node paid the next-block estimate, which whoever
+  fills the blocks above that estimate can outbid for far less than the cap would cost them. The project owner decided the default cap: 1 000 sat/vB.
+- **Decision** (local policy of the node; no rule of consensus, no parameter of the chain and no transaction format changes):
+  1. **The default of `--max-settlement-feerate` is 1 000 sat/vB** (100 before). The cap bounds every rate below; an operator sets another with the option as before.
+  2. **A waiting pair is raised per BTC block whether or not the mempool shows room**: once a commit / reveal pair this node sent has waited `BUMP_AFTER` (2) BTC blocks, its CPFP child
+     lifts the package to the estimate or to the pair's own rate doubled, whichever is higher, and the own rate is doubled again for every further BTC block, up to the cap. D-117 counted
+     only the blocks waited through with room; the count now starts at the block the node first saw the pair waiting and no longer reads the room. The bump after one BTC block for a
+     pair the room misjudged, and its memory (D-147), stay as they are.
+  3. **A race pays the cap at once**: while a lighter competing chain is on BTC (`Chain::btc_competitor`), a new settlement, rescue or republish pays the cap, whatever bitcoind
+     estimates and whatever room the mempool has, and a pair already waiting is bumped to the cap in the same round, without waiting `BUMP_AFTER` blocks. A split transaction keeps the
+     confirmation target as before (it does not race).
+  4. **A wallet that cannot pay the rate pays what it can**, since a cap ten times higher is often beyond one funding output (a pair of the fifth run's average size, 2 861 vB, costs
+     2 861 000 sat at the cap):
+     - a pair the funding outputs cannot fund at the cap is funded at the next-block estimate, the rate a race paid before this entry (`fund_or_lower`), and logged;
+     - a CPFP child whose pair's change cannot pay the rate sought and keep the dust floor pays all of the change above the dust floor instead, provided that is at least the minimum a
+       replacement must pay (the replaced child's fee plus the relay increment) and the child's own minimum, and that the child pays a higher rate than the pair (`cpfp_child`). Before,
+       such a pair got no child at all.
+  The simulation of D-150 with the two changes it can model (the doubling without room and the cap; tips at which path B is paused, for the tenth percentile and, in brackets, the
+  minimum rate of each block):
+
+  | Stretch of mainnet | Cap 100, as before | Cap 100, doubling without room | Cap 1 000, doubling only with room | Cap 1 000, doubling without room |
+  |---|---|---|---|---|
+  | The 32 days to 2026-11-15 | 1.27% (0.28%) | none (none) | 1.27% (0.28%) | none (none) |
+  | April 2024 | 19.63% (15.74%) | 16.76% (12.65%) | 6.56% (6.40%) | 1.00% (0.74%) |
+  | May 2023 | 19.29% (2.78%) | 14.73% (0.34%) | 8.15% (2.78%) | none (0.34%) |
+
+  In April 2024 0.9% of the blocks still asked more than 1 000 sat/vB (20 in a row at the longest), which is what remains. The rate paid on average rises with the cap in the busy
+  months (tenth percentile: 66 to 148 sat/vB in April 2024, 76 to 135 in May 2023) and stays at 2.2 to 2.3 sat/vB in the recent stretch.
+- **Rationale**: the pause of SPEC §6.4 stops path B for every user, while a higher rate costs the one producer whose pair waits, so the policy spends up to the cap before it lets the
+  pause come; a pair that has missed a block has shown that its rate was too low whatever the mempool reads. In a race the loss is not a wait but finality going to the other chain, and
+  the next-block estimate does not follow blocks an opponent fills on purpose (D-150 item 3), so the node no longer asks the estimate. A child paying less than the rate sought is still
+  worth sending: it moves the pair up, and the alternative was no bump.
+- **Costs and limitations**:
+  - **What a race costs the node**: at the cap, 2 861 000 sat for a pair of the fifth run's average size, each pair the node sends while the race lasts, and each waiting pair's change
+    up to that. Whoever lands one fast-lane block's header on BTC ahead of the honest chain's data starts a race for every node that settles, and it lasts until honest data outweighs
+    it on BTC. No race was seen in the fifth run (15 nodes, no "lighter competing chain" in their logs), so its frequency in honest operation is not measured on mainnet. What bounds
+    the loss is the hot wallet (`--hot-wallet-cap-sat`, D-060) and `--max-settlement-feerate`; there is no budget per race. A schedule that rises towards the cap as the competing
+    header nears `BTC_FINALITY_CONFS` would cost less and was not chosen: the project owner asked for the cap at once.
+  - **A higher cap drains the funding pool faster**: a pair at a high rate takes several funding outputs (each at least 100 000 sat, SPEC §7.7), and a child that pays what the change
+    affords leaves the dust floor of it. In a long fee spike a node may run out of confirmed funding outputs and send nothing until a split or a top-up confirms; its blocks then carry
+    no settlement and others republish for it (D-143).
+  - The fallback for a wallet too small for the cap is the next-block estimate, not the highest rate the wallet could pay: the child then adds the change, so the pair's own inputs are
+    what is spent. A wallet whose outputs together could pay more than the estimate and less than the cap pays less than it could.
+  - The simulation's limits are D-150's: Bitcoin Core's estimator is stood in for, there is no mempool history, package limits, replacement and relay are not modelled, and the race is
+    not simulated at all. The figures show direction and size.
+  - The room rule's constants (D-147) and the contest for the first place in a BTC block (D-149) stay open as before (SPEC §14).
+- **Impact**: `ksana-node` (`producer.rs`: `DEFAULT_MAX_FEERATE`, `FeePolicy::race_rate`, `rate`, `fund_or_lower`; `rescue.rs`: `Rescuer::bump`, `run_once`; the help of
+  `--max-settlement-feerate`), `ksana-btc` (`settlement::cpfp_child`); tests (`adversarial_liveness.rs`: the rate in a race, the default cap, a pair left waiting without room;
+  `adversarial_finality.rs`: the race pays the cap, a wallet too small for it, a split beside it; `ksana-btc/tests/settlement.rs`: the child of a change that cannot pay); SPEC (the version history,
+  §7.7, §14); `docs/RPC.md`; `docs/SIGNET.md`; ARCHITECTURE; D-102, D-117, D-150.

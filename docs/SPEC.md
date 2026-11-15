@@ -17,6 +17,12 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-15, a waiting pair is raised per BTC block with or without room, a race pays the cap, and the default cap is 1 000 sat/vB (M64, D-152)**: local policy of the node, no
+  consensus change. Two of the three changes D-150 named are made: a commit / reveal pair that has waited 2 BTC blocks is lifted to at least its own rate doubled, and doubled again per
+  further block, whether or not the mempool shows room (only with room before, D-117); and while a competing chain is on BTC the node's transactions pay the cap, not the next-block
+  estimate. The default of `--max-settlement-feerate` goes from 100 to 1 000 sat/vB, the project owner's decision. A wallet that cannot pay the rate pays what it can: the next-block
+  estimate for a pair, the change above the dust floor for a CPFP child. In D-150's simulation path B's pauses in the two busiest months on record fall from about a fifth of the BTC
+  tips to 1.0% and none. A race at the cap costs the node up to the cap for every pair it sends while it lasts, bounded by its hot wallet (§7.7, §14).
 - **2026-11-15, three remedies in the node for the costs the gas measurement found (M63, D-151)**: no consensus change and no value changed. The node keeps the compiled code of every
   contract on disk (`--vm-code-cache-mib`), gives contract instances memory from a pool it keeps resident (`--vm-pooled-calls`), and commits the Merkle tree it computed to check a block
   instead of computing it again. On the machine of D-148 the blocks that took 55 and 343 seconds (calls going round 260 contracts), 16 to 18 seconds (instances touching fresh memory)
@@ -1102,16 +1108,18 @@ Local policy (D-037, D-060, D-075, D-109):
 - **Funding UTXO pool**: settlement transactions can only be funded with confirmed UTXOs and cannot spend each other, so within one BTC block interval the number of transactions that can be funded is at most the number of confirmed UTXOs. When the available confirmed
   UTXOs are fewer than the target count (`--funding-pool-target`, default 64, 0 means no splitting), a split transaction is sent that splits the largest one into several equal outputs (each at least 100 000 sats),
   with at most one split transaction unconfirmed at a time.
-- **Fee rate** (D-102, D-117, D-147): every BTC transaction of the node (settlements, rescues, republishes, split transactions, CPFP children) pays bitcoind's `estimatesmartfee` for the confirmation target
+- **Fee rate** (D-102, D-117, D-147, D-152): every BTC transaction of the node (settlements, rescues, republishes, split transactions, CPFP children) pays bitcoind's `estimatesmartfee` for the confirmation target
   (`--settlement-conf-target`, default 3 BTC blocks), kept within the floor `--settlement-feerate` (default 2 sat/vB, not below `MIN_SETTLEMENT_FEERATE`) and the cap `--max-settlement-feerate`
-  (default 100 sat/vB); the floor when bitcoind has no estimate. While bitcoind's mempool holds at most half a block (500 000 vB, `getmempoolinfo`'s `bytes`) and bitcoind's best block took at most half a block's weight
+  (default 1 000 sat/vB, D-152); the floor when bitcoind has no estimate. While bitcoind's mempool holds at most half a block (500 000 vB, `getmempoolinfo`'s `bytes`) and bitcoind's best block took at most half a block's weight
   (2 000 000 weight units, `getblockstats`' `total_weight`; the mempool alone reads low just after a block), the next block has room for all that waits, and a new
   transaction pays the floor instead, or the mempool's minimum (`mempoolminfee`) when that is higher, up to the cap (D-117, D-147); not so for the 6 BTC blocks after one that left out a pair
-  the room misjudged (below), nor when either cannot be read. While a lighter competing chain is on BTC (§7.6) the target is the next block, whatever
-  room the mempool has, so that this node's data lands before the other side's is final (a split transaction keeps the confirmation target: it does not race).
+  the room misjudged (below), nor when either cannot be read. While a lighter competing chain is on BTC (§7.6) the rate is the cap, whatever bitcoind estimates and whatever
+  room the mempool has, so that this node's data lands before the other side's is final (D-152; a split transaction keeps the confirmation target: it does not race). A pair the funding
+  UTXOs cannot fund at the cap is funded at the next-block estimate instead.
   A commit / reveal pair this node sent (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for 2 BTC blocks (at once during such a race) and pays less than the
-  estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's change, lifting the package to the rate; once a later republish chained on the pair spends the change (§7.6), only that one's child can lift it. Once it has waited 2 BTC blocks while the mempool
-  had room (outside a race), the rate is at least the pair's own rate doubled, and doubled again for every further such block, up to the cap, whatever the estimate (D-117).
+  estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's change, lifting the package to the rate; once a later republish chained on the pair spends the change (§7.6), only that one's child can lift it. Once it has waited 2 BTC blocks, whether or not the mempool
+  had room, the rate is at least the pair's own rate doubled, and doubled again for every further BTC block, up to the cap, whatever the estimate (D-117, D-152). A child whose pair's change
+  cannot pay the rate and keep the dust floor pays all of the change above the dust floor, when that is at least what a replacement must pay and a higher rate than the pair's (D-152).
   A pair that every round of the node has seen waiting while the room showed (outside a race) does not wait for the second block: once a BTC block, found 2 minutes or more after the node first saw the
   pair waiting (a block found sooner was assembled before the pair reached its miner), leaves it out, the room misjudged it, and the rate is at least the next-block estimate; the node remembers it, in memory
   only, and for the 6 BTC blocks after the last such block its new transactions pay the estimate (D-147). When the rate rises again, a child
@@ -1860,9 +1868,10 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
 - The measurements marked "unverified, to be measured" in §13.1: the GPU advantage of Argon2id (the retuning path of D-094), the propagation delay of a real network (`GHOSTDAG_K`), and the observation
   of `SETTLEMENT_TIMEOUT` on signet. The carrier reward is observed (M61, D-149): its values stay; whether a node's republish waits one BTC block longer, to be eligible for the reward,
   is the project owner's decision (local policy).
-- The node's BTC fees: the policy is replayed over mainnet's fee history (M62, D-150; the simulation D-101 and D-102 asked for). In the node, without a consensus change: raise a waiting
-  pair per BTC block as the pause of §6.4 comes nearer, whether or not the mempool shows room; pay the cap at once while a competing chain is on BTC; let the default path B floor follow
-  the node's BTC rate and an operator's KSA price (§8.2). The default of `--max-settlement-feerate` is the project owner's decision; the contest of fee rates for the first place in a BTC
+- The node's BTC fees: the policy is replayed over mainnet's fee history (M62, D-150; the simulation D-101 and D-102 asked for). Done in the node, without a consensus change (M64, D-152): a waiting
+  pair is raised per BTC block whether or not the mempool shows room, the cap is paid at once while a competing chain is on BTC, and the default of `--max-settlement-feerate` is
+  1 000 sat/vB (the project owner's decision). Still to do: let the default path B floor follow the node's BTC rate and an operator's KSA price (§8.2); observe how often a race
+  occurs in honest operation and what it costs at the cap, and decide whether a race gets a budget or a schedule towards the cap (D-152's limitations); the contest of fee rates for the first place in a BTC
   block is not answered by block-level data and stays to be observed; the estimate's lag is to be measured against Bitcoin Core itself.
 - The gas table: it is measured (M60, D-148), and the three costs it does not price have a remedy in the node each (M63, D-151: compiled code kept on disk, instance memory from a pool,
   the tree of a block's check committed), with which no block measured takes more than a second on the one machine measured. Still to do: measure on aarch64, on a machine of a node's

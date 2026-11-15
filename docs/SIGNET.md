@@ -115,11 +115,12 @@ past has landed on Bitcoin (SPEC §8.5); `ksana-cli --chain signet account <acco
   its funding address (`signet_address`); send that address at least three outputs of sBTC and let them confirm (0.006
   sBTC in all is enough to start). Settlements pay the floor `--settlement-feerate` (default 2 sat/vB) while signet's
   mempool holds at most half a block, and bitcoind's fee estimate up to `--max-settlement-feerate` when it holds more; a
-  pair left waiting two blocks is bumped to the estimate, or to twice its own rate and more while the mempool has room,
-  up to the same cap (D-102, D-117). Keep the floor at 2 although signet's minimum is 1 sat/vB: on 2026-10-13 signet's
+  pair left waiting two blocks is bumped to the estimate, or to twice its own rate and twice again per further block,
+  up to the same cap (D-102, D-117, D-152). Keep the floor at 2 although signet's minimum is 1 sat/vB: on 2026-10-13 signet's
   blocks took nothing below 2 while a backlog at 1 sat/vB waited (D-107). Cap it at 5 like the seed nodes
   (`--max-settlement-feerate 5`): bitcoind's estimate can stay far above what signet's blocks take; from 2026-10-16 it
-  stayed at 100.03 sat/vB, and before D-117 every pair paid the default cap of 100, about 37 000 sats (D-107). What it
+  stayed at 100.03 sat/vB, and before D-117 every pair paid the cap, then 100 by default, about 37 000 sats (D-107);
+  the default is 1 000 since D-152, and a node pays its cap while a competing chain is on signet. What it
   costs: a settlement pair is about 300 to 360 vB (D-140), so about 700 sats at 2 sat/vB; even an
   idle network sends one about every two signet blocks, paid by whichever producer made the block carrying it (D-109),
   so a node producing a third of the blocks spends about 0.00017 sBTC a day at 2 sat/vB, up to 0.00035 with traffic: 0.02
