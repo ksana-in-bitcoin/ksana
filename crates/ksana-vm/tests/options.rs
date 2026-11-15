@@ -132,7 +132,10 @@ fn run(vm: &Vm, contracts: &[(u8, Vec<u8>)]) -> (Result<CallOutcome, VmError>, S
     (result, host.storage)
 }
 
-fn cases() -> Vec<(&'static str, Vec<(u8, Vec<u8>)>, bool)> {
+/// A name, the contracts by the byte of their id (contract 1 is called) and whether the call succeeds.
+type Case = (&'static str, Vec<(u8, Vec<u8>)>, bool);
+
+fn cases() -> Vec<Case> {
     vec![
         ("echo of the caller", vec![(1, module(WHO))], true),
         (
