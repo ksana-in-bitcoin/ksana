@@ -189,7 +189,7 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
     amount). It is the median, over the last 20 main-chain blocks, of each block's lowest path B entry fee rate (the larger middle value for an even count; blocks without path B entries
     are not counted), not below this node's `--min-fee-per-kib`.
   - `path_b.per_kib_data` (D-153; only in the answer of a node run with `--ksa-price-sat`, absent otherwise): the token amount per KiB of the op's encoded bytes, whatever its
-    `max_gas`, that this node's producer asks for carrying the bytes to BTC: the KSA worth 256 vB at `feerate_sat_vb` and the operator's price (`feerate_sat_vb × 256 × 10^8 / price`
+    `max_gas`, that this node's producer asks for carrying the bytes to BTC: the KSA worth 128 vB at `feerate_sat_vb` and the operator's price (`feerate_sat_vb × 128 × 10^8 / price`
     base units, rounded up), or the floor the producer set at most 30 seconds ago when that is higher. A client that finds it absent takes it as 0.
   - `path_b.amount`: the suggested amount for an ordinary transfer (a KSA transfer, BIP340 signature, `max_gas` 10 000): the larger of its cost at `per_kib` and its encoded bytes
     at `per_kib_data` (each rounded up), not below this node's `--min-token-fee`. Any other op is estimated the same way from its own cost and bytes, not below `amount` (`pathBFee`

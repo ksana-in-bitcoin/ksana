@@ -86,7 +86,7 @@ struct Cli {
     /// What one KSA is worth to this operator, in sat (local policy, D-153; a decimal number above 0 with at most 8
     /// decimals, such as 0.5). With it a path-B op is packed only when it also pays for its bytes on BTC at the fee
     /// rate this node funds settlements at: a KiB of the op's encoded bytes, whatever its max_gas, must pay the KSA
-    /// worth 256 vB at that rate (a byte of an op lands on BTC as a quarter of a vB). --min-fee-per-kib, which goes
+    /// worth 128 vB at that rate (an op lands on BTC in less than half its bytes, a quarter of a vB each). --min-fee-per-kib, which goes
     /// by the op's cost, applies beside it. The protocol sets no exchange rate: the figure is this operator's own.
     /// Only taken with --btc-funding-key-file.
     #[arg(long, requires = "btc_funding_key_file")]

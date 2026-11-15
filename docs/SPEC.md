@@ -23,9 +23,10 @@ Version history:
   aggregate verifies. Users and wallets sign as before, and ops are submitted, checked and relayed with whole signatures: only the producer aggregates. Every op's content, every
   first half and the aggregate are on BTC and under `entries_root`, so anyone still recomputes and checks the whole chain from BTC data alone (§1); what is lost is checking one
   op's signature apart from its block's body. `op_id` of a path B op is taken over the op with half its signature. Path C is unchanged. The scheme has security proofs and a draft
-  specification, not yet a BIP, and goes into the external audit's scope (§4.1, §4.4, §4.5, §6.1, §6.3, §7.1, §11.1).
+  specification, not yet a BIP, and goes into the external audit's scope (§4.1, §4.4, §4.5, §6.1, §6.3, §7.1, §11.1). The fifth run's settlements, encoded again this way, take
+  30.7% fewer vB, and the floor of D-153 that follows the BTC fee rate asks for 128 vB per KiB where it asked for 256 (local policy, §8.2).
 - **2026-11-16, with the operator's KSA price the packing floor of path B follows the BTC fee rate (M65, D-153)**: local policy of the node, no consensus change; the third change
-  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's encoded bytes must pay the KSA worth 256 vB
+  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's encoded bytes must pay the KSA worth 256 vB (128 since D-154)
   at the fee rate the node funds settlements at (an op's bytes land on BTC as a quarter of a vB each), whatever its `max_gas`; `--min-fee-per-kib`, which goes by the op's cost,
   applies beside it. The producer sets this floor again at each BTC block, ops below it wait in the pool, and `ksana_estimateFee` answers the rate in a new field,
   `path_b.per_kib_data`, that only such a node gives, and suggests an amount that meets it. The option has no default, since the protocol has no exchange rate and KSA no
@@ -1213,9 +1214,9 @@ Path B is priced in KSA; path C pays only the transaction fee to BTC miners. The
   decides whether an op enters the entry pool and is forwarded: an op that reaches the relay floor but not the packing floor enters the pool and is forwarded, to be packed by another producer. The protocol provides no on-chain reference exchange rate; the price risk between the token and BTC is borne by the producer
   itself.
 - The packing floor can follow the BTC fee rate (D-153): a producer that settles and is given what one KSA is worth to its operator in sat (`--ksa-price-sat`, a decimal number above
-  0; no default) packs an op only when it also pays, per KiB of its encoded bytes, the KSA worth 256 vB at the fee rate the producer funds an ordinary settlement at now (§7.7; not the cap paid in
-  a race): `rate × 256 × 10^8 / price` base units per KiB, rounded up. This floor goes by the op's bytes, whatever its `max_gas`, since gas takes no room on BTC; the minimum amount
-  and the minimum fee rate per KiB of cost apply beside it. 256 vB per KiB is the op's data as witness bytes; the pair's own bytes, the headers and the compression are not counted. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
+  0; no default) packs an op only when it also pays, per KiB of its encoded bytes, the KSA worth 128 vB at the fee rate the producer funds an ordinary settlement at now (§7.7; not the cap paid in
+  a race): `rate × 128 × 10^8 / price` base units per KiB, rounded up. This floor goes by the op's bytes, whatever its `max_gas`, since gas takes no room on BTC; the minimum amount
+  and the minimum fee rate per KiB of cost apply beside it. 128 vB per KiB (D-154; 256 before half signatures) is the op's data as witness bytes at less than half its encoded size: measured, the fifth stress run's ops took 78 vB per KiB with the pairs' own bytes and the headers, and transfers that share no account 125 to 131 for their data alone; with few ops in a settlement the pair's own bytes make it more. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
   candidates again when it falls; the relay floor does not move. The price is the operator's own figure and binds nobody else: other producers pack by their own floors.
 - Entry pool (`ksana-mempool`): admission first does stateless checks (version, chain ID, encoded length, fee mode, signature), then checks against the current state (nonce not below the account nonce; KSA
   balance sufficient to pay the sponsored fees of all queued ops of this account), then policy (relay floor, pool capacity default 10 000, at most 64 queued ops per account, a replacement must raise the sponsored fee by at least a tenth and by at least the relay floor, D-130).
@@ -1963,7 +1964,7 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
 
 - Half-aggregated signatures (M66, D-154): the verification is measured on x86_64 only, where a block's aggregate takes about twice the time of checking its signatures one by one
   (60 against 29 µs per signature, over libsecp256k1's public interface); measure on aarch64, and decide whether a faster sum is worth its code. The scheme is not yet a BIP: it
-  goes into the external audit's scope (§16). The 256 vB per KiB of D-153 is to be set again from the bytes measured with half signatures.
+  goes into the external audit's scope (§16). The 128 vB per KiB of the floor that follows the BTC fee rate (D-153, D-154) is set from the fifth run's bytes encoded again, not from a load run with half signatures: measure it on one.
 
 Research items (after mainnet, §17.3): inclusion lists, a settlement funding pool, a global dictionary by account index, forced-inclusion entries carrying the VmOp,
 syncing new nodes from a state snapshot at the pruning point, Kademlia node discovery, interoperability with Ethereum. Do not start implementing these items before they are settled.

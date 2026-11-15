@@ -146,10 +146,12 @@ pub struct FeePolicy {
     ksa_price: Option<KsaPrice>,
 }
 
-/// The vB a KiB of path B ops' encoded bytes takes on BTC, as the packing floor counts it (D-153): envelope data is
-/// witness data, a quarter of a vB per byte. The compact encoding and compression (D-080, D-141) make it less; the
-/// pair's own bytes and the headers make it more.
-pub const PATH_B_VB_PER_KIB: u128 = 256;
+/// The vB a KiB of path B ops' encoded bytes (with whole signatures, as the pool measures them) takes on BTC, as the
+/// packing floor counts it (D-153, set again by D-154): envelope data is witness data, a quarter of a vB per byte,
+/// and the compact encoding, half signatures and compression (D-080, D-154, D-141) bring an op to less than half its
+/// encoded bytes. Measured with half signatures, the fifth stress run's ops took 78 vB per KiB, the pairs' own bytes
+/// and the headers included, and transfers that share no account 125 to 131 for their data alone.
+pub const PATH_B_VB_PER_KIB: u128 = 128;
 
 /// The base units of one KSA (8 decimals, SPEC §9.1).
 const KSA_BASE_UNITS: u128 = 100_000_000;

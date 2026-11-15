@@ -5613,7 +5613,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     (D-141) and the compact encoding (D-080) make the data smaller. Measured on the fifth run's 1 281 payload transactions, a KiB of its ops' encoded bytes took about 113 vB, the pairs'
     own bytes and the headers included: there the constant asks about 2.3 times the cost. With few ops per settlement the fixed part dominates (a pair without a body is about 337 vB)
     and the floor undercharges. No one constant is right at every load; an operator corrects for either by naming a lower or a higher price, and whether to lower the constant is
-    left with the project owner.
+    left with the project owner (D-154 set it to 128, from the bytes measured with half signatures).
   - **Clients built before this entry**: an SDK from before it refuses the answer of a node with a price (`path_b has unknown field "per_kib_data"`), and a wallet that computes an
     op's fee from `per_kib` and its cost alone can suggest less than such a node packs for. ksana-web and ksana-points compute fees that way and follow when they move to an SDK
     with `pathBFee`. No node has a price today.
@@ -5698,7 +5698,16 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     second halves were garbled by a relayer: the first copy a node accepts is the one it keeps, and it forwards it.
   - **The ID of a path B op no longer covers the second half of its signature**: two encodings of one op that differ only there share an ID. Only the valid one is admitted to a
     pool, and nothing is remembered by ID before the signature is checked.
-  - **The 256 vB per KiB of D-153** is measured before this change and is to be set again.
+  - **The floor that follows the BTC fee rate counts less than the data of ops that share no account**: see the measurement below.
+- **Measured bytes, and D-153's vB per KiB set to 128** (local policy; the project owner offered 128 when asked whether to lower the 256): the fifth stress run's 1 281 payload
+  transactions (158 815 ops in 7 935 bodies with path B ops) were decoded, sealed with `seal_entries`, every aggregate verified, and encoded, compressed and put into their reveal
+  again. Commits and reveals together went from 3 899 645 to 2 704 393 vB (30.7% less; 24.55 to 17.03 vB per op), the payloads from 18 333 989 to 13 513 764 bytes, the envelope
+  data from 14 271 692 to 9 518 087; a BTC block filled with such settlements carries about 98 ops/s where it carried about 68. A KiB of the ops' encoded bytes (whole signatures,
+  as the pool measures an op) took 78 vB, the pairs' own bytes and the headers included, where it took 113. That run's ops came from 49 accounts, which the compact encoding and
+  zstd shorten; KSA transfers that share no account (216 bytes each, built for the measurement) take 125 to 131 vB per KiB for their data alone in bodies of 20 to 480, and 177 for
+  one alone. `PATH_B_VB_PER_KIB` is therefore 128, an eighth of a vB per byte: about 1.6 times the cost of the fifth run's load, about the data of transfers between accounts seen
+  once, and less than the cost of a settlement with few ops, whose own bytes (about 337 vB without a body) the floor never counted. An operator corrects with the price it names.
+  This is the fifth run's traffic encoded again, not a load run on the new encoding.
 - **Impact**: `ksana-crypto` (`halfagg.rs`: `aggregate`, `verify_aggregate`, `HalfSigned`, `MAX_AGGREGATED`; `vmop.rs`: `half_signed`, `seal_entries`, `unseal_entries`,
   `verify_vmops_aggregate`; `bip322.rs`: `account_sighash`), `ksana-primitives` (`SigScheme`'s half variants with `split`, `half`, `join`, `is_half`; `Entry::Aggregate`,
   `EntryData::Aggregate`; `Block::second_halves`, `second_halves_fit`; `VmOp::op_id`, `split`, `join`; `compact_entries.rs`), `ksana-execution` (`check_aggregate`, the builder's
