@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use jmt::storage::TreeUpdateBatch;
 use jmt::KeyHash;
@@ -23,12 +23,15 @@ use crate::{key_hash, schema, tree, StateError, StateRead, StateView, Version, W
 ///
 /// Write operations ([`commit`](Self::commit), [`rollback_to`](Self::rollback_to), [`prune`](Self::prune)) need
 /// `&mut self`, read operations only `&self`; only one `StateDb` can be open at the same path at a time (RocksDB's
-/// file lock).
+/// file lock). [`preview_root`](Self::preview_root) keeps what it computed, and a commit of the same writes as the
+/// next version writes that instead of computing it again.
 pub struct StateDb {
     db: Arc<DB>,
     /// Available version range; `None` means no version has been committed yet. Kept consistent with the metadata
     /// in the database.
     meta: Option<Meta>,
+    /// The last preview, for the commit that follows it.
+    previewed: Mutex<Option<Previewed>>,
 }
 
 /// Result computed before a commit (not yet written to the database).
@@ -37,6 +40,20 @@ struct Prepared<'w> {
     update: TreeUpdateBatch,
     /// Writes that really change the state (no-ops filtered out), sorted by full key.
     changes: Vec<(&'w [u8], Option<&'w [u8]>)>,
+    /// For each write, in the write set's order: whether it is among `changes`.
+    changed: Vec<bool>,
+}
+
+/// What [`StateDb::preview_root`] computed last, kept for the commit of the same writes: a node computes a block's
+/// root to check it against the header and then commits the block, and the tree is most of the work of both (D-151).
+/// It holds for the version and the writes it was computed for, and every write operation discards it.
+struct Previewed {
+    version: Version,
+    writes: WriteSet,
+    root: [u8; 32],
+    update: TreeUpdateBatch,
+    /// For each write, in the write set's order: whether it changes the state.
+    changed: Vec<bool>,
 }
 
 impl StateDb {
@@ -56,6 +73,7 @@ impl StateDb {
         let state = Self {
             db: Arc::new(db),
             meta,
+            previewed: Mutex::new(None),
         };
         if let Some(meta) = state.meta {
             // Rough consistency check: the latest version must have a root.
@@ -111,7 +129,21 @@ impl StateDb {
             root,
             update,
             changes,
-        } = self.prepare(version, writes)?;
+            ..
+        } = match self.take_previewed() {
+            Some(kept) if kept.version == version && kept.writes == *writes => Prepared {
+                root: kept.root,
+                update: kept.update,
+                changes: writes
+                    .iter()
+                    .zip(&kept.changed)
+                    .filter(|(_, changed)| **changed)
+                    .map(|((key, value), _)| (key.as_slice(), value.as_deref()))
+                    .collect(),
+                changed: kept.changed,
+            },
+            _ => self.prepare(version, writes)?,
+        };
 
         let nodes = cf_handle(&self.db, CF_NODES)?;
         let stale = cf_handle(&self.db, CF_STALE)?;
@@ -176,7 +208,37 @@ impl StateDb {
                 .ok_or(StateError::VersionOutOfRange(meta.latest))?,
         };
         self.check_next_version(version)?;
-        Ok(self.prepare(version, writes)?.root)
+        if let Ok(kept) = self.previewed.lock() {
+            if let Some(kept) = kept.as_ref() {
+                if kept.version == version && kept.writes == *writes {
+                    return Ok(kept.root);
+                }
+            }
+        }
+        let Prepared {
+            root,
+            update,
+            changed,
+            ..
+        } = self.prepare(version, writes)?;
+        if let Ok(mut kept) = self.previewed.lock() {
+            *kept = Some(Previewed {
+                version,
+                writes: writes.clone(),
+                root,
+                update,
+                changed,
+            });
+        }
+        Ok(root)
+    }
+
+    /// Takes the last preview out: a write operation either commits it or leaves it describing a state that is gone.
+    fn take_previewed(&mut self) -> Option<Previewed> {
+        match self.previewed.get_mut() {
+            Ok(kept) => kept.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
     }
 
     /// The root that committing `writes` on top of version `base` would produce, without writing any data: the same
@@ -217,6 +279,7 @@ impl StateDb {
         if version == meta.latest {
             return Ok(());
         }
+        self.take_previewed();
         // version < latest < u64::MAX, cannot overflow.
         let first_removed = version
             .checked_add(1)
@@ -291,6 +354,7 @@ impl StateDb {
         if keep_from <= meta.oldest {
             return Ok(());
         }
+        self.take_previewed();
         // The stale records and change records to process all have versions within [oldest, keep_from] (earlier ones
         // were deleted by previous prunings); the iteration starts at oldest, skipping the tombstones left by previous
         // prunings. keep_from <= latest < u64::MAX, cannot overflow.
@@ -383,6 +447,7 @@ impl StateDb {
     /// views return [`StateError::StaleView`] on later reads (the root of their version no longer exists) and never
     /// read the rebuilt data.
     pub fn reset(&mut self) -> Result<(), StateError> {
+        self.take_previewed();
         let mut batch = WriteBatch::default();
         for name in COLUMN_FAMILIES {
             let cf = cf_handle(&self.db, name)?;
@@ -476,10 +541,13 @@ impl StateDb {
     ) -> Result<Prepared<'w>, StateError> {
         let latest = cf_handle(&self.db, CF_LATEST)?;
         let mut changes = Vec::new();
+        let mut changed = Vec::with_capacity(writes.len());
         let mut value_set = Vec::new();
         for (key, value) in writes {
             let current = self.db.get_pinned_cf(latest, key)?;
-            if current.as_deref() == value.as_deref() {
+            let differs = current.as_deref() != value.as_deref();
+            changed.push(differs);
+            if !differs {
                 continue;
             }
             changes.push((key.as_slice(), value.as_deref()));
@@ -490,6 +558,7 @@ impl StateDb {
             root,
             update,
             changes,
+            changed,
         })
     }
 
