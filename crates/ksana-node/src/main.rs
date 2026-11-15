@@ -83,6 +83,13 @@ struct Cli {
     /// block's data limit); 0 means no limit.
     #[arg(long, default_value_t = 0)]
     min_fee_per_kib: u128,
+    /// What one KSA is worth to this operator, in sat (local policy, D-153; a decimal number above 0 with at most 8
+    /// decimals, such as 0.5). With it the minimum fee rate for packing path-B ops follows the BTC fee rate this node
+    /// funds settlements at: a KiB of cost must pay the KSA worth 256 vB at that rate (a byte of an op lands on BTC as
+    /// a quarter of a vB), or --min-fee-per-kib when that is higher. Without it, only --min-fee-per-kib applies. The
+    /// protocol sets no exchange rate: the figure is this operator's own. Only taken with --btc-funding-key-file.
+    #[arg(long, requires = "btc_funding_key_file")]
+    ksa_price_sat: Option<ksana_node::producer::KsaPrice>,
     /// Payee account of republish payloads (D-095; a Taproot address of this chain's network or 64 hex digits): when
     /// a republish lands some block's data on BTC for the first time, and that data has waited more than
     /// CARRIER_REPOST_DELAY BTC blocks, it takes that block's carrier reward. Defaults to --producer; when neither is
@@ -273,11 +280,15 @@ fn run(cli: Cli) -> Result<(), NodeError> {
         .btc_funding_key_file
         .as_deref()
         .map(|p| {
+            let fees = FeePolicy::new(cli.settlement_feerate)
+                .with_cap(cli.max_settlement_feerate)
+                .with_target(cli.settlement_conf_target);
             load_funding(
                 p,
-                FeePolicy::new(cli.settlement_feerate)
-                    .with_cap(cli.max_settlement_feerate)
-                    .with_target(cli.settlement_conf_target),
+                match cli.ksa_price_sat {
+                    Some(price) => fees.with_ksa_price(price),
+                    None => fees,
+                },
             )
         })
         .transpose()?

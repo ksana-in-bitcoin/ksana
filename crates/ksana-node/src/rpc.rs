@@ -618,6 +618,9 @@ impl Backend for NodeRpc {
         let feerate = self
             .fees
             .rate(params, self.chain.btc().client().as_ref(), false);
+        // With the operator's KSA price the packing floor follows the fee rate (D-153): a producing node has set it in
+        // the pool's policy already, at most FLOOR_REFRESH ago; one that does not produce answers the same
+        let min_fee_per_kib = min_fee_per_kib.max(self.fees.path_b_floor(feerate).unwrap_or(0));
 
         // Path B: the median (the larger middle value for an even count) over the last FEE_HISTORY_BLOCKS main-chain
         // blocks of each block's lowest path B entry fee rate (sponsored fee per KiB of cost, the same ordering as

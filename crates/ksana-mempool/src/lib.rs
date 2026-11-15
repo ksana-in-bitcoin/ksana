@@ -359,6 +359,8 @@ pub struct Mempool {
     /// and on main-chain changes ([`Mempool::set_rules`]).
     rules: Rules,
     policy: Policy,
+    /// The minimum fee rate for packing the pool was created with: [`Mempool::raise_fee_floor`] never goes below it.
+    base_fee_per_kib: u128,
     by_account: BTreeMap<[u8; 32], Queue>,
     by_id: BTreeMap<[u8; 32], ([u8; 32], u64)>,
     /// Each account's last op in eviction order ([`EvictKey`]): the first entry goes first when the pool is full.
@@ -371,9 +373,29 @@ pub struct Mempool {
 }
 
 impl Mempool {
-    /// The local policy.
+    /// The local policy; its minimum fee rate for packing is the one in force now ([`Mempool::raise_fee_floor`]).
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    /// Sets the minimum fee rate for packing ([`Policy::min_fee_per_kib`]) to `per_kib`, or to the one the pool was
+    /// created with when that is higher: the node passes in what carrying a KiB to BTC costs it now (D-153). The ops
+    /// in the pool stay; those the new floor leaves out wait as ops below the packing floor do, and are candidates
+    /// again once it falls. Returns whether the floor changed, in which case the generation moves
+    /// ([`Mempool::generation`]).
+    pub fn raise_fee_floor(&mut self, per_kib: u128) -> bool {
+        let floor = per_kib.max(self.base_fee_per_kib);
+        if floor == self.policy.min_fee_per_kib {
+            return false;
+        }
+        self.policy.min_fee_per_kib = floor;
+        // An account's place in the eviction order goes by whether its ops meet the packing floor
+        let accounts: Vec<[u8; 32]> = self.by_account.keys().copied().collect();
+        for account in &accounts {
+            self.rekey(account, None);
+        }
+        self.bump();
+        true
     }
 
     /// An empty entry pool (admission goes by the rules after genesis until [`Mempool::set_rules`]).
@@ -381,6 +403,7 @@ impl Mempool {
         Mempool {
             rules: params.rules(0),
             params,
+            base_fee_per_kib: policy.min_fee_per_kib,
             policy,
             by_account: BTreeMap::new(),
             by_id: BTreeMap::new(),

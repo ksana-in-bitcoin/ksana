@@ -569,6 +569,72 @@ fn candidates_are_ordered_by_fee_rate_and_cut_at_the_packing_floor() {
     assert!(!relaxed.packable(1, u128::MAX));
 }
 
+/// The packing floor's fee rate can be raised and lowered while ops wait (D-153): an op the raised floor leaves out
+/// stays in the pool and is a candidate again once the floor falls, the floor never goes below the one the pool was
+/// created with, and each change moves the generation.
+#[test]
+fn a_raised_fee_floor_leaves_ops_waiting_until_it_falls() {
+    let (a, b, c) = (user("a"), user("b"), user("c"));
+    let s = arc(&state(&[(&a, 100_000), (&b, 100_000), (&c, 100_000)]));
+    let mut p = Mempool::new(
+        DEVNET,
+        Policy {
+            min_fee_per_kib: 10,
+            max_ops: 2,
+            ..Policy::default()
+        },
+    );
+    let rules = *p.rules();
+    let rate = |o: &VmOp| {
+        let FeeMode::Token { amount } = o.fee else {
+            unreachable!()
+        };
+        fee_rate(
+            amount,
+            op_cost(&DEVNET, &rules, o.encode().unwrap().len(), o.max_gas),
+        )
+    };
+    let (cheap, dear) = (op(&a, 0, 100), op(&b, 0, 10_000));
+    let (low, high) = (rate(&cheap), rate(&dear));
+    assert!(10 < low && low < high);
+    let cheap_id = p.insert(cheap, &s).unwrap();
+    let dear_id = p.insert(dear, &s).unwrap();
+    let accounts = |p: &Mempool| -> Vec<[u8; 32]> {
+        p.candidates(&s)
+            .unwrap()
+            .iter()
+            .map(|o| o.account)
+            .collect()
+    };
+    assert_eq!(accounts(&p), vec![b.account, a.account]);
+
+    // Raised between the two: the cheaper op waits in the pool
+    let generation = p.generation();
+    assert!(p.raise_fee_floor(low + 1));
+    assert_eq!(p.policy().min_fee_per_kib, low + 1);
+    assert_ne!(p.generation(), generation);
+    assert_eq!(accounts(&p), vec![b.account]);
+    assert!(p.contains(&cheap_id));
+
+    // The same floor again changes nothing
+    let generation = p.generation();
+    assert!(!p.raise_fee_floor(low + 1));
+    assert_eq!(p.generation(), generation);
+
+    // The op left out is the first to make way for a newcomer in a full pool, although the other account's op was
+    // the last one in before the floor moved
+    let newcomer = p.insert(op(&c, 0, 10_000), &s).unwrap();
+    assert!(!p.contains(&cheap_id) && p.contains(&dear_id) && p.contains(&newcomer));
+
+    // Lowered: never below the floor the pool was created with
+    assert!(p.raise_fee_floor(0));
+    assert_eq!(p.policy().min_fee_per_kib, 10);
+    assert!(!p.raise_fee_floor(3));
+    p.remove(&newcomer);
+    p.insert(op(&a, 0, 100), &s).unwrap();
+    assert_eq!(accounts(&p), vec![b.account, a.account]);
+}
+
 /// Sybil spam (security audit): accounts funded with dust skip their current nonce and queue the following nonces
 /// with the minimum fee. Such ops can never be packed and nothing removes them; they used to fill the pool for good,
 /// after which every new op, however packable, was rejected as "entry pool is full". Ops behind a nonce gap must make
