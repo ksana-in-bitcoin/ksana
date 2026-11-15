@@ -127,7 +127,9 @@ past has landed on Bitcoin (SPEC §8.5); `ksana-cli --chain signet account <acco
   sBTC lasts it about eight weeks. Every settlement returns its change to the address, and several can be in flight, one
   per output. Top up below 0.002 sBTC or three outputs (`bitcoin-cli -signet -rpcwallet=ksana-funding listunspent 0`
   with the wallet below): a node without funds keeps producing, but its blocks' data waits for another producer to carry
-  it.
+  it. Leave `--ksa-price-sat` unset on signet: it makes the node ask path B ops for the KSA its settlement costs at a
+  price you name (D-153), and neither sBTC nor signet's KSA has a price; a node that sets it packs fewer ops than the
+  others.
 - Finding the funding outputs: a node with a funding key on signet must use a watch-only wallet of your bitcoind that
   holds the funding address (`--btc-funding-wallet`, D-109), which answers at once, and refuses to start without one. A
   scan of signet's whole UTXO set with `scantxoutset` took 49 seconds cold and 31 warm on 2026-10-13 (height 326 207,

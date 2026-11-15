@@ -97,7 +97,8 @@ state root the nodes committed to.
   over a history on disk (`MainChain` / `MainHistory`), `BtcSnapshot::prune`, `HeaderDag::prune`, `Finality::prune` / `decided_by` / `root_revoked`, the records of each for the
   checkpoints, `TrackerError::TooDeep` (a BTC reorg below what is kept) and `BtcTracker::reset`.
 - `ksana-mempool`: the entry pool (local policy): admission checks (relay floor `min_relay_token_fee`), replacement and capacity, ordering by nonce chain and fee rate (sponsored fee / cost, cost =
-  max(encoded bytes, bytes converted from `max_gas`), `op_cost` / `fee_rate`), packing candidates down to the packing floor (`min_token_fee`, `min_fee_per_kib`) (M23); a byte cap (`max_bytes`), eviction by standing
+  max(encoded bytes, bytes converted from `max_gas`), `op_cost` / `fee_rate`), packing candidates down to the packing floor (`min_token_fee`, `min_fee_per_kib`) (M23), whose fee rate the node raises and lowers with the BTC fee rate when its operator named a
+  KSA price (`raise_fee_floor`, M65, D-153: `FeePolicy::path_b_floor`, `Producer::follow_btc_fees`, `--ksa-price-sat`); a byte cap (`max_bytes`), eviction by standing
   instead of rejecting newcomers when full, a limit on ops behind a nonce gap (`max_gapped_per_account`), and the re-check of balances and rules after chain changes in `remove_committed` (M26, D-098);
   the nonces the path C ops waiting for forced inclusion take in turn from the account nonce on, passed by the node in BTC order, are no gap (`set_forced`, D-104);
   a replacement raises the sponsored fee by `replacement_bump_percent` (10) of it and by the relay floor at least (`Policy::replacement_fee`), the generation moves only for a

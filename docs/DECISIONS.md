@@ -5563,3 +5563,55 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   default cap, a pair left waiting without room, a child above bitcoind's `maxfeerate`; `tests/integration/tests/m3_client.rs`: the same against Bitcoin Core;
   `adversarial_finality.rs`: the race pays the cap, a wallet too small for it, a split beside it; `ksana-btc/tests/settlement.rs`: the child of a change that cannot pay); SPEC (the version history,
   §7.7, §14); `docs/RPC.md`; `docs/SIGNET.md`; ARCHITECTURE; D-102, D-117, D-150.
+
+## D-153 With the operator's KSA price, the packing floor of path B follows the BTC fee rate (2026-11-16, the third change D-150 named; revises SPEC §8.2, §14, `docs/RPC.md`; local policy, no consensus change, M65)
+
+- **Problem**: the producer's floors for packing a path B op are fixed numbers of KSA base units (`--min-token-fee`, default 1; `--min-fee-per-kib`, default 0), while what an op
+  costs its carrier is paid in sat and moves with the BTC fee rate. In the fifth run the nodes paid 7 788 580 sat for the data and took 0.0019 KSA of sponsored fees in all (D-149): the
+  block reward paid for every user's data. An operator who wanted to charge the cost had to compute a `--min-fee-per-kib` by hand and restart the node whenever the BTC fee rate
+  moved; D-150 measured that rate between 2 and more than 1 000 sat/vB.
+- **Decision** (local policy of the node; no rule of consensus, no parameter of the chain and no format changes):
+  1. **`--ksa-price-sat`** (new, no default): what one KSA is worth to this operator in sat, a decimal number above 0 with at most 8 decimals (`KsaPrice`). Only taken with
+     `--btc-funding-key-file`: the floor follows the rate this node pays.
+  2. **The floor**: with a price, a KiB of an op's cost (§8.2: the larger of its encoded bytes and the bytes its `max_gas` stands for) must pay the KSA worth 256 vB at the fee rate this
+     node funds an ordinary settlement at now (`FeePolicy::rate`: the room's rate or bitcoind's estimate within the floor and the cap, §7.7), rounded up
+     (`FeePolicy::path_b_floor`, `PATH_B_VB_PER_KIB`): `rate × 256 × 10^8 / price` base units per KiB. 256 because an op's bytes land on BTC as witness data, a quarter of a vB each. The
+     floor in force is that or `--min-fee-per-kib`, whichever is higher. At 2 sat/vB and 1 000 sat a KSA it is 51 200 000 base units per KiB, 0.108 KSA for an ordinary transfer (a cost
+     of 216 bytes); at 100 sat/vB, 5.4 KSA.
+  3. **When it moves**: the producer reads the rate and sets the floor before it reads the packing candidates, at each new BTC tip and every 30 seconds in between
+     (`Producer::follow_btc_fees`, `FLOOR_REFRESH`; `Mempool::raise_fee_floor`). Ops in the pool stay: one the new floor leaves out waits like any op below the packing floor (it is
+     the first to be evicted from a full pool, D-098) and is a candidate again when the floor falls. The relay floor does not move, so such ops are still admitted and forwarded
+     to producers that ask less.
+  4. **In a race the floor does not follow the cap** (D-152): it follows the rate of an ordinary settlement. A race is not the users' doing, and a floor at the cap (25 600 KSA per
+     KiB at the default cap and the price above) would stop path B on this node for as long as the race lasts.
+  5. **`ksana_estimateFee`**: `path_b.per_kib` is not below the floor of item 2 at the `feerate_sat_vb` of the same answer, nor below the floor the producer packs by at that moment,
+     so the amount suggested is one this node packs. The answer's format does not change.
+  Without `--ksa-price-sat` nothing changes: the floors are the fixed ones, as before.
+- **Rationale**: the price of KSA in sat is the one figure the node cannot know. The protocol has no exchange rate (SPEC §8.2, principle 7) and KSA has no market yet, so the node
+  ships no default for it, and the floor follows the BTC rate only where the operator has named a price. Given the price, the rest is arithmetic the node can do at each BTC block, which
+  the operator cannot. The same split is used by rollups that price their data on the base chain apart from execution and move that price with the base chain's fee.
+- **Not chosen**:
+  - **A default price, or a price read from a contract on the chain** (an exchange's last trade): a default would be a number made up here, and a price read from the chain is one
+    anybody can move with one trade just before they send their ops. An operator who wants a feed can restart the node with a new figure; a way to change it without a restart is not
+    built.
+  - **A floor that is consensus**: every producer would have to agree on a price, which is the exchange rate the protocol does not have.
+  - **Counting the pair's fixed bytes, the headers, or the compression**: see the limitations.
+- **Costs and limitations**:
+  - **It is off by default**, and so does not by itself end the subsidy D-149 measured: a node whose operator names no price packs from 1 base unit on as before. Whether mainnet's
+    documentation should tell operators to set it, and at what figure the project's own nodes run, is the project owner's decision once KSA has a price.
+  - **256 vB per KiB is the data alone, before compression**: the commit / reveal pair's own bytes (about 265 vB a pair, D-140), the headers and a republish are not counted, and zstd
+    (D-141) makes the data smaller. Under the fifth run's load 88% of a settlement was bodies (D-149), so the figure is of the right size there; with few ops per settlement the fixed
+    part dominates and the floor undercharges. An operator corrects for either by naming a lower or a higher price.
+  - **The carrier's half**: when another producer's settlement carries the block's data, half of the sponsored fees go to that carrier (`CARRIER_FEE_BPS`, D-095), who paid the BTC.
+    The floor does not tell the two cases apart.
+  - **Competition**: producers that name no price, or a higher one, pack the ops this node leaves, and take the fees; a floor above the market's only loses this node the ops. The
+    floor is what this operator is willing to carry data for, not a price users must pay.
+  - **Users see the floor move**: an amount `ksana_estimateFee` suggested can be too low a BTC block later. The op then waits in the pool until the rate falls, until another producer
+    packs it, or until the user replaces it with a higher fee (a tenth more at least, D-130). The suggestion carries no margin for this.
+  - For up to 30 seconds after the rate falls, `ksana_estimateFee` still answers the higher floor the producer packs by.
+  - Each new floor recomputes every account's place in the eviction order (the pool holds at most 10 000 ops by default) and asks bitcoind for the rate (up to three calls).
+  - Tested on the mock BTC chain only; no real fee market, and no KSA price, exists on signet.
+- **Impact**: `ksana-node` (`producer.rs`: `KsaPrice`, `PATH_B_VB_PER_KIB`, `FLOOR_REFRESH`, `FeePolicy::with_ksa_price`, `path_b_floor`, `path_b_floor_now`,
+  `Producer::follow_btc_fees`; `rpc.rs`: `estimate_fee`; `main.rs`: `--ksa-price-sat`), `ksana-mempool` (`Mempool::raise_fee_floor`); tests (`m65_path_b_floor.rs`: the price's
+  format, the floor's arithmetic, a producer that leaves an op waiting when the rate rises and packs it when it falls, `ksana_estimateFee` beside it; `ksana-mempool/tests/pool.rs`:
+  a raised floor); SPEC (the version history, §8.2, §14); `docs/RPC.md`; `docs/SIGNET.md`; ARCHITECTURE; D-095, D-149, D-150.

@@ -183,7 +183,8 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
   - `path_b.per_kib` (the local-policy patch of D-095): the suggested fee rate -- the token amount per KiB of cost. Cost = max(encoded VmOp bytes, `max_gas × MAX_BLOCK_DATA_BYTES /
     BLOCK_GAS_LIMIT`), the same as used for ordering this node's packing candidates (local policy: ordered by fee rate rather than absolute amount, so an op whose `max_gas` fills a whole block cannot squeeze out other ops with a slightly higher
     amount). It is the median, over the last 20 main-chain blocks, of each block's lowest path B entry fee rate (the larger middle value for an even count; blocks without path B entries
-    are not counted), not below this node's `--min-fee-per-kib`.
+    are not counted), not below this node's `--min-fee-per-kib`. On a node run with `--ksa-price-sat` (D-153) it is also not below the KSA worth 256 vB at `feerate_sat_vb` and that
+    price (`feerate_sat_vb × 256 × 10^8 / price` base units, rounded up), which is the floor its producer packs by, nor below the floor the producer set at most 30 seconds ago.
   - `path_b.amount`: the suggested amount for an ordinary transfer (a KSA transfer, BIP340 signature, `max_gas` 10 000) converted from `per_kib` (rounded up), not below
     this node's `--min-token-fee`. Other ops are estimated as their own cost multiplied by `per_kib`.
   - `at`: the tip the estimate is based on.
