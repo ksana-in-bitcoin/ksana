@@ -5367,3 +5367,36 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   whoever deploys such contracts; the public signet runs with that.
 - **Impact**: tests only (`crates/ksana-vm/tests/gas_calibration.rs`, `crates/ksana-execution/tests/gas_calibration.rs`); SPEC (the version history, §13.1's `BLOCK_GAS_LIMIT`, §14);
   CONTRIBUTING (the two measurements); D-013, D-098 h (F-07).
+
+## D-149 The carrier reward is observed on the signet: no producer attaches a settlement to every block and the fixed part does not pay for doing so; bodies and early republishes are what it does not pay for (2026-11-15, D-095's "to be observed"; no value changes, M61)
+
+- **Problem**: D-095 left one thing to be observed on the signet: whether the fixed part of the carrier reward (`CARRIER_BPS` of each reward slot) tempts producers to attach their own
+  settlement to every block, in which case it would be counted by bytes instead; SPEC §13.1 marked the three values "unverified, to be measured" and §14 kept the observation as work before
+  mainnet.
+- **Decision**: the observation is made and recorded; no value and no rule changes with this entry. The data is the signet's fifth stress run (15 nodes besides the two seeds, 8 of them
+  with a funded wallet and their own bitcoind, v0.2.2): heights 10 629 to 17 400, 7 175 blocks (403 of them merged) with 9 911 reward slots, and the 1 278 KSN1 transactions that landed
+  their data in BTC blocks 330 607 to 330 656, at the signet's 2 sat/vB throughout. Each block's carrier was derived again from the payloads on BTC by D-095's rule and checked two ways: for
+  the 3 182 main-chain blocks and the merged blocks the node's RPC still answers for, it is the node's `carrier_account` without exception; and the credits it gives each producer account
+  equal the on-chain balances of the 15 accounts created for the run, 11 of them to within 10^-5 KSA (the rounding of fee halves) and the other four after one red block and three empty
+  blocks whose headers landed after the data ends (the amounts match; the cause is inferred). The two seed accounts hold earlier balances and are not checked this way.
+  1. **Attaching a settlement to every block** did not happen: the ten producers with a funded wallet attached one to 29.2% of their blocks (21% to 33% each), which is the node's batching
+     policy (D-077). Every node ran that policy under one operator, so the signet shows what the policy does, not what a producer who changes it would do. What the figures say about the
+     temptation: a batched settlement was 2 861 vB on average and earned its sender 2.88 KSA from other producers' blocks, about 2 000 sat per KSA; a settlement of one block alone is
+     estimated at about 840 vB (337 vB without bodies, the smallest seen, plus one block's body at the average, 505 vB; not measured as such) for the 0.495 KSA of its own slot, about
+     3 400 sat per KSA. The fixed part pays less per satoshi for the settlement of every block than for the batch, so it does not by itself make that the better policy.
+  2. **Where the reward went**: 3 497 KSA (7 065 slots) moved from producers to other carriers. The seven producers without a wallet gave 5.8% to 6.0% of their rewards; the ten with one
+     gave 2.3% to 4.2% and received 235 to 708 KSA each, a net of +0.5 to +550 KSA. 27.9% of what moved came from 95 empty blocks, whose weight is up to 120 slots (59.4 KSA for one
+     header): counting per slot is D-095's choice, and it makes a carrier's income uneven over a run of this length. Most of those empty blocks are from the idle hours after the load.
+  3. **What it cost**: 7 788 580 sat for those 3 497 KSA, 2 227 sat per KSA at 2 sat/vB and in proportion at other fee rates; the signet gives KSA no price, so whether the reward covers
+     the cost has no answer here. D-095 reckoned a settlement at 250 to 750 vB; under load about 88% of a settlement is bodies, which D-095 leaves to the proportional part, and the
+     sponsored fees of the whole run were 0.0019 KSA, so that part paid nothing. Payloads carried 8 039 headers of which 6 615 were the first to land (18% duplicates), and 73 of the 1 201
+     settlements earned nothing from other producers: within a BTC block the earliest transaction takes the reward, which on mainnet is a contest of fee rates.
+  4. **Republishes** were paid for and mostly not rewarded: 80 of them cost 927 910 sat (12% of the BTC spent) and earned 34.65 KSA (1%). Of the 523 blocks a republish landed first, 433
+     landed exactly `ANCHOR_DEPTH + CARRIER_REPOST_DELAY` BTC blocks after their anchor, one short of the wait that makes the payee eligible, and the 5% stayed with their producers. The
+     node republishes after `REPUBLISH_PATIENCE` (2) BTC blocks (D-143), so its republish lands at that height: it is sent to keep the settled prefix moving (D-046), not for the reward.
+  The run used 82 857 vB of each BTC block on average (8.3%) and 240 101 vB (24%) of the block after a gap of 26 minutes, in 27 and 77 KSN1 transactions.
+- **Limitations and what stays open**: one run, one operator, one policy, nobody adversarial; no fee market on BTC's side and no price on KSA's. The two ratios and the counting per slot
+  stay as they are: nothing here shows they must change, and a change is a consensus change through the upgrade schedule. Who pays for bodies when sponsored fees are near zero, and the
+  contest for the first place in a BTC block, go to the fee-market simulation (SPEC §14, D-101, D-102). Whether the node waits one BTC block longer before a republish, to be paid for it at
+  the price of landing data a block later, is local policy and the project owner's to decide; it is not changed here.
+- **Impact**: documents only: SPEC (the version history, §13.1's carrier reward row, §14, §17's row); D-095.
