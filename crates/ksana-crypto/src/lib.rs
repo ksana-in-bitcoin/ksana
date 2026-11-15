@@ -25,6 +25,7 @@
 
 pub mod account;
 pub mod bip322;
+pub mod halfagg;
 pub mod merkle;
 pub mod schnorr;
 pub mod tagged;
@@ -32,6 +33,7 @@ pub mod vmop;
 
 pub use account::{account_address, account_from_address, btc_network, parse_account};
 pub use bip322::account_script;
+pub use halfagg::{aggregate, verify_aggregate, HalfSigned, MAX_AGGREGATED};
 pub use merkle::{entries_root, entry_leaf, leaf_hash, merkle_root, root_of_leaf_hashes};
 pub use schnorr::{
     account_of, keypair_from_secret, schnorr_sign, schnorr_verify, tweaked_keypair, Keypair,
@@ -69,6 +71,9 @@ pub enum SigError {
     /// A path B op was given the first input of a carrying transaction: path B ops are not carried by BTC transactions.
     #[error("a path B op is not bound to a BTC transaction input")]
     UnexpectedFirstInput,
+    /// More signatures than one aggregate holds (D-154).
+    #[error("more signatures than one aggregate holds")]
+    AggregateTooLarge,
     /// The textual form of the account cannot be parsed: neither 64 hex digits nor a Taproot address of this network
     /// (D-092).
     #[error("invalid address: {0}")]
