@@ -5434,3 +5434,69 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   here: a raise per BTC block as the pause comes nearer, with or without room, up to the cap; the cap paid at once in a race; and a default path B floor that follows the node's BTC rate and
   an operator's KSA price. The default of the cap, and whether `SETTLEMENT_TIMEOUT` should change (a consensus change), are the project owner's to decide.
 - **Impact**: documents only: SPEC (the version history, §14); D-101, D-102, D-117, D-147, D-149.
+
+## D-151 Three remedies in the node for the costs D-148 found: compiled code is kept on disk, instances take their memory from a pool, and the tree computed for a block's check is the one committed (2026-11-15, follows D-148; D-013, D-098 h's F-07; local to the node, no consensus change and no gas value changed, M63)
+
+- **Problem**: D-148 measured three costs the gas table does not see, each of which took a block near or past `TARGET_BLOCK_TIME` on the machine measured: calls that go round more
+  contracts than the 256 whose compiled code a node keeps in memory (55 and 343 s a block), instances that touch memory the kernel maps anew for each of them (16 to 18 s), and the Merkle
+  tree computed once to check a block and again to commit it (3 to 4 s on a state of 930 000 keys). It named a remedy in the node for each and left the question of prices, which are
+  consensus, until the remedies were measured.
+- **Decision**: the three remedies are made; none changes what a block computes, the gas it spends or any rule. A node with them and a node without them accept the same blocks.
+  1. **Compiled code is kept on disk** (`ksana-vm`: `VmOptions::code_cache`, wasmtime's cache of compiled code). The node compiles a contract's code once, at the latest when it executes
+     the deployment, and writes the result under `vm-cache` in its data directory, one file per code and compiler configuration; a later call whose code has left the 256 kept in memory
+     reads the file instead of compiling, and so does the first call after a restart. `--vm-code-cache-mib` (node and indexer; 16 384 by default, 0 keeps none) bounds the directory: past
+     it wasmtime's worker deletes the files used least recently, at most once an hour, and those codes are compiled again when called. A file that cannot be read back is compiled again.
+  2. **Instances take their memory from a pool** (`VmOptions::pooled_calls`, wasmtime's pooling allocator with `linear_memory_keep_resident` at `MAX_WASM_MEMORY`). An instance's memory
+     comes from a slot the node keeps mapped and resident and clears between uses, with the kernel's dirty-page scan where there is one (Linux 6.7 and later) and by clearing all of it
+     otherwise. The pool has `MAX_INSTANCES_PER_OP` (64) slots for each call it serves at once, and its other limits are the ones code validation already keeps (one memory of at most
+     `MAX_WASM_MEMORY`, at most one table of at most 4 096 elements), so it refuses nothing the allocator on demand accepts; a top-level call takes one of `pooled_calls` places before it
+     creates its store and returns it when the store is gone, and a further call waits, so the pool cannot run out: an instance refused for want of a slot would be a failure only this
+     node sees. `--vm-pooled-calls` (node and indexer) is 1 by default and 0 turns the pool off. The read-only calls of the RPC (`ksana_call`) run on a second VM
+     without a pool that shares the files of (1), so they never hold a place a block waits for. When the pool cannot be set up (it reserves address space), the node logs the reason and
+     runs without it.
+  3. **The tree of the check is the tree committed** (`ksana-state`: `StateDb::preview_root` keeps what it computed, and `commit` uses it when the version and the whole write set are
+     the ones previewed, comparing every key and value; otherwise it computes as before). A rollback, a pruning, a reset and the commit itself drop what was kept. Both the node's check of
+     a block and a producer's own block preview the root first, so each computes the tree once.
+  Measured again with the same blocks on the same machine as D-148 (`KSANA_GAS_CALIBRATION_PLAIN=1` runs the measurement without (1) and (2); (3) has no switch):
+
+  | A block of | D-148 | Same day, without (1) and (2) | With the remedies |
+  |---|---|---|---|
+  | 450 calls going round 260 contracts (a long run of branches) | 55.2 s | 32.7 s | 0.69 s |
+  | the same, branches over 1 000 locals | 342.9 s | 193.0 s | 0.86 s |
+  | 99 ops of 15 instances each touching 16 MiB (98.5M gas) | 16.4 to 17.6 s | 9.1 to 9.2 s | 0.94 to 0.99 s |
+  | 450 ops of one instance touching 16 MiB (a block's data) | 4.1 s | 2.5 s | 0.30 s |
+  | 304 ops of 15 instances of 16 MiB left untouched (99.0M gas) | not measured | 0.15 s | 0.07 s |
+  | 76 ops of 63 instances of a small contract (99.0M gas) | 0.17 s | 0.13 s | 0.06 s |
+  | 9 300 `storage_set` of new keys on 930 000 keys, check and commit | 3.0 to 3.8 s | 0.93 to 0.97 s | 0.93 to 0.96 s (root 0.88 to 0.90 s, commit 0.05 to 0.06 s) |
+  | 9 300 `storage_set` over existing keys, check and commit | 3.1 s | 1.00 to 1.03 s | 0.99 to 1.00 s |
+
+  The runs of the same day without (1) and (2) were about 1.7 times faster than D-148's on the same machine (a virtual machine; every figure of that run is
+  lower, `storage_get` included, and the cause was not looked for), so the remedies are to be read against the middle column: 47 and 224 times for the two rotations, 9 to 10 times for touched memory. For (3) the middle column already has
+  the remedy; its measure is the commit, 0.05 s after a preview where computing the tree takes 0.9 s. The root alone took 1.4 to 2.2 s in D-148 and 0.9 s here: that difference is the
+  day's, not the remedy's.
+- **Rationale**: each remedy removes work a node repeated, not work a block asks for, so none needs a rule: the same code was compiled again, the same pages were mapped again, the same
+  tree was computed again. Kept on disk rather than in memory, compiled code costs no memory that grows with the number of contracts, survives a restart, and its key (the code and the
+  compiler's configuration and version) is wasmtime's own, so a node that upgrades compiles again instead of loading code of another compiler. The places are per top-level call and not
+  per block because that is the unit whose instances are bounded (64); a holder runs only the contract and its host functions, which read a snapshot of the state and of BTC and take no
+  lock of the chain, so waiting for a place cannot deadlock. One place is the default because a place can pin 1 GiB (below) and the node's executions (the check of a block, a
+  producer's own block, the verdict on a candidate chain) rarely coincide; with one place they take turns call by call. The preview is matched on the whole write set and not on a
+  digest or on the block, so that no path, a retry, a reorganization to a sibling or a different block at the same height, can commit a tree computed for other writes.
+- **Costs and limitations**:
+  - Measured on the one machine of D-148 (x86_64, Linux 6.8, 8 virtual cores); no aarch64, no other operating system, no kernel before 6.7. Without the dirty-page scan a slot is cleared
+    whole on each use: a prototype of that mode on the same machine took 1.6 to 1.8 s for the block of 99 ops (1.1 to 1.2 s with the scan) and 2.8 to 2.9 s for the block of 304 ops of
+    untouched memory, which the allocator on demand executes in 0.15 s; the pool is still the better worst case there, and `--vm-pooled-calls 0` is the way back.
+  - **Memory**: each place may keep up to 64 × 16 MiB = 1 GiB resident for as long as the node runs once contracts have used that much, and whoever pays for such calls can make it so.
+    The node's other bounds (D-103) do not count it. The pool also reserves address space for its slots, which a machine with a limit on it may refuse (the node then runs without).
+  - **Disk and trust**: the files are loaded as machine code without a check of their own, so `vm-cache` must be writable by the node alone, as its binary is. The limit is soft
+    (checked at most hourly), and beyond it the behaviour before this entry returns for the codes deleted: calls that go round more code than the limit holds compile again. The size of
+    compiled code per byte of contract code is not bounded here; the 520 contracts of the measurement took 14 MB.
+  - **Deployment still compiles**, 0.08 and 0.44 s a deployment of the two shapes measured, and a block's data holds one; the compiler's time has no proven bound (D-148). The files
+    read back were in the page cache; a read from a cold disk was not measured.
+  - **The tree still grows with the state**: the root of 9 300 writes took 0.26 s at 186 000 keys and 0.89 s at 930 000, and larger states are not measured.
+  - Whether memory is priced by the page and code by what it costs to compile stays the project owner's decision (SPEC §14); with the remedies, no block measured takes more than a
+    second on this machine, against the 5 seconds of `TARGET_BLOCK_TIME`.
+- **Impact**: `ksana-vm` (`VmOptions`, `CodeCache`, `Vm::with_options`, the places; wasmtime's `cache` and `pooling-allocator` features), `ksana-state` (`StateDb::preview_root`,
+  `commit`), `ksana-execution` (`Executor::with_options`, the VM of read-only calls; the block measurement runs as a node does), `ksana-node` and `ksana-indexer` (`ChainOptions::vm`,
+  `NodeConfig::vm`, `IndexerConfig::vm`, `--vm-code-cache-mib`, `--vm-pooled-calls`); tests (`ksana-vm/tests/options.rs`, the state store's preview tests, the determinism and
+  random-sequence tests run a third engine configuration, every other node of the multi-node tests runs with the options); SPEC (the version history, §9.1, §13.1's `BLOCK_GAS_LIMIT`, §14);
+  ARCHITECTURE; CONTRIBUTING; D-148.

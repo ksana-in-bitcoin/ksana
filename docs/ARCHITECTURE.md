@@ -30,10 +30,11 @@ state root the nodes committed to.
   the path C signing message ends with the first input of the carrying transaction, the `*_native_*` interfaces, D-086), Merkle utilities (`entries_root`, RFC 6962; a root from leaf hashes,
   `root_of_leaf_hashes`, and an entry's leaf hash, `entry_leaf`, D-135).
 - `ksana-state`: JMT (jmt 0.12) + RocksDB, version = fast-lane height, commit / rollback / pruning / fixed-version read view / clear (`reset`, for rebuilding from genesis, D-093),
-  `state_root` (D-024), the root of a block's writes on top of an older kept version without committing them (`preview_root_at`, for the finality verdict, D-101); the RocksDB memory bounds every
+  `state_root` (D-024), the root of a block's writes before they are committed (`preview_root`, whose tree the commit of the same writes then writes instead of computing it again, D-151), the same on top of an older kept version (`preview_root_at`, for the finality verdict, D-101); the RocksDB memory bounds every
   store of the node and the indexer opens with (`rocks.rs`: `DbMemory::open`, write buffers of 4 MiB per column family and 16 MiB per database, one 32 MiB block cache per process holding the
   index blocks too, D-103).
-- `ksana-vm`: wasmtime 49 engine configuration, static checks at deployment (no floating point, import allowlist, stack frame estimation), runtime stack metering inserted before compilation (`instrument.rs`,
+- `ksana-vm`: wasmtime 49 engine configuration (`VmOptions`, local to the node, D-151: compiled code kept on disk in wasmtime's cache, instance memory from wasmtime's pooling allocator
+  with a place per top-level call so that the pool cannot run out; neither by default), static checks at deployment (no floating point, import allowlist, stack frame estimation), runtime stack metering inserted before compilation (`instrument.rs`,
   wasm-encoder, D-073), host functions and the gas table (`docs/ABI.md`; `native_tx` reads the BTC transaction carrying the path C op, D-078; the asset management functions
   `asset_create` / `asset_freeze` / `asset_allow` / `asset_pause` / `asset_renounce` and the queries `asset_policy` / `asset_status`, charged before the host acts, D-121;
   the funds a contract attaches go through the provided `Host::transfer_attached`, so that the execution layer records them apart from its payments, D-122).

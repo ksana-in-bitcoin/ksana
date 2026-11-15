@@ -17,6 +17,11 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-15, three remedies in the node for the costs the gas measurement found (M63, D-151)**: no consensus change and no value changed. The node keeps the compiled code of every
+  contract on disk (`--vm-code-cache-mib`), gives contract instances memory from a pool it keeps resident (`--vm-pooled-calls`), and commits the Merkle tree it computed to check a block
+  instead of computing it again. On the machine of D-148 the blocks that took 55 and 343 seconds (calls going round 260 contracts), 16 to 18 seconds (instances touching fresh memory)
+  and 3 to 4 seconds (storage writes on 930 000 keys) now take under a second each (33, 193 and 9 seconds without the first two remedies on the day of this measurement). Not measured: aarch64, a kernel without the dirty-page scan (before Linux 6.7), a larger state. The
+  pool may keep up to 1 GiB resident, and beyond the cache's size limit code is compiled again as before. Whether memory and compilation get a price in consensus stays open (§14).
 - **2026-11-15, the node's fee policy is replayed over mainnet's fee history (M62, D-150)**: no consensus change and no value changed. Over the last 32 days the cap of 100 sat/vB was never
   reached and path B would have been paused at about 1% of the BTC tips; in the two busiest months on record (April 2024, May 2023) at up to a fifth of them. A waiting pair is raised past
   the estimate only while the mempool shows room, which on mainnet is rare, and in a race the node pays the next-block estimate, not the cap. Bitcoin Core's estimator is stood in for, so
@@ -1267,7 +1272,9 @@ The interface between contracts and the VM (exports, calling convention, host fu
   objects and `core::fmt` can all be used. At run time, wasmtime's `max_wasm_stack` is additionally set to 32 MiB and blocks are executed on a dedicated thread with a 64 MiB stack, so the native stack limit is never
   hit before the metering.
 - The inter-contract call depth limit is `MAX_CALL_DEPTH` (the top level is level 1); a single op has at most 64 instances, and the linear memories of all instances total at most 256 MiB.
-- Compilation results are cached by code hash; whether or not they are cached does not affect consensus.
+- Compilation results are cached by code hash; whether or not they are cached does not affect consensus. A node may keep them on disk as well
+  (`--vm-code-cache-mib`, under `vm-cache` in its data directory, trusted as its binary is) and may give instances memory from a pool it keeps resident (`--vm-pooled-calls`); both are local to the node and neither
+  changes what a block computes (D-151).
 
 ### 9.2 Contract lifecycle
 
@@ -1767,7 +1774,7 @@ and confirming it changes no code; the project owner confirmed all six such valu
 | `BTC_QUERY_DEPTH` | 6 | Contracts can only read BTC block headers with 6 or more confirmations (§9.4), the BTC 6-confirmation convention | Settled |
 | `BTC_FINALITY_CONFS` | 6 | D-082 (the project owner's decision): taking back a BTC-final block requires reorging 6 BTC blocks, the BTC 6-confirmation convention. A determination rests on no heavier chain having appeared by the BTC block that made it, so a reorg of that block alone with a heavier chain revokes it; since D-114 a block is reported BTC-final only once that BTC block has 6 confirmations too (without a heavier chain, a reported block leaves the finalized chain only when a reorg of 11 BTC blocks removes its data; BTC-final after about 110 minutes instead of 60) | Settled |
 | `MIN_SETTLEMENT_FEERATE` | 1 sat/vB | Consensus floor = BTC's minimum relay fee rate; the actual fee rate is local policy (default 2 sat/vB) | Settled |
-| `BLOCK_GAS_LIMIT` | 100 000 000 | The order-of-magnitude design of D-013: a storage write is about 10^4 gas, so the number of storage writes per block is bounded (≤ 10^4); measured on one x86_64 machine (D-148): a block spending the limit on any one instruction or host function executes in under 0.5 s, on storage writes in 3 to 4 s with the root and the commit on a state of 930 000 keys, while fresh instance memory and code the compilation cache does not hold are not priced and take a block past the block time (§14); adjustable via the upgrade schedule (D-076) | Settled; measured (D-148): holds for instructions and host functions, open for memory, compilation and a larger state |
+| `BLOCK_GAS_LIMIT` | 100 000 000 | The order-of-magnitude design of D-013: a storage write is about 10^4 gas, so the number of storage writes per block is bounded (≤ 10^4); measured on one x86_64 machine (D-148): a block spending the limit on any one instruction or host function executes in under 0.5 s, on storage writes in 3 to 4 s with the root and the commit on a state of 930 000 keys, while fresh instance memory and code the compilation cache does not hold are not priced and took a block past the block time until the node kept compiled code on disk and pooled instance memory (D-151: under 1 s for every block measured; §14); adjustable via the upgrade schedule (D-076) | Settled; measured (D-148, D-151): holds for instructions and host functions and, with the node's remedies, for the blocks measured; open for the price of memory and compilation and for a larger state |
 | `NATIVE_MAX_GAS` | 1 000 000 | D-036: a forced-inclusion entry counts `min(max_gas, NATIVE_MAX_GAS)` toward the block's gas, limiting how much of the fast lane path C can crowd out; adjustable via the upgrade schedule | Settled; unverified, to be measured |
 | `MAX_OP_BYTES` | 64 KiB | D-005: the limit of a single VmOp (including contract code); the example contracts (token, amm, amm-factory, ksa-exchange) are all far below it | Settled |
 | `MAX_BLOCK_DATA_BYTES` | 80 KiB | D-005: below the roughly 100 kvB limit of a BTC standard transaction; since D-081 the payload is in the witness, and 80 KiB is roughly 20 kvB | Settled |
@@ -1857,10 +1864,10 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
   pair per BTC block as the pause of §6.4 comes nearer, whether or not the mempool shows room; pay the cap at once while a competing chain is on BTC; let the default path B floor follow
   the node's BTC rate and an operator's KSA price (§8.2). The default of `--max-settlement-feerate` is the project owner's decision; the contest of fee rates for the first place in a BTC
   block is not answered by block-level data and stays to be observed; the estimate's lag is to be measured against Bitcoin Core itself.
-- The gas table: it is measured (M60, D-148), and three costs it does not price take a block past the block time. In the node, without a consensus change: keep the compiled code of every
-  deployed contract rather than the last 256 (F-07), give contract instances memory that is already resident, and commit the tree computed for a block's check instead of computing it again;
-  then measure again, on aarch64 and on a machine of a node's expected size as well, and with a larger state. In consensus, the project owner's decision once those are measured: whether
-  memory is priced by the page and a deployment or a call by what its code costs to compile.
+- The gas table: it is measured (M60, D-148), and the three costs it does not price have a remedy in the node each (M63, D-151: compiled code kept on disk, instance memory from a pool,
+  the tree of a block's check committed), with which no block measured takes more than a second on the one machine measured. Still to do: measure on aarch64, on a machine of a node's
+  expected size, on a kernel before Linux 6.7 and with a larger state; measure a deployment's compilation, which the remedies leave as it was, and the calls that go round more code than
+  the disk limit holds. In consensus, the project owner's decision: whether memory is priced by the page and a deployment or a call by what its code costs to compile.
 - The node's fee policy (local policy): for the floor paid while the mempool has room (D-117's limitations), a bump after one missed BTC block to the next-block estimate, a memory of a pair the room
   misjudged, and a reading of the room that is not biased low (`getblockstats`) are done (M59, D-147); their constants come from the signet and are to be looked at again against mainnet's blocks (D-147's
   limitations). P2A pinning (D-102's limitations) is closed (M48, D-131).
