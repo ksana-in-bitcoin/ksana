@@ -93,7 +93,8 @@ fn the_rpc_reports_capabilities_the_pause_and_an_account_s_standing() {
     ];
     for (nonce, action) in (0u64..).zip(steps) {
         node.submit(op(&alice, nonce, action));
-        assert_eq!(node.mine().entries.len(), 1);
+        // The op and the aggregate of its block (D-154)
+        assert_eq!(node.mine().entries.len(), 2);
     }
 
     let info = rpc.asset(asset).unwrap();

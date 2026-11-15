@@ -110,6 +110,7 @@ fn orphan(chain: &Chain, parents: Vec<[u8; 32]>, entries: Vec<Entry>, seed: u64)
         header,
         entries,
         settlement: None,
+        second_halves: Vec::new(),
     }
 }
 
@@ -305,6 +306,7 @@ fn a_body_too_large_for_a_payload_is_invalid() {
         header,
         entries,
         settlement: None,
+        second_halves: Vec::new(),
     };
     let m = invalid(&v, &block);
     assert!(m.contains("does not fit in a payload"), "{m}");
@@ -904,13 +906,14 @@ fn settlement_transactions_are_checked_before_signatures() {
         settlement: None,
         ..honest.clone()
     };
-    let Some(Entry::Sponsored { op }) = forged.entries.last_mut() else {
+    // The half of the signature the block holds (D-154): the aggregate no longer answers for it
+    let Some(Entry::Sponsored { op }) = forged.entries.first_mut() else {
         panic!("the block has a path-B entry");
     };
-    let SigScheme::Bip340(sig) = &mut op.sig else {
-        panic!("a BIP340 signature");
+    let SigScheme::HalfBip340(r) = &mut op.sig else {
+        panic!("half a BIP340 signature");
     };
-    sig[0] ^= 1;
+    r[31] ^= 1;
     forged.header.entries_root = entries_root(&forged.entries).unwrap();
     let weight = v.consensus().weight(&forged.header, 0);
     assert!(v

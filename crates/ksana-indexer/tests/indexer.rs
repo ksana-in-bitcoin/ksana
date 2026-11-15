@@ -152,7 +152,10 @@ fn a_rescue_settlement_with_the_same_payload_is_accepted() {
     // first block: the settlement transaction is broadcast and confirmed normally
     a.submit(transfer(&alice, 0, token(2), bob.account, 7));
     let s1 = a.mine();
-    assert!(matches!(s1.entries.as_slice(), [Entry::Sponsored { .. }]));
+    assert!(matches!(
+        s1.entries.as_slice(),
+        [Entry::Sponsored { .. }, Entry::Aggregate { .. }]
+    ));
     a.mine_empty();
     a.mine_empty();
     a.broadcast_settlements();
@@ -166,7 +169,7 @@ fn a_rescue_settlement_with_the_same_payload_is_accepted() {
     // D-079)
     assert!(matches!(
         s2.entries.as_slice(),
-        [Entry::Unlock { height, index: 0 }, Entry::Sponsored { .. }] if *height == s1.header.height
+        [Entry::Unlock { height, index: 0 }, Entry::Sponsored { .. }, Entry::Aggregate { .. }] if *height == s1.header.height
     ));
     a.mine_empty();
     a.mine_empty();
@@ -353,7 +356,7 @@ fn blocks_whose_anchor_was_reorged_out_leave_the_main_chain() {
     a.submit(transfer(&alice, 0, token(2), bob.account, 7));
     let b1 = a.mine();
     assert!(
-        matches!(b1.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }] if *op == native),
+        matches!(b1.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Aggregate { .. }] if *op == native),
         "{:?}",
         b1.entries
     );
@@ -375,7 +378,7 @@ fn blocks_whose_anchor_was_reorged_out_leave_the_main_chain() {
     let again = a.mine();
     assert_ne!(again.header.btc_anchor, x);
     assert!(
-        matches!(again.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Sponsored { .. }] if *op == native),
+        matches!(again.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Sponsored { .. }, Entry::Aggregate { .. }] if *op == native),
         "{:?}",
         again.entries
     );
@@ -412,7 +415,7 @@ fn a_forced_transaction_confirmed_again_above_the_old_anchor_is_included_again()
     a.submit(transfer(&alice, 0, token(2), bob.account, 7));
     let b1 = a.mine();
     assert!(
-        matches!(b1.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }] if *op == native),
+        matches!(b1.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Aggregate { .. }] if *op == native),
         "{:?}",
         b1.entries
     );
@@ -444,7 +447,7 @@ fn a_forced_transaction_confirmed_again_above_the_old_anchor_is_included_again()
     assert_eq!(a.tip_height(), 0);
     let again = a.mine();
     assert!(
-        matches!(again.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Sponsored { .. }] if *op == native),
+        matches!(again.entries.as_slice(), [Entry::Forced { op, .. }, Entry::Sponsored { .. }, Entry::Sponsored { .. }, Entry::Aggregate { .. }] if *op == native),
         "{:?}",
         again.entries
     );
@@ -508,7 +511,7 @@ fn a_settlement_confirmed_again_at_its_anchor_height_leaves_its_block_behind() {
     let again = a.mine();
     assert!(again.header.btc_anchor.height > x.height);
     assert!(
-        matches!(again.entries.as_slice(), [Entry::Sponsored { op: included }] if *included == op),
+        matches!(again.entries.as_slice(), [Entry::Sponsored { op: included }, Entry::Aggregate { .. }] if included.op_id().unwrap() == op.op_id().unwrap()),
         "{:?}",
         again.entries
     );

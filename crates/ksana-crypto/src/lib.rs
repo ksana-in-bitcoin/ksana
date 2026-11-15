@@ -40,8 +40,9 @@ pub use schnorr::{
 };
 pub use tagged::tagged_hash;
 pub use vmop::{
-    native_vmop_sighash, sign_native_vmop, sign_native_vmop_bip322_p2tr, sign_vmop,
-    sign_vmop_bip322_p2tr, verify_native_vmop, verify_vmop, vmop_sighash, VMOP_SIGHASH_TAG,
+    half_signed, native_vmop_sighash, seal_entries, sign_native_vmop, sign_native_vmop_bip322_p2tr,
+    sign_vmop, sign_vmop_bip322_p2tr, unseal_entries, verify_native_vmop, verify_vmop,
+    verify_vmops_aggregate, vmop_sighash, VMOP_SIGHASH_TAG,
 };
 
 use ksana_primitives::CodecError;

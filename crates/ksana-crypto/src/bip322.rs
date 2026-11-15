@@ -215,6 +215,33 @@ pub fn account_script(account: &[u8; 32]) -> Result<ScriptBuf, SigError> {
     ))
 }
 
+/// The hash the signature in account `account`'s BIP322 simple witness over `message` signs (D-154): BIP341's
+/// signature hash of the key-path spend in `to_sign`, with `SIGHASH_ALL` when `hash_all` and `SIGHASH_DEFAULT`
+/// otherwise. The signature in a witness [`verify_for_account`] accepts is a BIP340 signature by `account` over this
+/// hash, which is what lets it enter an aggregate ([`crate::halfagg`]).
+pub fn account_sighash(
+    account: &[u8; 32],
+    message: &[u8],
+    hash_all: bool,
+) -> Result<[u8; 32], SigError> {
+    let script = account_script(account)?;
+    let spend = to_spend(&script, message);
+    let prevout = TxOut {
+        value: Amount::ZERO,
+        script_pubkey: script,
+    };
+    let tx = to_sign(spend.compute_txid(), Witness::new());
+    let hash_type = if hash_all {
+        TapSighashType::All
+    } else {
+        TapSighashType::Default
+    };
+    SighashCache::new(&tx)
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&[prevout]), hash_type)
+        .map(|hash| hash.to_byte_array())
+        .map_err(|_| SigError::InvalidSignature)
+}
+
 /// Verify account `account`'s BIP322 simple signature over `message`: the address is the account's Taproot address
 /// ([`account_script`]), the witness must have exactly 1 item (P2TR key-path), then verify per [`verify_simple`]. Any
 /// other witness form is [`SigError::InvalidSignature`] (D-092).

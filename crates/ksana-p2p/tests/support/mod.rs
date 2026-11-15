@@ -440,6 +440,7 @@ pub fn genesis(seed: u64) -> Block {
         },
         entries: Vec::new(),
         settlement: None,
+        second_halves: Vec::new(),
     }
 }
 
@@ -458,6 +459,7 @@ pub fn child(parent: &Block, salt: u64) -> Block {
             commit: vec![0xab; 32],
             reveal: vec![0xcd; 32],
         }),
+        second_halves: Vec::new(),
     }
 }
 

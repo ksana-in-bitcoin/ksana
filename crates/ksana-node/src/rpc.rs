@@ -90,6 +90,13 @@ const FEE_HISTORY_BLOCKS: u64 = 20;
 /// built-in transfer action, `ksana_vm::gas::ASSET_TRANSFER_ACTION`).
 const REFERENCE_TRANSFER_GAS: u64 = 10_000;
 
+/// The encoded bytes of `op` with its whole signature, as the entry pool measured it for packing: a block holds a
+/// path B op by half its signature (D-154), which is shorter.
+fn signed_len(op: &VmOp) -> Option<usize> {
+    let whole = op.join(&[0; 32]);
+    Some(whole.as_ref().unwrap_or(op).encode().ok()?.len())
+}
+
 /// Encoded bytes of an ordinary transfer (KSA, BIP340 signature) and its cost ([`op_cost`]) in the packing budget:
 /// `ksana_estimateFee` uses them to convert the suggested fee rates into a suggested amount.
 fn reference_transfer(params: &Params, rules: &Rules) -> (usize, u64) {
@@ -653,7 +660,7 @@ impl Backend for NodeRpc {
                 .filter_map(|e| match e {
                     Entry::Sponsored { op } => match op.fee {
                         FeeMode::Token { amount } => {
-                            let len = op.encode().ok()?.len();
+                            let len = signed_len(op)?;
                             Some(fee_rate(amount, op_cost(params, &rules, len, op.max_gas)))
                         }
                         _ => None,

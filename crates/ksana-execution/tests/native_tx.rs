@@ -324,7 +324,7 @@ fn a_top_up_claim_turns_a_btc_payment_into_ksa() {
             Arc::new(w.chain.btc.clone()),
             &env,
             &[],
-            &[release],
+            &sealed(vec![release]),
         )
         .expect("block should be valid");
     let r = &out.receipts[0];

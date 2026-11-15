@@ -2,11 +2,12 @@
 //! `tests/vectors/merkle.json`.
 
 use ksana_crypto::{
-    account_of, entries_root, keypair_from_secret, merkle_root, native_vmop_sighash,
-    sign_native_vmop, sign_vmop, tagged_hash, verify_native_vmop, verify_vmop, vmop_sighash,
-    VMOP_SIGHASH_TAG,
+    account_of, aggregate, entries_root, half_signed, keypair_from_secret, merkle_root,
+    native_vmop_sighash, seal_entries, sign_native_vmop, sign_vmop, tagged_hash, unseal_entries,
+    verify_aggregate, verify_native_vmop, verify_vmop, verify_vmops_aggregate, vmop_sighash,
+    HalfSigned, VMOP_SIGHASH_TAG,
 };
-use ksana_primitives::{Entry, FeeMode, OutPoint, VmOp};
+use ksana_primitives::{Entry, FeeMode, OutPoint, SigScheme, VmOp};
 use serde_json::Value;
 
 fn load(name: &str) -> Value {
@@ -133,7 +134,6 @@ fn bip322_vectors() {
     use bitcoin::hashes::Hash;
     use ksana_crypto::bip322;
     use ksana_crypto::sign_vmop_bip322_p2tr;
-    use ksana_primitives::SigScheme;
 
     let v = load("signing.json");
     let cases = v["bip322"].as_array().unwrap();
@@ -191,6 +191,96 @@ fn bip322_vectors() {
             "{name}: encoding"
         );
         assert_eq!(op.op_id().unwrap(), arr32(&case["op_id"]), "{name}: op_id");
+    }
+}
+
+/// The aggregate of a block's path B signatures (D-154): the entries a block holds, the second halves beside it, the
+/// items the aggregate is over and the aggregate itself follow byte for byte from the entries the accounts signed, and
+/// none of the failing cases verifies.
+#[test]
+fn aggregate_vectors() {
+    let v = load("signing.json");
+    let case = &v["aggregate"];
+    let signed: Vec<Entry> = serde_json::from_value(case["signed"].clone()).unwrap();
+    let sealed: Vec<Entry> = serde_json::from_value(case["sealed"].clone()).unwrap();
+    let second_halves: Vec<[u8; 32]> = case["second_halves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(arr32)
+        .collect();
+    let s = arr32(&case["s"]);
+
+    assert_eq!(
+        seal_entries(&signed).unwrap(),
+        (sealed.clone(), second_halves.clone())
+    );
+    assert_eq!(sealed.last(), Some(&Entry::Aggregate { s }));
+    assert_eq!(entries_root(&sealed).unwrap(), arr32(&case["entries_root"]));
+
+    let path_b = |entries: &[Entry]| -> Vec<VmOp> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Sponsored { op } => Some(op.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let whole = path_b(&signed);
+    let halves = path_b(&sealed);
+    assert!(halves.len() >= 4);
+    let forms: std::collections::BTreeSet<_> = halves
+        .iter()
+        .map(|op| match op.sig {
+            SigScheme::HalfBip340(_) => "HalfBip340",
+            SigScheme::HalfBip322(_) => "HalfBip322",
+            SigScheme::HalfBip322All(_) => "HalfBip322All",
+            SigScheme::Bip340(_) | SigScheme::Bip322Simple(_) => "whole",
+        })
+        .collect();
+    assert_eq!(
+        forms.into_iter().collect::<Vec<_>>(),
+        ["HalfBip322", "HalfBip322All", "HalfBip340"],
+        "the three forms of half a signature"
+    );
+    assert_eq!(
+        unseal_entries(&sealed, &second_halves).unwrap(),
+        whole.clone()
+    );
+
+    let items = case["items"].as_array().unwrap();
+    assert_eq!(items.len(), halves.len());
+    let mut expected = Vec::new();
+    for ((item, half), op) in items.iter().zip(&halves).zip(&whole) {
+        verify_vmop(op).unwrap();
+        let signed = half_signed(half).unwrap();
+        assert_eq!(
+            signed,
+            HalfSigned {
+                pubkey: arr32(&item["pubkey"]),
+                msg: arr32(&item["msg"]),
+                r: arr32(&item["r"]),
+            }
+        );
+        assert_eq!(signed.pubkey, op.account);
+        assert_eq!(half.op_id().unwrap(), arr32(&item["op_id"]));
+        assert_eq!(op.op_id().unwrap(), arr32(&item["op_id"]));
+        expected.push(signed);
+    }
+    assert_eq!(aggregate(&expected, &second_halves).unwrap(), s);
+    verify_aggregate(&expected, &s).unwrap();
+    verify_vmops_aggregate(halves.iter(), &s).unwrap();
+
+    let failing = case["failing"].as_array().unwrap();
+    assert!(failing.len() >= 4);
+    for case in failing {
+        let name = case["name"].as_str().unwrap();
+        let ops: Vec<VmOp> = serde_json::from_value(case["ops"].clone()).unwrap();
+        assert!(
+            verify_vmops_aggregate(ops.iter(), &arr32(&case["s"])).is_err(),
+            "{name}: the aggregate still verifies"
+        );
     }
 }
 

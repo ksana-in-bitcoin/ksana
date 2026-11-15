@@ -29,7 +29,7 @@ use ksana_btc::mock::MockBtc;
 use ksana_btc::payload::entry_data;
 use ksana_node::chain::Accepted;
 use ksana_node::rescue::Rescuer;
-use ksana_primitives::{Block, Body, Params, Payload, DEVNET};
+use ksana_primitives::{Block, Body, Entry, Params, Payload, DEVNET};
 
 /// Broadcasts the settlement transactions of blocks that have reached `SETTLEMENT_DEPTH` and gives them `confs`
 /// confirmations on BTC.
@@ -112,6 +112,13 @@ fn a_node_without_peers_rebuilds_finalized_blocks_from_btc() {
     let rebuilt = a.chain.store().block(&b1).unwrap().unwrap();
     assert_eq!(rebuilt.header, b_blocks[0].header);
     assert_eq!(rebuilt.entries, b_blocks[0].entries);
+    // BTC carries the path B op by half its signature and the block's aggregate, which is what the block is judged by;
+    // the second halves the producer keeps beside its block are not on BTC (D-154)
+    assert!(
+        matches!(rebuilt.entries.as_slice(), [Entry::Sponsored { op }, Entry::Aggregate { .. }] if op.sig.is_half())
+    );
+    assert_eq!(b_blocks[0].second_halves.len(), 1);
+    assert!(rebuilt.second_halves.is_empty());
     assert!(
         rebuilt.settlement.is_none(),
         "a rebuilt block carries no settlement transaction (D-077)"

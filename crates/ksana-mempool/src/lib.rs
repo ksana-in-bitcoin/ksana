@@ -996,12 +996,11 @@ impl Mempool {
         }
         verify_vmop(op).map_err(|e| AdmitError::Invalid(format!("invalid signature: {e}")))?;
         let cost = op_cost(&self.params, &self.rules, encoded.len(), op.max_gas);
-        Ok((
-            ksana_primitives::hash::sha256(&encoded),
-            fee,
-            cost,
-            encoded.len(),
-        ))
+        // The ID a block gives the op, which holds it by half its signature (D-154)
+        let op_id = op
+            .op_id()
+            .map_err(|e| AdmitError::Invalid(format!("cannot be encoded: {e}")))?;
+        Ok((op_id, fee, cost, encoded.len()))
     }
 
     fn bump(&mut self) {

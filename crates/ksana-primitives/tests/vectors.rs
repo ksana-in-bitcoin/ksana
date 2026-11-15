@@ -97,8 +97,13 @@ fn codec_vectors_valid() {
                 let bytes = hex_field(case, "borsh");
                 assert_eq!(VmOp::decode(&bytes, &DEVNET).unwrap(), op);
                 assert_eq!(op.op_id().unwrap().to_vec(), hex_field(case, "op_id"));
+                // The hash of the encoding a block holds: a path B op by half its signature (D-154)
+                let held = match (&op.fee, op.split()) {
+                    (FeeMode::Token { .. }, Some((half, _))) => half.encode().unwrap(),
+                    _ => bytes.clone(),
+                };
                 assert_eq!(
-                    ksana_primitives::hash::sha256(&bytes).to_vec(),
+                    ksana_primitives::hash::sha256(&held).to_vec(),
                     hex_field(case, "op_id")
                 );
             }
@@ -165,9 +170,18 @@ fn codec_vectors_valid() {
     let expected_variants = [
         ("FeeMode", ["Token", "BtcNative"].as_slice()),
         ("Action", &["Deploy", "Call", "AssetTransfer"]),
-        ("SigScheme", &["Bip340", "Bip322Simple"]),
-        ("Entry", &["Forced", "Sponsored", "Unlock"]),
-        ("EntryData", &["Forced", "Sponsored", "Unlock"]),
+        (
+            "SigScheme",
+            &[
+                "Bip340",
+                "Bip322Simple",
+                "HalfBip340",
+                "HalfBip322",
+                "HalfBip322All",
+            ],
+        ),
+        ("Entry", &["Forced", "Sponsored", "Unlock", "Aggregate"]),
+        ("EntryData", &["Forced", "Sponsored", "Unlock", "Aggregate"]),
         ("Payload", &["Settlement", "NativeOp", "Headers"]),
     ];
     for (ty, names) in expected_variants {

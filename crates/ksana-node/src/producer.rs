@@ -34,7 +34,7 @@ use ksana_btc::settlement::{
 };
 use ksana_btc::tracker::BtcSnapshot;
 use ksana_consensus::{median_time_past, Consensus};
-use ksana_crypto::entries_root;
+use ksana_crypto::{entries_root, seal_entries};
 use ksana_execution::{
     builtin, BlockBuilder, BlockEnv, BlockError, BtcView, MergedBlock, Overlay, StateSource,
 };
@@ -885,7 +885,7 @@ impl Producer {
                 .build_chain_block(view.clone(), btc.clone(), env, &merged, |builder| {
                     let mut entries = Vec::new();
                     if weight != 1 {
-                        return Ok(entries);
+                        return Ok((entries, Vec::new()));
                     }
                     for entry in &forced {
                         builder.push(entry)?;
@@ -901,7 +901,15 @@ impl Producer {
                         }
                     }
                     select(builder, &candidates, budget, &mut entries)?;
-                    Ok(entries)
+                    // The block holds the path B ops by the first halves of their signatures and the aggregate of
+                    // the second (D-154); the second halves stay beside the block
+                    let (entries, seconds) = seal_entries(&entries).map_err(|e| {
+                        BlockError::Fatal(format!("aggregating the signatures: {e}"))
+                    })?;
+                    if let Some(aggregate @ Entry::Aggregate { .. }) = entries.last() {
+                        builder.push(aggregate)?;
+                    }
+                    Ok((entries, seconds))
                 })
         };
         let mut weight = if forced.is_empty() && unlocks.is_empty() && candidates.is_empty() {
@@ -912,14 +920,14 @@ impl Producer {
         if weight != 1 {
             env = prepare(&mut header, weight)?;
         }
-        let (mut outcome, mut entries) = match build(&env, weight) {
+        let (mut outcome, (mut entries, mut second_halves)) = match build(&env, weight) {
             Ok(built) => built,
             Err(e) => return self.merge_failure(cache, view.clone(), &btc, &env, &merged, e),
         };
         if entries.is_empty() && weight != empty_weight {
             weight = empty_weight;
             env = prepare(&mut header, weight)?;
-            (outcome, entries) = match build(&env, weight) {
+            (outcome, (entries, second_halves)) = match build(&env, weight) {
                 Ok(built) => built,
                 Err(e) => return self.merge_failure(cache, view.clone(), &btc, &env, &merged, e),
             };
@@ -1096,6 +1104,7 @@ impl Producer {
             header,
             entries,
             settlement,
+            second_halves,
         };
         if let Err(e) = chain.commit_block(&block, outcome) {
             if matches!(e, NodeError::TipChanged) {
@@ -1348,15 +1357,25 @@ fn select(
     mut budget: usize,
     entries: &mut Vec<Entry>,
 ) -> Result<(), BlockError> {
+    let fatal = |e: NodeError| BlockError::Fatal(e.to_string());
     let mut blocked = BTreeSet::new();
+    // The first path B entry brings the block's aggregate entry with it (D-154)
+    let mut aggregate =
+        settlement::entry_data_len(&Entry::Aggregate { s: [0; 32] }).map_err(fatal)?;
     for op in candidates {
         if blocked.contains(&op.account) {
             continue;
         }
         let account = op.account;
+        // A payload carries the op by the first half of its signature
+        let Some((half, _)) = op.split() else {
+            blocked.insert(account);
+            continue;
+        };
+        let size = settlement::entry_data_len(&Entry::Sponsored { op: half })
+            .map_err(fatal)?
+            .saturating_add(aggregate);
         let entry = Entry::Sponsored { op: op.clone() };
-        let size =
-            settlement::entry_data_len(&entry).map_err(|e| BlockError::Fatal(e.to_string()))?;
         if size > budget {
             blocked.insert(account);
             continue;
@@ -1364,6 +1383,7 @@ fn select(
         match builder.push(&entry) {
             Ok(_) => {
                 budget = budget.saturating_sub(size);
+                aggregate = 0;
                 entries.push(entry);
             }
             Err(BlockError::Invalid(_)) => {

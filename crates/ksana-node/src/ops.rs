@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ksana_btc::native::inclusion_height;
+use ksana_crypto::unseal_entries;
 use ksana_execution::{check_native_op, StateSource};
 use ksana_mempool::{AdmitError, Mempool};
 use ksana_primitives::{Block, Entry, Rules, VmOp};
@@ -173,6 +174,21 @@ pub fn apply_chain_changes(
     chain_changed(chain, mempool, events, &connected, &disconnected)
 }
 
+/// The path B ops of `block` with their full signatures, one item per path B entry in order (D-154): `None` for each
+/// when the block came without the second halves of its signatures (a block rebuilt from BTC), whose ops cannot go
+/// back into the entry pool and are submitted again by their senders.
+fn signed_ops(block: &Block) -> Vec<Option<VmOp>> {
+    match unseal_entries(&block.entries, &block.second_halves) {
+        Some(ops) => ops.into_iter().map(Some).collect(),
+        None => block
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Sponsored { .. }))
+            .map(|_| None)
+            .collect(),
+    }
+}
+
 /// After a main-chain change: the path-B ops of the disconnected blocks, and the skipped ones of the merged blocks
 /// (D-063), go back into the entry pool while still valid (D-041), after the pool has learned the nonces of the path C
 /// ops waiting for forced inclusion under the new tip (D-104); executed ops and ops whose nonce has been used are
@@ -194,19 +210,23 @@ pub fn chain_changed(
         .iter()
         .filter(|b| !disconnected_hashes.contains(&b.header.hash()))
     {
+        let mut signed = signed_ops(block).into_iter();
         for entry in &block.entries {
-            if let Entry::Sponsored { op } | Entry::Forced { op, .. } = entry {
-                let op_id = op.op_id()?;
-                // Only appeared at a skipped position (the op index keeps the executed position): not executed
-                let skipped = chain
-                    .store()
-                    .op_location(&op_id)?
-                    .is_some_and(|location| location.skipped);
-                if skipped {
-                    retry.push(entry);
-                } else {
-                    included.push(op_id);
-                }
+            let (op, signed) = match entry {
+                Entry::Sponsored { op } => (op, signed.next().flatten()),
+                Entry::Forced { op, .. } => (op, None),
+                Entry::Unlock { .. } | Entry::Aggregate { .. } => continue,
+            };
+            let op_id = op.op_id()?;
+            // Only appeared at a skipped position (the op index keeps the executed position): not executed
+            let skipped = chain
+                .store()
+                .op_location(&op_id)?
+                .is_some_and(|location| location.skipped);
+            if skipped {
+                retry.extend(signed);
+            } else {
+                included.push(op_id);
             }
         }
     }
@@ -221,14 +241,12 @@ pub fn chain_changed(
         pool.set_forced(forced);
         let returned = disconnected
             .iter()
-            .flat_map(|block| block.entries.iter())
+            .flat_map(|block| signed_ops(block).into_iter().flatten())
             .chain(retry);
-        for entry in returned {
-            let Entry::Sponsored { op } = entry else {
-                continue;
-            };
-            // Dropped when no longer valid on the new main chain (nonce already used etc.)
-            let _ = pool.insert(op.clone(), &state);
+        for op in returned {
+            // Dropped when no longer valid on the new main chain (nonce already used etc.), and when the second half
+            // this node holds does not make its signature (the pool verifies it, D-154)
+            let _ = pool.insert(op, &state);
         }
         pool.remove_committed(&included, &state)
             .map_err(|e| NodeError::Internal(e.to_string()))?;

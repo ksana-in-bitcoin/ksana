@@ -43,7 +43,7 @@ use ksana_btc::mock::{coinbase_script, MockBtc, MAX_FEERATE};
 use ksana_btc::payload::{attached_payload, envelope_payload};
 use ksana_btc::settlement::{draft, finalize, producer_script, ProducerUtxo, SettlementPair};
 use ksana_consensus::{Consensus, Sha256d};
-use ksana_crypto::{entries_root, sign_vmop};
+use ksana_crypto::{entries_root, seal_entries, sign_vmop};
 use ksana_execution::keys::{self, AccountState};
 use ksana_execution::StateSource;
 use ksana_mempool::{Mempool, Policy};
@@ -211,6 +211,8 @@ fn forge_on(
     entries: Vec<Entry>,
 ) -> Block {
     let chain = &node.chain;
+    // As a producer holds them: the path B ops by half their signatures, under one aggregate (D-154)
+    let (entries, second_halves) = seal_entries(&entries).unwrap();
     let parent_hash = parent.hash();
     let daa_score = chain.ghostdag(&parent_hash).unwrap().unwrap().daa_score + 1;
     let mut header = BlockHeader {
@@ -233,6 +235,7 @@ fn forge_on(
         header,
         entries,
         settlement: None,
+        second_halves,
     }
 }
 
@@ -972,7 +975,8 @@ fn ksana_call_is_bounded_by_the_block_gas_limit_and_runs_few_at_once() {
     };
     deploy.sig = sign_vmop(&deploy, &alice.kp, &[3; 32]).unwrap();
     a.submit(deploy);
-    assert_eq!(a.produce().unwrap().entries.len(), 1);
+    // The op and the aggregate of its block (D-154)
+    assert_eq!(a.produce().unwrap().entries.len(), 2);
     let rpc = Arc::new(NodeRpc {
         chain: Arc::clone(&a.chain),
         mempool: Arc::clone(&a.mempool),
@@ -1284,7 +1288,7 @@ fn a_settlement_confirmed_at_its_anchor_height_after_a_btc_reorg_leaves_its_bloc
     assert_eq!(again.header.height, 1);
     assert_ne!(again.header.btc_anchor, anchor);
     assert!(
-        matches!(again.entries.as_slice(), [Entry::Sponsored { op: included }] if *included == op),
+        matches!(again.entries.as_slice(), [Entry::Sponsored { op: included }, Entry::Aggregate { .. }] if included.op_id().unwrap() == op.op_id().unwrap()),
         "{:?}",
         again.entries
     );

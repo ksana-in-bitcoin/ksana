@@ -1172,6 +1172,7 @@ impl Chain {
                     header,
                     entries: Vec::new(),
                     settlement: None,
+                    second_halves: Vec::new(),
                 };
                 store.put_genesis(&block, fingerprint)?;
                 block.header.hash()
@@ -1822,6 +1823,7 @@ impl Chain {
                         header,
                         entries: (*body).clone(),
                         settlement: None,
+                        second_halves: Vec::new(),
                     });
                 }
             }

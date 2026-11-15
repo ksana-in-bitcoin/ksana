@@ -82,6 +82,19 @@ fn receipt(rpc: &NodeRpc, op: &VmOp) -> ReceiptJson {
 }
 
 /// The block that includes `op`.
+/// The receipt of the aggregate entry that ends a block with path B entries (D-154): that of a bookkeeping entry.
+fn aggregate_receipt(asset_changes: Option<Vec<AssetChangeJson>>) -> ReceiptJson {
+    ReceiptJson {
+        op_id: None,
+        success: true,
+        error: None,
+        gas_used: 0,
+        output: Vec::new(),
+        events: Vec::new(),
+        asset_changes,
+    }
+}
+
 fn block_of(rpc: &NodeRpc, op: &VmOp) -> [u8; 32] {
     let status = rpc.op_status(op.op_id().unwrap()).unwrap();
     status.block.expect("included").hash
@@ -188,7 +201,8 @@ fn scenario(name: &str) -> Scenario {
     for (nonce, action) in (0u64..).zip(actions) {
         let op = signed(&alice, nonce, action);
         side.submit(op.clone());
-        assert_eq!(side.mine().entries.len(), 1, "one block for each op");
+        // The op and the aggregate of its block (D-154)
+        assert_eq!(side.mine().entries.len(), 2, "one block for each op");
         ops.push(op);
     }
     Scenario {
@@ -323,7 +337,7 @@ fn receipts_and_listings_follow_the_changes_to_built_in_assets() {
         assert_eq!(given.asset_changes.as_ref(), Some(changes));
         // ksana_getBlock gives the same receipt
         let block = rpc.block(BlockId::Hash(block_of(&rpc, op))).unwrap();
-        assert_eq!(block.receipts, [given]);
+        assert_eq!(block.receipts, [given, aggregate_receipt(Some(Vec::new()))]);
     }
 
     // the JSON form: the kind, hex, amounts as decimal strings, the events before it as a number
@@ -469,7 +483,7 @@ fn receipts_stored_before_d122_read_as_not_recorded() {
         serde_json::Value::Null
     );
     let shown = rpc.block(BlockId::Hash(block)).unwrap();
-    assert_eq!(shown.receipts, [now]);
+    assert_eq!(shown.receipts, [now, aggregate_receipt(None)]);
     // the other blocks' receipts are untouched, and the index kept its listings
     assert!(receipt(&rpc, &s.ops[2]).asset_changes.is_some());
     assert_eq!((listed(&rpc, bob), listed(&rpc, asset)), listed_before);

@@ -338,10 +338,13 @@ fn static_entry_rules() {
         unlock(1, 0),
         sponsored(&alice, 1, 2, GAS, transfer(bob.account, 3)),
     ];
-    assert_eq!(check_entries_static(&DEVNET, &DEVNET.rules(0), &ok), Ok(()));
+    assert_eq!(
+        check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(ok.clone())),
+        Ok(())
+    );
     // Order
     let reversed: Vec<Entry> = ok.iter().rev().cloned().collect();
-    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &reversed).is_err());
+    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(reversed.clone())).is_err());
     // Total gas
     let over = vec![
         sponsored(
@@ -353,25 +356,25 @@ fn static_entry_rules() {
         ),
         sponsored(&alice, 1, 1, 1, transfer(bob.account, 1)),
     ];
-    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &over).is_err());
+    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(over.clone())).is_err());
     // Invalid signature
     let mut bad = sponsored(&alice, 0, 1, GAS, transfer(bob.account, 1));
     if let Entry::Sponsored { op } = &mut bad {
         op.nonce = 9;
     }
-    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &[bad.clone()]).is_err());
+    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(vec![bad.clone()])).is_err());
     // Fee mode does not match the entry type
     let wrong_fee = Entry::Sponsored {
         op: native_op(&alice, 0, [0x51; 32], GAS, transfer(bob.account, 1)),
     };
-    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &[wrong_fee]).is_err());
+    assert!(check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(vec![wrong_fee])).is_err());
     // A signature problem on a forced-inclusion entry only fails the op
     let mut bad_native = forced(&alice, 0, GAS, transfer(bob.account, 1));
     if let Entry::Forced { op, .. } = &mut bad_native {
         op.nonce = 9;
     }
     assert_eq!(
-        check_entries_static(&DEVNET, &DEVNET.rules(0), &[bad_native]),
+        check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(vec![bad_native])),
         Ok(())
     );
     // Deploy ops go through the same checks
@@ -387,7 +390,7 @@ fn static_entry_rules() {
         },
     );
     assert_eq!(
-        check_entries_static(&DEVNET, &DEVNET.rules(0), &[deploy]),
+        check_entries_static(&DEVNET, &DEVNET.rules(0), &sealed(vec![deploy])),
         Ok(())
     );
 }

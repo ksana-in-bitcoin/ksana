@@ -344,7 +344,8 @@ fn blocks_anchored_to_a_reorged_out_btc_block_leave_the_main_chain() {
     let third = a.mine();
     assert_eq!(third.header.height, 1);
     assert!(third.header.btc_anchor.height > x.height);
-    assert_eq!(third.entries.len(), 3);
+    // The three ops and the aggregate of their block (D-154)
+    assert_eq!(third.entries.len(), 4);
     assert_eq!(a.ksa(&dave), 18);
 
     // The new node syncs from genesis. The blocks anchored at X are at most MAX_ANCHOR_LAG behind the BTC tip and enter
@@ -405,7 +406,8 @@ fn a_block_whose_anchor_a_reorg_takes_while_it_is_produced_is_not_committed() {
         mock.block_hash(next.header.btc_anchor.height).unwrap(),
         Some(next.header.btc_anchor.hash)
     );
-    assert_eq!(next.entries.len(), 1);
+    // The op and the aggregate of its block (D-154)
+    assert_eq!(next.entries.len(), 2);
     assert_eq!(a.ksa(&gina), 5);
 }
 

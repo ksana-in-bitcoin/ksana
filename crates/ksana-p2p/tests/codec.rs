@@ -48,6 +48,7 @@ fn block(height: u64, settlement_len: usize) -> Block {
             commit: vec![0x5a; settlement_len.min(64)],
             reveal: vec![0x5a; settlement_len.saturating_sub(64)],
         }),
+        second_halves: Vec::new(),
     }
 }
 

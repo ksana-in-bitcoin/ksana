@@ -45,8 +45,8 @@ pub mod keys;
 mod state;
 
 pub use executor::{
-    check_entries_static, check_native_op, BlockBuilder, BlockEnv, BlockError, BlockOutcome,
-    BtcView, Executor, MergedBlock, NoBtc, OpStatus, Receipt, UnlockItem,
+    check_aggregate, check_entries_static, check_native_op, BlockBuilder, BlockEnv, BlockError,
+    BlockOutcome, BtcView, Executor, MergedBlock, NoBtc, OpStatus, Receipt, UnlockItem,
 };
 pub use genesis::GenesisConfig;
 pub use genesis_file::{Allocation, GenesisError, GenesisFile, BLOCK_SHARE_ACCOUNT_PLACEHOLDER};

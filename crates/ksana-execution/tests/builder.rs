@@ -43,6 +43,7 @@ fn rejected_entries_leave_the_built_block_unchanged() {
                 }
                 assert_eq!(builder.gas(), 2 * GAS);
                 assert_eq!(builder.receipts().len(), 2);
+                push_aggregate(builder, &[&ok1, &ok2])?;
                 Ok(rejected)
             },
         )
@@ -56,7 +57,7 @@ fn rejected_entries_leave_the_built_block_unchanged() {
             Arc::new(chain.state.clone()),
             Arc::new(NoBtc),
             &env,
-            &[ok1, ok2],
+            &sealed(vec![ok1, ok2]),
         )
         .unwrap();
     assert_eq!(built, validated);

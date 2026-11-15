@@ -157,6 +157,87 @@ pub enum SigScheme {
     Bip340(#[serde(with = "hex_array")] [u8; 64]),
     /// BIP322 simple signature, used by browser wallets, implemented in M6.
     Bip322Simple(#[serde(with = "hex_bytes")] Vec<u8>),
+    /// The first half `r` of a `Bip340` signature (SPEC §4.5, D-154): the form a path B op has in a block, whose
+    /// [`Entry::Aggregate`] holds the second halves of all its path B ops in one scalar.
+    HalfBip340(#[serde(with = "hex_array")] [u8; 32]),
+    /// The first half `r` of the signature in a `Bip322Simple` witness of 64 bytes (`SIGHASH_DEFAULT`), D-154.
+    HalfBip322(#[serde(with = "hex_array")] [u8; 32]),
+    /// The first half `r` of the signature in a `Bip322Simple` witness of 65 bytes (`SIGHASH_ALL`), D-154.
+    HalfBip322All(#[serde(with = "hex_array")] [u8; 32]),
+}
+
+/// The witness of a BIP322 signature by a Taproot key (one item of 64 bytes, or of 65 ending in `SIGHASH_ALL`) in
+/// Bitcoin's consensus encoding: the only two forms of `Bip322Simple` bytes that verify (D-092).
+const WITNESS_ONE_ITEM: u8 = 0x01;
+const SIGHASH_ALL: u8 = 0x01;
+
+impl SigScheme {
+    /// Whether this is half a signature (D-154).
+    pub fn is_half(&self) -> bool {
+        matches!(
+            self,
+            SigScheme::HalfBip340(_) | SigScheme::HalfBip322(_) | SigScheme::HalfBip322All(_)
+        )
+    }
+
+    /// A full signature's two halves `(r, s)` with `r` in its half form; `None` for half a signature and for
+    /// `Bip322Simple` bytes that are not a Taproot key's witness (which verify for no account).
+    pub fn split(&self) -> Option<(SigScheme, [u8; 32])> {
+        fn halves(sig: &[u8]) -> Option<([u8; 32], [u8; 32])> {
+            let (r, s) = sig.split_at_checked(32)?;
+            Some((r.try_into().ok()?, s.try_into().ok()?))
+        }
+        match self {
+            SigScheme::Bip340(sig) => halves(sig).map(|(r, s)| (SigScheme::HalfBip340(r), s)),
+            SigScheme::Bip322Simple(witness) => match witness.as_slice() {
+                [WITNESS_ONE_ITEM, 64, sig @ ..] if sig.len() == 64 => {
+                    halves(sig).map(|(r, s)| (SigScheme::HalfBip322(r), s))
+                }
+                [WITNESS_ONE_ITEM, 65, sig @ .., SIGHASH_ALL] if sig.len() == 64 => {
+                    halves(sig).map(|(r, s)| (SigScheme::HalfBip322All(r), s))
+                }
+                _ => None,
+            },
+            SigScheme::HalfBip340(_) | SigScheme::HalfBip322(_) | SigScheme::HalfBip322All(_) => {
+                None
+            }
+        }
+    }
+
+    /// The half form: a full signature's first half, half a signature itself; `None` as for [`SigScheme::split`].
+    pub fn half(&self) -> Option<SigScheme> {
+        if self.is_half() {
+            return Some(self.clone());
+        }
+        self.split().map(|(half, _)| half)
+    }
+
+    /// The full signature of half a signature and its second half `s`; `None` for a full signature. The inverse of
+    /// [`SigScheme::split`].
+    pub fn join(&self, s: &[u8; 32]) -> Option<SigScheme> {
+        let sig = |r: &[u8; 32]| {
+            let mut sig = [0u8; 64];
+            let (head, tail) = sig.split_at_mut(32);
+            head.copy_from_slice(r);
+            tail.copy_from_slice(s);
+            sig
+        };
+        match self {
+            SigScheme::HalfBip340(r) => Some(SigScheme::Bip340(sig(r))),
+            SigScheme::HalfBip322(r) => {
+                let mut witness = vec![WITNESS_ONE_ITEM, 64];
+                witness.extend(sig(r));
+                Some(SigScheme::Bip322Simple(witness))
+            }
+            SigScheme::HalfBip322All(r) => {
+                let mut witness = vec![WITNESS_ONE_ITEM, 65];
+                witness.extend(sig(r));
+                witness.push(SIGHASH_ALL);
+                Some(SigScheme::Bip322Simple(witness))
+            }
+            SigScheme::Bip340(_) | SigScheme::Bip322Simple(_) => None,
+        }
+    }
 }
 
 /// Fast-lane block header v2 (SPEC §6.1, D-063). The Borsh encoding is `168 + 32 × parent count` bytes, with `nonce`
@@ -263,6 +344,25 @@ pub struct Block {
     pub entries: Vec<Entry>,
     /// The signed settlement transactions (commit and reveal, D-081), see SPEC §7.
     pub settlement: Option<SettlementTxs>,
+    /// The second halves of the signatures of the path B entries, in their order (D-154): what a node needs beside
+    /// the entries to return the ops to its entry pool when the block leaves the main chain. Like `settlement` they
+    /// are no part of what the header commits to and no rule reads them: a block rebuilt from BTC has none, and a
+    /// list that does not give valid signatures is as good as none.
+    #[serde(default, with = "hex_array_vec", skip_serializing_if = "Vec::is_empty")]
+    pub second_halves: Vec<[u8; 32]>,
+}
+
+impl Block {
+    /// Whether the second halves beside the block are as many as its path B entries, or none (D-154): a block with
+    /// any other number of them did not come from a producer, and a node neither stores nor relays what it carries.
+    pub fn second_halves_fit(&self) -> bool {
+        let path_b = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Sponsored { .. }))
+            .count();
+        self.second_halves.is_empty() || self.second_halves.len() == path_b
+    }
 }
 
 /// The settlement transactions carried by a block (D-081): the commit transaction and the reveal transaction, both in
@@ -306,6 +406,13 @@ pub enum Entry {
         /// The position unlocked up to: the index in that main-chain block's acceptance order (the merged blocks are
         /// 0, 1, … in turn, the main-chain block itself comes last).
         index: u32,
+    },
+    /// The second halves of the signatures of all path B ops of the block in one scalar (SPEC §4.5, D-154): the last
+    /// entry of a block that has path B entries, and absent from one that has none.
+    Aggregate {
+        /// `Σ z_i·s_i` over the block's path B ops in order.
+        #[serde(with = "hex_array")]
+        s: [u8; 32],
     },
 }
 
@@ -510,6 +617,12 @@ pub enum EntryData {
         /// The index in that main-chain block's acceptance order.
         index: u32,
     },
+    /// The aggregate of the block's path B signatures (D-154).
+    Aggregate {
+        /// `Σ z_i·s_i` over the block's path B ops in order.
+        #[serde(with = "hex_array")]
+        s: [u8; 32],
+    },
 }
 
 impl From<&Entry> for EntryData {
@@ -523,6 +636,7 @@ impl From<&Entry> for EntryData {
                 height: *height,
                 index: *index,
             },
+            Entry::Aggregate { s } => EntryData::Aggregate { s: *s },
         }
     }
 }

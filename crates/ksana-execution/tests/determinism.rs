@@ -656,7 +656,12 @@ fn replay(exec: &Executor, blocks: &[Vec<Entry>]) -> Result<(Trace, Vec<Vec<Rece
         };
         let view = db.view().map_err(|e| e.to_string())?;
         let out = exec
-            .execute_block(Arc::new(view), Arc::new(TestBtc::default()), &env, entries)
+            .execute_block(
+                Arc::new(view),
+                Arc::new(TestBtc::default()),
+                &env,
+                &sealed(entries.clone()),
+            )
             .map_err(|e| format!("block {} failed to execute: {e}", env.height))?;
         let state_root = db
             .commit(env.height, &out.writes)
@@ -751,7 +756,17 @@ fn check_scenario(
 ) -> Result<(), String> {
     for (height, (want, got)) in scenario.expect_success.iter().zip(receipts).enumerate() {
         let got: Vec<bool> = got.iter().map(|r| r.status == OpStatus::Success).collect();
-        if *want != got {
+        // A block with path B entries ends with its aggregate entry, whose receipt is a success (D-154)
+        let mut want = want.clone();
+        let path_b = |entry: &Entry| matches!(entry, Entry::Sponsored { .. });
+        if scenario
+            .blocks
+            .get(height)
+            .is_some_and(|b| b.iter().any(path_b))
+        {
+            want.push(true);
+        }
+        if want != got {
             return Err(format!(
                 "success/failure of block {}'s receipts {got:?} does not match the expectation {want:?}: {:?}",
                 height + 1,

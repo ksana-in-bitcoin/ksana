@@ -105,10 +105,12 @@ impl Bench {
             unlockable: Vec::new(),
         };
         let view = Arc::new(self.db.view().unwrap());
+        // The block as a producer seals it (D-154): the time includes the check of the aggregate
+        let entries = sealed(entries.to_vec());
         let start = Instant::now();
         let out = self
             .exec
-            .execute_block(view, Arc::new(TestBtc::default()), &env, entries)
+            .execute_block(view, Arc::new(TestBtc::default()), &env, &entries)
             .unwrap();
         let execute = start.elapsed();
         // a node that accepts a block computes the root to compare it with the header's, then commits
