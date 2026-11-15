@@ -69,6 +69,10 @@ impl BtcClient for Recorder {
         self.mock.test_accept(txs)
     }
 
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        self.mock.test_accept_any_fee(txs)
+    }
+
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         self.broadcasts.lock().unwrap().push(tx.clone());
         self.mock.broadcast(tx)

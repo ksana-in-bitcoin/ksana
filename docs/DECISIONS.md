@@ -5522,6 +5522,12 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      - a CPFP child whose pair's change cannot pay the rate sought and keep the dust floor pays all of the change above the dust floor instead, provided that is at least the minimum a
        replacement must pay (the replaced child's fee plus the relay increment) and the child's own minimum, and that the child pays a higher rate than the pair (`cpfp_child`). Before,
        such a pair got no child at all.
+  5. **A CPFP child is checked and sent without bitcoind's limit on a transaction's fee rate**: `testmempoolaccept` and `sendrawtransaction` refuse a transaction paying more than
+     `maxfeerate` (0.10 BTC/kvB by default, 10 000 sat/vB) with `max-fee-exceeded`. The child pays for the pair as well, so its own rate is the rate sought times the package's size over
+     the child's: a child of about 111 vB lifting a pair of 2 861 vB to 1 000 sat/vB pays about 26 800 sat/vB. Under the cap of 100 only a pair above about 11 000 vB met the limit;
+     under the cap of 1 000 every pair above about 1 000 vB does, and the bump would have been refused. The node asks for the child with `maxfeerate` 0 (`BtcClient::test_accept_any_fee`)
+     and sends every transaction with it (`broadcast`); its fee policy and the change are what bound the child's fee. The check of a block's settlement transactions (D-081) keeps
+     bitcoind's limit, so which blocks a node accepts does not change.
   The simulation of D-150 with the two changes it can model (the doubling without room and the cap; tips at which path B is paused, for the tenth percentile and, in brackets, the
   minimum rate of each block):
 
@@ -5548,10 +5554,12 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     no settlement and others republish for it (D-143).
   - The fallback for a wallet too small for the cap is the next-block estimate, not the highest rate the wallet could pay: the child then adds the change, so the pair's own inputs are
     what is spent. A wallet whose outputs together could pay more than the estimate and less than the cap pays less than it could.
+  - A pair of the node's own is still checked with bitcoind's `maxfeerate`, as a block's is: a cap set above 10 000 sat/vB does not raise a pair's own rate past it.
   - The simulation's limits are D-150's: Bitcoin Core's estimator is stood in for, there is no mempool history, package limits, replacement and relay are not modelled, and the race is
     not simulated at all. The figures show direction and size.
   - The room rule's constants (D-147) and the contest for the first place in a BTC block (D-149) stay open as before (SPEC §14).
 - **Impact**: `ksana-node` (`producer.rs`: `DEFAULT_MAX_FEERATE`, `FeePolicy::race_rate`, `rate`, `fund_or_lower`; `rescue.rs`: `Rescuer::bump`, `run_once`; the help of
-  `--max-settlement-feerate`), `ksana-btc` (`settlement::cpfp_child`); tests (`adversarial_liveness.rs`: the rate in a race, the default cap, a pair left waiting without room;
+  `--max-settlement-feerate`), `ksana-btc` (`settlement::cpfp_child`, `BtcClient::test_accept_any_fee`, `RpcClient::broadcast`, the mock's `MAX_FEERATE`); tests (`adversarial_liveness.rs`: the rate in a race, the
+  default cap, a pair left waiting without room, a child above bitcoind's `maxfeerate`; `tests/integration/tests/m3_client.rs`: the same against Bitcoin Core;
   `adversarial_finality.rs`: the race pays the cap, a wallet too small for it, a split beside it; `ksana-btc/tests/settlement.rs`: the child of a change that cannot pay); SPEC (the version history,
   §7.7, §14); `docs/RPC.md`; `docs/SIGNET.md`; ARCHITECTURE; D-102, D-117, D-150.

@@ -60,6 +60,10 @@ impl BtcClient for LateLookup {
     fn test_accept(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
         self.inner.test_accept(txs)
     }
+
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        self.inner.test_accept_any_fee(txs)
+    }
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         self.inner.broadcast(tx)
     }

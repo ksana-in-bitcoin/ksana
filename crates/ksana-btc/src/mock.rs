@@ -50,6 +50,9 @@ use crate::client::{
 pub const REGTEST_BITS: u32 = 0x207f_ffff;
 /// The coinbase amount of every block (sats).
 pub const COINBASE_VALUE_SAT: u64 = 50 * 100_000_000;
+/// The fee rate above which `testmempoolaccept` refuses a transaction, in sat/vB: bitcoind's default `maxfeerate` of
+/// 0.10 BTC/kvB.
+pub const MAX_FEERATE: u64 = 10_000;
 /// The confirmations a coinbase output needs before it can be spent (same as Bitcoin Core).
 pub const COINBASE_MATURITY: u32 = 100;
 /// The time interval between adjacent blocks (seconds).
@@ -393,6 +396,27 @@ impl Chain {
             }),
             None => Prevout::Missing,
         }
+    }
+
+    /// The fee of `tx`: the value of its inputs found among the UTXOs and the mempool's outputs, less its outputs.
+    fn fee(&self, tx: &Transaction) -> u64 {
+        let total_in = tx
+            .input
+            .iter()
+            .filter_map(|input| {
+                self.utxos
+                    .get(&input.previous_output)
+                    .map(|coin| &coin.txout)
+                    .or_else(|| self.mempool.output(&input.previous_output))
+            })
+            .map(|out| out.value.to_sat())
+            .fold(0u64, u64::saturating_add);
+        let total_out = tx
+            .output
+            .iter()
+            .map(|out| out.value.to_sat())
+            .fold(0u64, u64::saturating_add);
+        total_in.saturating_sub(total_out)
     }
 
     /// The mempool admission check; when `add` is true and it passes, the transaction is added to the mempool.
@@ -960,6 +984,34 @@ impl MockBtc {
     }
 }
 
+impl MockBtc {
+    /// `testmempoolaccept`: tries to add each of `txs` to the mempool in turn, then restores the original mempool. A
+    /// transaction whose fee is above `max_feerate` sat/vB of its size is refused with `max-fee-exceeded`.
+    fn test(
+        &self,
+        txs: &[&Transaction],
+        max_feerate: Option<u64>,
+    ) -> Result<Result<(), String>, BtcError> {
+        let mut chain = self.online()?;
+        let saved = chain.mempool.clone();
+        let mut result = Ok(());
+        for tx in txs {
+            let fee = chain.fee(tx);
+            if let Err(reason) = chain.accept((*tx).clone(), true) {
+                result = Err(reason);
+                break;
+            }
+            let most = max_feerate.map(|rate| rate.saturating_mul(tx.weight().to_vbytes_ceil()));
+            if most.is_some_and(|most| fee > most) {
+                result = Err("max-fee-exceeded".into());
+                break;
+            }
+        }
+        chain.mempool = saved;
+        Ok(result)
+    }
+}
+
 impl BtcClient for MockBtc {
     fn tip(&self) -> Result<(u32, [u8; 32]), BtcError> {
         let chain = self.online()?;
@@ -1041,19 +1093,14 @@ impl BtcClient for MockBtc {
     }
 
     /// Tries to add each to the mempool in turn (children may spend the outputs of parents in the package), then
-    /// restores the original mempool.
+    /// restores the original mempool. Like bitcoind with its default `maxfeerate`, refuses a transaction paying more
+    /// than [`MAX_FEERATE`].
     fn test_accept(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
-        let mut chain = self.online()?;
-        let saved = chain.mempool.clone();
-        let mut result = Ok(());
-        for tx in txs {
-            if let Err(reason) = chain.accept((*tx).clone(), true) {
-                result = Err(reason);
-                break;
-            }
-        }
-        chain.mempool = saved;
-        Ok(result)
+        self.test(txs, Some(MAX_FEERATE))
+    }
+
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        self.test(txs, None)
     }
 
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {

@@ -125,6 +125,10 @@ impl BtcClient for Bitcoind {
         self.btc.test_accept(txs)
     }
 
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        self.btc.test_accept_any_fee(txs)
+    }
+
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         self.btc.broadcast(tx)
     }

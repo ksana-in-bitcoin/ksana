@@ -1511,7 +1511,8 @@ impl Rescuer {
                 .saturating_add(fee)
                 .checked_div(pair_vsize.saturating_add(tx.weight().to_vbytes_ceil()))
                 .unwrap_or(0);
-            if let Err(reason) = client.test_accept(&[&tx]).map_err(btc)? {
+            // The child pays for the pair as well, so its own rate may be above bitcoind's `maxfeerate`
+            if let Err(reason) = client.test_accept_any_fee(&[&tx]).map_err(btc)? {
                 eprintln!(
                     "[ksana-node] testmempoolaccept rejected the CPFP child of {}: {reason}",
                     bitcoin::Txid::from_byte_array(*reveal)

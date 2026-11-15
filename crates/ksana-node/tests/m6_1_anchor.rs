@@ -213,6 +213,14 @@ impl BtcClient for Racing {
         self.mock.test_accept(txs)
     }
 
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        let hook = self.hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.mock.test_accept_any_fee(txs)
+    }
+
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         self.mock.broadcast(tx)
     }

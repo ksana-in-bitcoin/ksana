@@ -1119,7 +1119,8 @@ Local policy (D-037, D-060, D-075, D-109):
   A commit / reveal pair this node sent (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for 2 BTC blocks (at once during such a race) and pays less than the
   estimated rate, whether or not the mempool has room, gets a CPFP child spending the reveal's change, lifting the package to the rate; once a later republish chained on the pair spends the change (§7.6), only that one's child can lift it. Once it has waited 2 BTC blocks, whether or not the mempool
   had room, the rate is at least the pair's own rate doubled, and doubled again for every further BTC block, up to the cap, whatever the estimate (D-117, D-152). A child whose pair's change
-  cannot pay the rate and keep the dust floor pays all of the change above the dust floor, when that is at least what a replacement must pay and a higher rate than the pair's (D-152).
+  cannot pay the rate and keep the dust floor pays all of the change above the dust floor, when that is at least what a replacement must pay and a higher rate than the pair's (D-152). The child is checked and sent without
+  bitcoind's `maxfeerate` (10 000 sat/vB by default), which its own rate exceeds when the pair is large; a block's settlement transactions are checked with it as before (D-152).
   A pair that every round of the node has seen waiting while the room showed (outside a race) does not wait for the second block: once a BTC block, found 2 minutes or more after the node first saw the
   pair waiting (a block found sooner was assembled before the pair reached its miner), leaves it out, the room misjudged it, and the rate is at least the next-block estimate; the node remembers it, in memory
   only, and for the 6 BTC blocks after the last such block its new transactions pay the estimate (D-147). When the rate rises again, a child

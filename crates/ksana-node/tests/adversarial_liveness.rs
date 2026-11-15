@@ -39,7 +39,7 @@ use common::mock_node::{native_tx, signed_native};
 use common::side::setup;
 use common::{transfer_op, user, User};
 use ksana_btc::client::{BtcClient, MempoolInfo};
-use ksana_btc::mock::{coinbase_script, MockBtc};
+use ksana_btc::mock::{coinbase_script, MockBtc, MAX_FEERATE};
 use ksana_btc::payload::{attached_payload, envelope_payload};
 use ksana_btc::settlement::{draft, finalize, producer_script, ProducerUtxo, SettlementPair};
 use ksana_consensus::{Consensus, Sha256d};
@@ -87,6 +87,17 @@ impl Instance {
         params: &Params,
         funded: bool,
     ) -> Instance {
+        Self::open_funded(mock, genesis, name, params, funded.then_some(&[400_000; 4]))
+    }
+
+    /// [`Self::open`] with funding UTXOs of the values given.
+    fn open_funded(
+        mock: &Arc<MockBtc>,
+        genesis: &GenesisFile,
+        name: &str,
+        params: &Params,
+        funded: Option<&[u64]>,
+    ) -> Instance {
         let dir = tempfile::tempdir().unwrap();
         let chain = Arc::new(
             Chain::open_with_algorithm(
@@ -98,10 +109,10 @@ impl Instance {
             )
             .unwrap(),
         );
-        let funding = funded.then(|| {
+        let funding = funded.map(|values| {
             let funding =
                 Funding::new(btc_keypair(&format!("{name}/funding")), 2).with_batching(false);
-            mock.fund(&funding.script, &[400_000; 4]);
+            mock.fund(&funding.script, values);
             funding
         });
         while chain.sync_btc().unwrap() {}
@@ -1588,6 +1599,57 @@ fn a_settlement_left_behind_by_a_fee_spike_is_bumped_by_cpfp() {
         .carried_on_chain(&block, &snapshot)
         .unwrap()
         .is_some());
+}
+
+/// A child that lifts a pair to the rate of a fee spike pays for the pair as well, so its own rate is far above the
+/// one the package reaches: above bitcoind's default `maxfeerate` of 10 000 sat/vB here, which `testmempoolaccept`
+/// answers with `max-fee-exceeded`. The node asks without that limit and sends the child (D-152).
+#[test]
+fn a_child_paying_more_than_bitcoinds_default_maximum_is_sent() {
+    let seed = "bump-above-maxfeerate";
+    let (alice, bob) = (
+        user(&format!("adv/liveness/{seed}/alice")),
+        user(&format!("adv/liveness/{seed}/bob")),
+    );
+    let (mock, genesis) = setup(&[(&alice, 1_000)]);
+    let a = Instance::open_funded(&mock, &genesis, seed, &DEVNET, Some(&[5_000_000; 4]));
+    mock.set_min_feerate(5);
+    a.submit(transfer_op(&alice, 0, 2, bob.account, 7));
+    let block = a.produce().unwrap();
+    let pair = SettlementPair::decode(block.settlement.as_ref().unwrap()).unwrap();
+    for _ in 0..DEVNET.settlement_depth {
+        a.produce().unwrap();
+    }
+    a.chain.process_settlements().unwrap();
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+
+    let funding = a.producer.funding.clone().unwrap();
+    let rescuer = Rescuer::new(
+        a.chain.clone(),
+        funding.with_fees(FeePolicy::new(2).with_cap(5_000)),
+        Some(a.producer.producer),
+        None,
+    );
+    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(5_000));
+    rescuer.run_once().unwrap();
+    mock.mine(BUMP_AFTER);
+    a.sync();
+    rescuer.run_once().unwrap();
+    let child = children(&mock, &pair);
+    assert_eq!(child.len(), 1, "bumped");
+    let child = &child[0];
+    assert_eq!(package_feerate(&mock, &pair, child), 5_000);
+    let paid = pair.reveal.output[0].value.to_sat() - child.output[0].value.to_sat();
+    assert!(
+        paid / child.vsize() as u64 > MAX_FEERATE,
+        "the child pays {paid} sat for {} vB",
+        child.vsize()
+    );
+    mock.mine(1);
+    a.sync();
+    assert!(landed_at_tip(&a, &pair), "the pair landed");
 }
 
 /// What bitcoind tells of a mempool with room for the next BTC block (D-117): 1 000 vB waiting, the relay minimum of
