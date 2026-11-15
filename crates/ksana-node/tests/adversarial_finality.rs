@@ -17,7 +17,9 @@
 //! - **The D-091 defense**: when an honest node sees a block on BTC heavier than its own landed part and lighter than
 //!   its own tip, it republishes its own headers; as long as the honest chain is heavier and lands on BTC before the
 //!   attack block reaches the confirmations, the attack block never becomes final and the decision never suspends.
-//!   The republish pays the next-block estimate, whatever room bitcoind's mempool has (D-102, D-117).
+//!   The republish pays the cap, whatever bitcoind estimates and whatever room its mempool has, or the next-block
+//!   estimate and what its change adds when the funding UTXOs cannot pay the cap; a funding split beside it does not
+//!   race (D-102, D-117, D-152).
 
 mod common;
 
@@ -25,13 +27,14 @@ use std::sync::Arc;
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::{Amount, TxOut};
+use bitcoin::{Amount, Transaction, TxOut};
 use common::side::{setup, Side};
 use common::{transfer_op, user};
 use ksana_btc::client::{BtcClient, MempoolInfo};
 use ksana_btc::mock::MockBtc;
 use ksana_btc::settlement::{self, ProducerUtxo};
 use ksana_node::chain::Accepted;
+use ksana_node::producer::DEFAULT_MAX_FEERATE;
 use ksana_node::rescue::Rescuer;
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{Block, BlockHeader, Payload, DEVNET};
@@ -75,6 +78,35 @@ fn mempool_feerate(mock: &MockBtc) -> u64 {
         .sum();
     let vsize: u64 = txs.iter().map(|tx| tx.vsize() as u64).sum();
     fee / vsize
+}
+
+/// Whether `tx` spends an output of `parent`.
+fn spends(tx: &Transaction, parent: &Transaction) -> bool {
+    let txid = parent.compute_txid();
+    tx.input.iter().any(|i| i.previous_output.txid == txid)
+}
+
+/// The fee of `tx`, whose inputs are in the BTC mempool or confirmed.
+fn fee_of(mock: &MockBtc, tx: &Transaction) -> u64 {
+    let txs = mock.mempool();
+    let input: u64 = tx
+        .input
+        .iter()
+        .map(|i| {
+            let outpoint = &i.previous_output;
+            match txs.iter().find(|tx| tx.compute_txid() == outpoint.txid) {
+                Some(tx) => tx.output[outpoint.vout as usize].value.to_sat(),
+                None => mock
+                    .utxo(outpoint, false)
+                    .unwrap()
+                    .unwrap()
+                    .txout
+                    .value
+                    .to_sat(),
+            }
+        })
+        .sum();
+    input - tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>()
 }
 
 /// The attacker's own BTC funds: a key and several of its confirmed UTXOs (mines one BTC block).
@@ -368,17 +400,55 @@ fn a_header_only_empty_block_is_rebuilt_from_btc_and_finalized_over_the_heavier_
 /// the headers of a4 and a5. When X's header reaches the confirmations, the heaviest connected block is a5 and the
 /// candidate chain does not pass through X: X never becomes final and A does not rebuild it; a4 and a5 become final
 /// when the republish reaches the confirmations, and B rebuilds them from the republished headers and switches. The
-/// republish races X, so it pays bitcoind's next-block estimate although the BTC mempool has room (D-091, D-117).
+/// republish races X, so it pays the cap, whatever bitcoind estimates and although the BTC mempool has room (D-091,
+/// D-117, D-152).
 #[test]
 fn republishing_outweighs_a_header_only_attack_block_before_it_can_become_final() {
-    let (alice, bob) = (user("adv/alice3"), user("adv/bob3"));
+    republish_race("3", None, 0);
+}
+
+/// The same race by a node that keeps a funding UTXO pool its 4 UTXOs fill (D-075): the split that makes the pool up in the round of
+/// the republish does not race. It pays by the policy outside a race, here the floor since the BTC mempool has room,
+/// while the republish beside it pays the cap (D-152).
+#[test]
+fn a_funding_split_during_a_race_does_not_pay_the_cap() {
+    republish_race("3-split", None, 4);
+}
+
+/// The same race by a node whose funding UTXOs cannot pay its cap (D-152): the republish pays the next-block estimate,
+/// which a race paid before, and a CPFP child at once adds what the republish's change affords, all above the dust
+/// floor. The package pays more than the estimate, below the cap, and the race ends the same way.
+#[test]
+fn a_wallet_too_small_for_the_cap_races_with_what_it_has() {
+    republish_race("3-small", Some(10_000), 0);
+}
+
+/// The race of [`republishing_outweighs_a_header_only_attack_block_before_it_can_become_final`]; with `cap`, A's
+/// rescuer has that cap, which its funding UTXOs (4 of 400 000 sat) cannot pay, and with a `pool_target` above 0 it
+/// keeps a funding UTXO pool of that size.
+fn republish_race(seed: &str, cap: Option<u64>, pool_target: usize) {
+    let (alice, bob) = (
+        user(&format!("adv/alice{seed}")),
+        user(&format!("adv/bob{seed}")),
+    );
     let (mock, genesis) = setup(&[(&alice, 1_000)]);
     let mut attacker = Attacker::fund(&mock, 2);
-    let a = Side::new(&mock, &genesis, "adv-fin-a3");
-    let b = Side::new(&mock, &genesis, "adv-fin-b3");
+    let a = Side::new(&mock, &genesis, &format!("adv-fin-a{seed}"));
+    let b = Side::new(&mock, &genesis, &format!("adv-fin-b{seed}"));
+    let mut funding = a
+        .producer
+        .funding
+        .clone()
+        .unwrap()
+        .with_pool_target(pool_target);
+    let script = funding.script.clone();
+    if let Some(cap) = cap {
+        funding.fees = funding.fees.with_cap(cap);
+    }
+    let dust = funding.script.minimal_non_dust().to_sat();
     let rescuer = Rescuer::new(
         Arc::clone(&a.chain),
-        a.producer.funding.clone().unwrap(),
+        funding,
         Some(a.producer.producer),
         None,
     );
@@ -437,16 +507,62 @@ fn republishing_outweighs_a_header_only_attack_block_before_it_can_become_final(
         Some((x_hash, 4))
     );
     rescuer.run_once().unwrap();
-    assert_eq!(
-        mock.mempool().len(),
-        2,
-        "the republish's commit and reveal transactions"
-    );
-    assert_eq!(
-        mempool_feerate(&mock),
-        20,
-        "the next-block estimate, not the floor"
-    );
+    match cap {
+        None => {
+            let (splits, pair): (Vec<Transaction>, Vec<Transaction>) =
+                mock.mempool().into_iter().partition(|tx| {
+                    tx.output.len() >= 2 && tx.output.iter().all(|o| o.script_pubkey == script)
+                });
+            let rate = |paying: &[Transaction]| {
+                let vsize: u64 = paying.iter().map(|tx| tx.weight().to_vbytes_ceil()).sum();
+                paying.iter().map(|tx| fee_of(&mock, tx)).sum::<u64>() / vsize
+            };
+            assert_eq!(
+                pair.len(),
+                2,
+                "the republish's commit and reveal transactions"
+            );
+            assert_eq!(
+                rate(&pair),
+                DEFAULT_MAX_FEERATE,
+                "the cap, not the next-block estimate of 20 or the floor"
+            );
+            assert_eq!(
+                splits.len(),
+                usize::from(pool_target > 0),
+                "a split when a pool is kept"
+            );
+            if !splits.is_empty() {
+                assert_eq!(rate(&splits), 2, "the floor: a split does not race");
+            }
+        }
+        Some(cap) => {
+            let txs = mock.mempool();
+            assert_eq!(txs.len(), 3, "commit, reveal and a CPFP child");
+            let child = txs
+                .iter()
+                .find(|tx| txs.iter().all(|other| !spends(other, tx)))
+                .unwrap();
+            let reveal = txs.iter().find(|tx| spends(child, tx)).unwrap();
+            let commit = txs.iter().find(|tx| spends(reveal, tx)).unwrap();
+            let rate = |paying: &[&Transaction]| {
+                let vsize: u64 = paying.iter().map(|tx| tx.weight().to_vbytes_ceil()).sum();
+                paying.iter().map(|tx| fee_of(&mock, tx)).sum::<u64>() / vsize
+            };
+            assert_eq!(rate(&[commit, reveal]), 20, "the next-block estimate");
+            assert_eq!(child.output.len(), 1);
+            assert_eq!(
+                child.output[0].value.to_sat(),
+                dust,
+                "all the change above the dust floor"
+            );
+            let package = mempool_feerate(&mock);
+            assert!(20 < package && package < cap, "{package} sat/vB");
+            // The next round has nothing to add
+            rescuer.run_once().unwrap();
+            assert_eq!(mock.mempool().len(), 3);
+        }
+    }
     mock.mine(1);
     let republished_at = x_seen + 2;
     a.sync();
