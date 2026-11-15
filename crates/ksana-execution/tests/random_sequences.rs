@@ -17,7 +17,7 @@ use ksana_execution::{BlockEnv, BtcView, Executor, GenesisConfig, StateSource, U
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{BtcAnchor, Entry, OutPoint, VmOp, DEVNET};
 use ksana_state::StateDb;
-use ksana_vm::Vm;
+use ksana_vm::{Vm, VmOptions};
 use proptest::prelude::*;
 
 const USERS: usize = 4;
@@ -225,6 +225,10 @@ proptest! {
     fn random_entry_sequences_execute_identically(blocks in blocks()) {
         let first = run(Vm::with_parallel_compilation(&DEVNET, true).unwrap(), &blocks);
         let second = run(Vm::with_parallel_compilation(&DEVNET, false).unwrap(), &blocks);
-        prop_assert_eq!(first, second);
+        prop_assert_eq!(&first, &second);
+        // and with instance memory from a pool (D-151)
+        let options = VmOptions { code_cache: None, pooled_calls: 1 };
+        let third = run(Vm::with_options(&DEVNET, &options).unwrap(), &blocks);
+        prop_assert_eq!(first, third);
     }
 }

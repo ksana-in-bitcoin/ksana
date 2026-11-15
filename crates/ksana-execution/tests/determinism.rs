@@ -12,7 +12,8 @@
 //! - child `serial`: wasmtime parallel compilation off, `RAYON_NUM_THREADS=1`;
 //! - child `parallel`: parallel compilation on, `RAYON_NUM_THREADS=4`; within the process, two threads first share one
 //!   executor (one module cache) and execute concurrently, then one more sequential run uses the warmed-up cache; all
-//!   three results must be identical.
+//!   three results must be identical. This child also keeps the compiled code on disk and takes instance memory from
+//!   a pool of one call (D-151), the way a node runs by default, so the two threads wait for one another.
 //!
 //! The two children run at the same time, started in the opposite order from the parent. The parent also checks that
 //! the success or failure of every receipt matches the expectation, confirming that this set of entries really covers
@@ -36,7 +37,7 @@ use ksana_primitives::asset::{CAPABILITIES, CAP_MINT, CAP_PAUSE};
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{Action, BlockHeader, BtcAnchor, Entry, Funds, DEVNET};
 use ksana_state::StateDb;
-use ksana_vm::{AssetMetaInput, Vm};
+use ksana_vm::{AssetMetaInput, CodeCache, Vm, VmOptions};
 
 const CHILD_ENV: &str = "KSANA_DETERMINISM_CHILD";
 
@@ -779,7 +780,17 @@ fn child(mode: &str) -> Result<(), String> {
             replay(&Executor::with_vm(DEVNET, vm), &blocks)?.0
         }
         "parallel" => {
-            let vm = Vm::with_parallel_compilation(&DEVNET, true).map_err(|e| e.to_string())?;
+            // this process also runs the VM the way a node does by default (D-151): compiled code kept on disk and
+            // instance memory from a pool, of a single call here so that the two threads wait for one another
+            let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let options = VmOptions {
+                code_cache: Some(CodeCache {
+                    dir: dir.path().to_path_buf(),
+                    max_bytes: 1 << 30,
+                }),
+                pooled_calls: 1,
+            };
+            let vm = Vm::with_options(&DEVNET, &options).map_err(|e| e.to_string())?;
             let exec = Arc::new(Executor::with_vm(DEVNET, vm));
             let blocks = Arc::new(blocks);
             let handles: Vec<_> = (0..2)

@@ -1,13 +1,15 @@
 //! The wasmtime engine and contract calls (SPEC §9.1–9.3, docs/ABI.md).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use ksana_primitives::asset::{STATUS_ALLOWED, STATUS_FROZEN};
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{check_funds, Funds, Params};
 use wasmtime::{
-    AsContextMut, Caller, Config, Engine, Extern, Linker, Memory, Module, OperatorCost,
+    AsContextMut, Cache, CacheConfig, Caller, Config, Enabled, Engine, Extern,
+    InstanceAllocationStrategy, Linker, Memory, Module, OperatorCost, PoolingAllocationConfig,
     ResourceLimiter, Store, Trap,
 };
 
@@ -59,6 +61,10 @@ struct Shared {
     btc_query_depth: u32,
     chain_id: u32,
     cache: Mutex<ModuleCache>,
+    /// With a pool: the calls that may still start.
+    permits: Option<Permits>,
+    /// The compiled code on disk, when kept.
+    code_cache: Option<Cache>,
 }
 
 impl Shared {
@@ -97,6 +103,64 @@ impl Shared {
 /// The contract VM (SPEC §9).
 pub struct Vm {
     shared: Arc<Shared>,
+}
+
+/// How a node runs the VM (D-151). Nothing here is consensus: a call computes the same result and spends the same gas
+/// under every value, and the default is neither a cache on disk nor a pool.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VmOptions {
+    /// Keep the compiled code of every contract on disk, so that a code the node compiled once (at the latest when
+    /// it executed its deployment) is read back instead of compiled again once it left the cache in memory.
+    pub code_cache: Option<CodeCache>,
+    /// Top-level calls that run at once on memory the node keeps from one instance to the next; a further call
+    /// waits for one of them to end. 0 takes every instance's memory from the operating system and returns it.
+    /// Each may leave up to `MAX_INSTANCES_PER_OP × MAX_WASM_MEMORY` (1 GiB) resident for as long as the VM lives.
+    pub pooled_calls: u32,
+}
+
+/// The compiled code kept on disk. The files are loaded as code without a check of their own: the directory is
+/// trusted as the node's binary is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeCache {
+    /// The directory, created when missing.
+    pub dir: PathBuf,
+    /// The size of the files past which the ones used least recently are deleted, to be compiled again when called.
+    pub max_bytes: u64,
+}
+
+/// The top-level calls that may run at once on a pool, so that the pool always has the instances a call may create.
+struct Permits {
+    free: Mutex<u32>,
+    returned: Condvar,
+}
+
+struct Permit<'a>(&'a Permits);
+
+impl Permits {
+    fn free(&self) -> MutexGuard<'_, u32> {
+        // the count is a plain number that a panic elsewhere cannot leave half written
+        self.free.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn acquire(&self) -> Permit<'_> {
+        let mut free = self.free();
+        loop {
+            if let Some(left) = free.checked_sub(1) {
+                *free = left;
+                return Permit(self);
+            }
+            free = self.returned.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        let mut free = self.0.free();
+        *free = free.saturating_add(1);
+        drop(free);
+        self.0.returned.notify_one();
+    }
 }
 
 struct Limiter {
@@ -1181,12 +1245,22 @@ impl Vm {
     /// Configures wasmtime per SPEC §9.1: fuel metering, NaN canonicalization, threads, multi-memory, SIMD and other
     /// features disabled, no WASI.
     pub fn new(params: &Params) -> Result<Self, VmError> {
-        Self::with_parallel_compilation(params, true)
+        Self::build(params, true, &VmOptions::default())
+    }
+
+    /// Same as [`Vm::new`], run the way `options` say. They change what a call costs the node, never what it
+    /// computes.
+    pub fn with_options(params: &Params, options: &VmOptions) -> Result<Self, VmError> {
+        Self::build(params, true, options)
     }
 
     /// Same as [`Vm::new`], with parallel compilation optionally disabled (for determinism tests: the result must be
     /// the same under different thread counts).
     pub fn with_parallel_compilation(params: &Params, parallel: bool) -> Result<Self, VmError> {
+        Self::build(params, parallel, &VmOptions::default())
+    }
+
+    fn build(params: &Params, parallel: bool, options: &VmOptions) -> Result<Self, VmError> {
         let mut config = Config::new();
         // wasmtime's `threads` and `gc` compile features are not enabled: threads, GC, function-references and
         // exceptions are always off; reference-types (the new encoding of funcref tables) stays on. The remaining
@@ -1210,6 +1284,47 @@ impl Vm {
             .async_stack_size(MAX_WASM_STACK)
             .max_wasm_stack(MAX_WASM_STACK)
             .parallel_compilation(parallel);
+        let mut code_cache = None;
+        if let Some(cache) = &options.code_cache {
+            // wasmtime's cache of compiled code: one file per code and compiler configuration, read back instead of
+            // compiling again. It needs an absolute path
+            std::fs::create_dir_all(&cache.dir).map_err(|e| VmError::Internal(e.to_string()))?;
+            let dir = cache
+                .dir
+                .canonicalize()
+                .map_err(|e| VmError::Internal(e.to_string()))?;
+            let mut files = CacheConfig::new();
+            files
+                .with_directory(dir)
+                .with_files_total_size_soft_limit(cache.max_bytes)
+                .with_file_count_soft_limit(u64::from(u32::MAX));
+            let files = Cache::new(files).map_err(|e| VmError::Internal(e.to_string()))?;
+            config.cache(Some(files.clone()));
+            code_cache = Some(files);
+        }
+        let slots = options
+            .pooled_calls
+            .saturating_mul(u32::try_from(MAX_INSTANCES_PER_OP).unwrap_or(u32::MAX));
+        if slots > 0 {
+            let max_memory = usize::try_from(params.max_wasm_memory_bytes).unwrap_or(usize::MAX);
+            // Every limit is one that code validation already keeps (one memory of at most MAX_WASM_MEMORY, at most
+            // one table of at most MAX_TABLE_ELEMENTS) or that the permits below keep (the count of instances), and
+            // the size of an instance's own data is left without one: the pool must not refuse what the allocator
+            // on demand accepts
+            let mut pool = PoolingAllocationConfig::new();
+            pool.total_core_instances(slots)
+                .total_memories(slots)
+                .total_tables(slots)
+                .max_memories_per_module(1)
+                .max_tables_per_module(1)
+                .max_memory_size(max_memory)
+                .table_elements(MAX_TABLE_ELEMENTS)
+                .max_core_instance_size(usize::MAX / 2)
+                .max_unused_warm_slots(slots)
+                .linear_memory_keep_resident(max_memory)
+                .pagemap_scan(Enabled::Auto);
+            config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        }
         let engine = Engine::new(&config).map_err(|e| VmError::Internal(e.to_string()))?;
         let max_call_depth =
             usize::try_from(params.max_call_depth).map_err(|e| VmError::Internal(e.to_string()))?;
@@ -1221,8 +1336,20 @@ impl Vm {
                 btc_query_depth: params.btc_query_depth,
                 chain_id: params.chain_id,
                 cache: Mutex::new(ModuleCache::default()),
+                permits: (slots > 0).then(|| Permits {
+                    free: Mutex::new(options.pooled_calls),
+                    returned: Condvar::new(),
+                }),
+                code_cache,
             }),
         })
+    }
+
+    /// How many compilations the code kept on disk has spared and how many codes it did not have, since this VM was
+    /// created; `None` without [`VmOptions::code_cache`].
+    pub fn code_cache_use(&self) -> Option<(usize, usize)> {
+        let cache = self.shared.code_cache.as_ref()?;
+        Some((cache.cache_hits(), cache.cache_misses()))
     }
 
     /// The deployment-time check: the static rules (docs/ABI.md sections 1 and 5) + compilable by wasmtime. Returns
@@ -1244,6 +1371,8 @@ impl Vm {
         req: CallRequest,
         gas_limit: u64,
     ) -> (H, Result<CallOutcome, VmError>) {
+        // held until the store, and with it every instance of this call, is gone
+        let _permit = self.shared.permits.as_ref().map(Permits::acquire);
         let ctx = Ctx {
             host,
             limiter: Limiter {
