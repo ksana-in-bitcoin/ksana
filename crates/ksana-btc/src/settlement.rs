@@ -576,8 +576,11 @@ pub fn sweep_revenue(
 /// a P2TR output of the funding key `key`, and pays what is left back to the same script. Its fee makes the package
 /// (the pair, `pair_fee` sats over `pair_vsize` vB, and the child) pay `feerate_sat_vb`, and is at least `min_fee`
 /// (when it replaces an earlier child: that one's fee plus the relay increment) and the child's own
-/// `vsize × MIN_SETTLEMENT_FEERATE`. Returns the child and its fee; `None` when the change cannot pay that and stay
-/// above the dust floor. v2, `nLockTime = 0`, `nSequence` [`PRODUCER_SEQUENCE`] (replaceable by a later bump).
+/// `vsize × MIN_SETTLEMENT_FEERATE`. A change that cannot pay that fee and stay at the dust floor pays what it can
+/// (D-152: the bump is then below `feerate_sat_vb`, where there was none before): all above the dust floor, as long as
+/// that is at least `min_fee` and the child's own minimum, and the child pays a higher rate than the pair, without
+/// which a miner takes the pair no sooner. Returns the child and its fee; `None` when the change cannot pay that
+/// much. v2, `nLockTime = 0`, `nSequence` [`PRODUCER_SEQUENCE`] (replaceable by a later bump).
 pub fn cpfp_child(
     params: &Params,
     reveal: &Transaction,
@@ -622,16 +625,24 @@ pub fn cpfp_child(
     let own = vsize
         .checked_mul(params.min_settlement_feerate_sat_vb)
         .ok_or_else(|| invalid("fee overflow"))?;
-    let fee = package.saturating_sub(pair_fee).max(min_fee).max(own);
+    let least = min_fee.max(own);
+    let sought = package.saturating_sub(pair_fee).max(least);
     let dust = script.minimal_non_dust().to_sat();
-    let Some(rest) = change
-        .value
-        .to_sat()
-        .checked_sub(fee)
-        .filter(|&rest| rest >= dust)
-    else {
+    let Some(afforded) = change.value.to_sat().checked_sub(dust) else {
         return Ok(None);
     };
+    let fee = if afforded >= sought {
+        sought
+    } else {
+        // Short of the rate sought: worth sending only when it raises what a miner earns from the pair
+        let raises = u128::from(afforded).saturating_mul(u128::from(pair_vsize))
+            > u128::from(pair_fee).saturating_mul(u128::from(vsize));
+        if afforded < least || !raises {
+            return Ok(None);
+        }
+        afforded
+    };
+    let rest = change.value.to_sat().saturating_sub(fee);
     if let Some(out) = tx.output.first_mut() {
         out.value = Amount::from_sat(rest);
     }
