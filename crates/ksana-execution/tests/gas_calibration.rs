@@ -4,6 +4,10 @@
 //! It measures and prints; it asserts nothing about the times. Run it on an idle machine with
 //! `cargo test --release -p ksana-execution --test gas_calibration -- --ignored --nocapture --test-threads=1`.
 //!
+//! The VM runs as a node's does by default (D-151): compiled code kept on disk and one call on pooled memory. With
+//! `KSANA_GAS_CALIBRATION_PLAIN=1` it runs with neither, as every node did before D-151. The tree a block's check
+//! computed is committed either way.
+//!
 //! A block's entries are kept within `MAX_BLOCK_DATA_BYTES` by their Borsh length, which is at least their length in
 //! a payload.
 
@@ -17,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::probe::call;
 use common::*;
-use ksana_execution::{builtin, BlockEnv, Executor, GenesisConfig, OpStatus};
+use ksana_execution::{builtin, BlockEnv, Executor, GenesisConfig, OpStatus, VmOptions};
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{Action, BtcAnchor, Entry, DEVNET};
 use ksana_state::StateDb;
@@ -45,11 +49,20 @@ impl Bench {
     fn new() -> Self {
         let user = user("gas calibration");
         let dir = tempfile::tempdir().unwrap();
-        let mut db = StateDb::open(dir.path()).unwrap();
+        let mut db = StateDb::open(&dir.path().join("state")).unwrap();
         let genesis = GenesisConfig::devnet(vec![(user.account, u128::MAX / 4)]);
         db.commit(0, &genesis.writes().unwrap()).unwrap();
         Bench {
-            exec: Executor::new(NO_REWARD).unwrap(),
+            exec: if std::env::var_os("KSANA_GAS_CALIBRATION_PLAIN").is_some() {
+                Executor::new(NO_REWARD).unwrap()
+            } else {
+                let options = VmOptions::in_data_dir(
+                    dir.path(),
+                    VmOptions::DEFAULT_CODE_CACHE_MIB,
+                    VmOptions::DEFAULT_POOLED_CALLS,
+                );
+                Executor::with_options(NO_REWARD, &options).unwrap()
+            },
             db,
             _dir: dir,
             height: 0,

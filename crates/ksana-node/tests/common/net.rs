@@ -395,7 +395,12 @@ impl Net {
             }),
             pow_algorithm: self.pow_algorithm.clone(),
             pruning: ksana_node::chain::Pruning::default(),
-            vm: Default::default(),
+            // every other node keeps compiled code on disk and pools memory (D-151): the two kinds must agree
+            vm: if i % 2 == 1 {
+                ksana_execution::VmOptions::in_data_dir(&dir.path().join("data"), 64, 1)
+            } else {
+                ksana_execution::VmOptions::default()
+            },
         })
         .unwrap();
         node.set_paused(true);
