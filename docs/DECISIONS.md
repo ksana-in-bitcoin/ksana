@@ -5579,8 +5579,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
      floor in force is that or `--min-fee-per-kib`, whichever is higher. At 2 sat/vB and 1 000 sat a KSA it is 51 200 000 base units per KiB, 0.108 KSA for an ordinary transfer (a cost
      of 216 bytes); at 100 sat/vB, 5.4 KSA.
   3. **When it moves**: the producer reads the rate and sets the floor before it reads the packing candidates, at each new BTC tip and every 30 seconds in between
-     (`Producer::follow_btc_fees`, `FLOOR_REFRESH`; `Mempool::raise_fee_floor`). Ops in the pool stay: one the new floor leaves out waits like any op below the packing floor (it is
-     the first to be evicted from a full pool, D-098) and is a candidate again when the floor falls. The relay floor does not move, so such ops are still admitted and forwarded
+     (`Producer::follow_btc_fees`, `FLOOR_REFRESH`; `Mempool::raise_fee_floor`). Ops in the pool stay: one the new floor leaves out waits like any op below the packing floor (a full
+     pool evicts it before the ops that can be packed, D-098) and is a candidate again when the floor falls. The relay floor does not move, so such ops are still admitted and forwarded
      to producers that ask less.
   4. **In a race the floor does not follow the cap** (D-152): it follows the rate of an ordinary settlement. A race is not the users' doing, and a floor at the cap (25 600 KSA per
      KiB at the default cap and the price above) would stop path B on this node for as long as the race lasts.
@@ -5599,7 +5599,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
 - **Costs and limitations**:
   - **It is off by default**, and so does not by itself end the subsidy D-149 measured: a node whose operator names no price packs from 1 base unit on as before. Whether mainnet's
     documentation should tell operators to set it, and at what figure the project's own nodes run, is the project owner's decision once KSA has a price.
-  - **256 vB per KiB is the data alone, before compression**: the commit / reveal pair's own bytes (about 265 vB a pair, D-140), the headers and a republish are not counted, and zstd
+  - **256 vB per KiB is the data alone, before compression**: the commit / reveal pair's own bytes (a pair carrying one header is 300 to 360 vB, `docs/SIGNET.md`), the headers and a republish are not counted, and zstd
     (D-141) makes the data smaller. Under the fifth run's load 88% of a settlement was bodies (D-149), so the figure is of the right size there; with few ops per settlement the fixed
     part dominates and the floor undercharges. An operator corrects for either by naming a lower or a higher price.
   - **The carrier's half**: when another producer's settlement carries the block's data, half of the sponsored fees go to that carrier (`CARRIER_FEE_BPS`, D-095), who paid the BTC.
@@ -5609,7 +5609,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   - **Users see the floor move**: an amount `ksana_estimateFee` suggested can be too low a BTC block later. The op then waits in the pool until the rate falls, until another producer
     packs it, or until the user replaces it with a higher fee (a tenth more at least, D-130). The suggestion carries no margin for this.
   - For up to 30 seconds after the rate falls, `ksana_estimateFee` still answers the higher floor the producer packs by.
-  - Each new floor recomputes every account's place in the eviction order (the pool holds at most 10 000 ops by default) and asks bitcoind for the rate (up to three calls).
+  - Each new floor recomputes every account's place in the eviction order (the pool holds at most 10 000 ops by default) and asks bitcoind for the rate.
   - Tested on the mock BTC chain only; no real fee market, and no KSA price, exists on signet.
 - **Impact**: `ksana-node` (`producer.rs`: `KsaPrice`, `PATH_B_VB_PER_KIB`, `FLOOR_REFRESH`, `FeePolicy::with_ksa_price`, `path_b_floor`, `path_b_floor_now`,
   `Producer::follow_btc_fees`; `rpc.rs`: `estimate_fee`; `main.rs`: `--ksa-price-sat`), `ksana-mempool` (`Mempool::raise_fee_floor`); tests (`m65_path_b_floor.rs`: the price's
