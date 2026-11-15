@@ -18,9 +18,10 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 Version history:
 
 - **2026-11-16, with the operator's KSA price the packing floor of path B follows the BTC fee rate (M65, D-153)**: local policy of the node, no consensus change; the third change
-  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's cost must pay the KSA worth 256 vB at the
-  fee rate the node funds settlements at (an op's bytes land on BTC as a quarter of a vB each), or `--min-fee-per-kib` when that is higher; the producer sets this floor again at each
-  BTC block, ops below it wait in the pool, and `ksana_estimateFee` suggests an amount that meets it. The option has no default, since the protocol has no exchange rate and KSA no
+  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's encoded bytes must pay the KSA worth 256 vB
+  at the fee rate the node funds settlements at (an op's bytes land on BTC as a quarter of a vB each), whatever its `max_gas`; `--min-fee-per-kib`, which goes by the op's cost,
+  applies beside it. The producer sets this floor again at each BTC block, ops below it wait in the pool, and `ksana_estimateFee` answers the rate in a new field,
+  `path_b.per_kib_data`, that only such a node gives, and suggests an amount that meets it. The option has no default, since the protocol has no exchange rate and KSA no
   market: without it the floors are fixed as before, so the change does not by itself end the subsidy D-149 measured (§8.2, §14).
 - **2026-11-15, a waiting pair is raised per BTC block with or without room, a race pays the cap, and the default cap is 1 000 sat/vB (M64, D-152)**: local policy of the node, no
   consensus change. Two of the three changes D-150 named are made: a commit / reveal pair that has waited 2 BTC blocks is lifted to at least its own rate doubled, and doubled again per
@@ -1160,9 +1161,9 @@ Path B is priced in KSA; path C pays only the transaction fee to BTC miners. The
   decides whether an op enters the entry pool and is forwarded: an op that reaches the relay floor but not the packing floor enters the pool and is forwarded, to be packed by another producer. The protocol provides no on-chain reference exchange rate; the price risk between the token and BTC is borne by the producer
   itself.
 - The packing floor can follow the BTC fee rate (D-153): a producer that settles and is given what one KSA is worth to its operator in sat (`--ksa-price-sat`, a decimal number above
-  0; no default) raises the minimum fee rate to the KSA worth 256 vB per KiB of cost at the fee rate it funds an ordinary settlement at now (§7.7; not the cap paid in a race):
-  `rate × 256 × 10^8 / price` base units per KiB, rounded up, or `--min-fee-per-kib` when that is higher. 256 vB per KiB is the op's data as witness bytes; the pair's own bytes, the
-  headers and the compression are not counted. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
+  0; no default) packs an op only when it also pays, per KiB of its encoded bytes, the KSA worth 256 vB at the fee rate the producer funds an ordinary settlement at now (§7.7; not the cap paid in
+  a race): `rate × 256 × 10^8 / price` base units per KiB, rounded up. This floor goes by the op's bytes, whatever its `max_gas`, since gas takes no room on BTC; the minimum amount
+  and the minimum fee rate per KiB of cost apply beside it. 256 vB per KiB is the op's data as witness bytes; the pair's own bytes, the headers and the compression are not counted. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
   candidates again when it falls; the relay floor does not move. The price is the operator's own figure and binds nobody else: other producers pack by their own floors.
 - Entry pool (`ksana-mempool`): admission first does stateless checks (version, chain ID, encoded length, fee mode, signature), then checks against the current state (nonce not below the account nonce; KSA
   balance sufficient to pay the sponsored fees of all queued ops of this account), then policy (relay floor, pool capacity default 10 000, at most 64 queued ops per account, a replacement must raise the sponsored fee by at least a tenth and by at least the relay floor, D-130).
@@ -1170,8 +1171,8 @@ Path B is priced in KSA; path C pays only the transaction fee to BTC miners. The
   The packing candidates are, for each account, a contiguous run starting at the current nonce (cut off at the first op below the packing floor), selected among the accounts' queue heads by fee rate from high to low (ties by
   sponsored fee, then by `op_id`), forming an open fee market: an op whose `max_gas` fills the whole block cannot crowd out other ops with a slightly higher amount.
 - `ksana_estimateFee` returns suggested values: the fee rate at which this node funds settlement now (§7.7; a reference for path C and top-up transactions), the suggested path B fee rate `per_kib` (the median, over the last 20 main-chain blocks, of
-  each block's lowest path B entry fee rate, taking the larger middle value for an even count, not below `--min-fee-per-kib` nor, with `--ksa-price-sat`, below the floor that follows the BTC fee rate) and the suggested amount for a plain transfer converted from it,
-  `amount` (not below `--min-token-fee`); it does not change the conditions under which the node accepts ops.
+  each block's lowest path B entry fee rate, taking the larger middle value for an even count, not below `--min-fee-per-kib`), on a node with `--ksa-price-sat` the rate per KiB of an op's encoded bytes that follows the BTC fee rate, `per_kib_data`, and the suggested amount for a plain transfer, `amount`
+  (the larger of its cost at `per_kib` and its bytes at `per_kib_data`, not below `--min-token-fee`); it does not change the conditions under which the node accepts ops.
 
 ### 8.3 Gas metering
 
