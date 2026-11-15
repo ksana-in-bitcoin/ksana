@@ -43,8 +43,8 @@ use ksana_node::node::{Node, NodeConfig};
 use ksana_node::producer::Funding;
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{
-    Action, BtcAnchor, Entry, FeeMode, OutPoint, Payload, SigScheme, VmOp, DEVNET, KSA_ASSET_ID,
-    VMOP_VERSION,
+    Action, BtcAnchor, Entry, EntryData, FeeMode, OutPoint, Payload, SigScheme, VmOp, DEVNET,
+    KSA_ASSET_ID, VMOP_VERSION,
 };
 use ksana_rpc::{
     BlockJson, KsanaApiClient, OpState, OpStatusJson, SettlementJson, SettlementState,
@@ -436,7 +436,7 @@ fn path_b_op_takes_effect_and_the_producer_pays_the_settlement() {
     let height = status.block.unwrap().height;
     let block = fast.block(height);
     assert!(
-        matches!(block.entries[status.index.unwrap() as usize].clone(), Entry::Sponsored { op: o } if o == op)
+        matches!(block.entries[status.index.unwrap() as usize].clone(), Entry::Sponsored { op: o } if o.op_id().unwrap() == op.op_id().unwrap())
     );
 
     // Settlement transactions: all inputs of the commit transaction come from the producer's funding address,
@@ -579,7 +579,12 @@ fn twenty_users_share_one_settlement() {
     let Payload::Settlement { entries, .. } = Payload::decode(&payload, &DEVNET).unwrap() else {
         panic!("not a settlement payload");
     };
-    assert_eq!(entries.len(), 20, "the payload carries 20 entries");
+    // The 20 ops and the aggregate of their signatures (D-154)
+    assert_eq!(entries.len(), 21, "the payload carries 20 entries");
+    assert!(
+        matches!(entries.last(), Some(EntryData::Aggregate { .. })),
+        "the payload ends with the aggregate"
+    );
     mine(&btc, 1);
     fast.wait_settlement(height, SettlementState::Confirmed);
     assert_eq!(confirmations(&btc, &txid_of(&s)), 1);

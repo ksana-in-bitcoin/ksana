@@ -169,6 +169,8 @@ impl Fast {
             rules: DEVNET.rules(self.height + 1),
             unlockable: Vec::new(),
         };
+        // A block holds its path B ops by half their signatures and ends with their aggregate (D-154)
+        let (entries, _) = ksana_crypto::seal_entries(&entries).expect("the entries seal");
         let out = self
             .exec
             .execute_block(
