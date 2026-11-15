@@ -17,6 +17,10 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-15, the node's fee policy is replayed over mainnet's fee history (M62, D-150)**: no consensus change and no value changed. Over the last 32 days the cap of 100 sat/vB was never
+  reached and path B would have been paused at about 1% of the BTC tips; in the two busiest months on record (April 2024, May 2023) at up to a fifth of them. A waiting pair is raised past
+  the estimate only while the mempool shows room, which on mainnet is rare, and in a race the node pays the next-block estimate, not the cap. Bitcoin Core's estimator is stood in for, so
+  the figures show direction and size. Three changes of local policy follow and are not made here (§14).
 - **2026-11-15, the carrier reward is observed on the signet (M61, D-149)**: no consensus change and no value changed. In the fifth stress run no producer attached a settlement to every
   block (29.2% of the blocks of producers with a wallet carried one, the batching policy), and the fixed part pays less per satoshi for doing so than for the batch; 3 497 KSA moved to
   carriers for 7 788 580 sat of BTC fees at 2 sat/vB. Two things differ from what D-095 reckoned: a settlement under load is about 2 900 vB, most of it bodies the proportional part does
@@ -1847,9 +1851,12 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
   hashrate (`mainnet/README.md`).
 - Run paths B and C end to end with real wallets (Unisat / Xverse) on the public signet (`docs/SIGNET.md`, M32).
 - The measurements marked "unverified, to be measured" in §13.1: the GPU advantage of Argon2id (the retuning path of D-094), the propagation delay of a real network (`GHOSTDAG_K`), and the observation
-  of `SETTLEMENT_TIMEOUT` on signet; a simulation of the BTC fee market against the landing race of §6.5 (D-101, D-102). The carrier reward is observed (M61, D-149): its values stay, and
-  the simulation takes two questions from it, who pays for bodies while sponsored fees are near zero and the contest of fee rates for the first place in a BTC block; whether a node's
-  republish waits one BTC block longer, to be eligible for the reward, is the project owner's decision (local policy).
+  of `SETTLEMENT_TIMEOUT` on signet. The carrier reward is observed (M61, D-149): its values stay; whether a node's republish waits one BTC block longer, to be eligible for the reward,
+  is the project owner's decision (local policy).
+- The node's BTC fees: the policy is replayed over mainnet's fee history (M62, D-150; the simulation D-101 and D-102 asked for). In the node, without a consensus change: raise a waiting
+  pair per BTC block as the pause of §6.4 comes nearer, whether or not the mempool shows room; pay the cap at once while a competing chain is on BTC; let the default path B floor follow
+  the node's BTC rate and an operator's KSA price (§8.2). The default of `--max-settlement-feerate` is the project owner's decision; the contest of fee rates for the first place in a BTC
+  block is not answered by block-level data and stays to be observed; the estimate's lag is to be measured against Bitcoin Core itself.
 - The gas table: it is measured (M60, D-148), and three costs it does not price take a block past the block time. In the node, without a consensus change: keep the compiled code of every
   deployed contract rather than the last 256 (F-07), give contract instances memory that is already resident, and commit the tree computed for a block's check instead of computing it again;
   then measure again, on aarch64 and on a machine of a node's expected size as well, and with a larger state. In consensus, the project owner's decision once those are measured: whether

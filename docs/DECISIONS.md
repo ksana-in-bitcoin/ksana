@@ -5400,3 +5400,37 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   contest for the first place in a BTC block, go to the fee-market simulation (SPEC §14, D-101, D-102). Whether the node waits one BTC block longer before a republish, to be paid for it at
   the price of landing data a block later, is local policy and the project owner's to decide; it is not changed here.
 - **Impact**: documents only: SPEC (the version history, §13.1's carrier reward row, §14, §17's row); D-095.
+
+## D-150 The node's fee policy is replayed over mainnet's fee history: the cap holds in a quiet market and pauses path B in the two busiest months, a pair without room is never raised past the estimate, and a race pays the estimate, not the cap (2026-11-15, the simulation D-101 and D-102 left to SPEC §14; D-117, D-147, D-149; no value changes, M62)
+
+- **Problem**: D-101 and D-102 left one thing to SPEC §14: a simulation of BTC's fee market against the landing race of §6.5, since the signet has no fee market (2 sat/vB throughout). D-147
+  added that the room rule's two thresholds come from the signet, and D-149 handed over two questions: who pays for bodies while sponsored fees are near zero, and the contest of fee rates
+  for the first place in a BTC block.
+- **Decision**: the simulation is made and recorded; no value and no rule changes with this entry. The node's policy (the estimate for 3 BTC blocks within the floor 2 and the cap
+  100 sat/vB, D-102; the room rule and its doubling, D-117; the one-block bump and its memory, D-147; CPFP after `BUMP_AFTER` blocks) is replayed block by block over three stretches of
+  mainnet, 4 501 blocks each, from each block's weight and fee-rate percentiles (mempool.space): heights 971 446 to 975 946 (the 32 days to 2026-11-15, the median of the blocks' median
+  rates 1 sat/vB), 838 000 to 842 500 (April 2024, 37 sat/vB) and 787 500 to 791 500 (May 2023, 53 sat/vB), the last two chosen as the busiest months on record. A settlement started at
+  every block; path B counts as paused at a BTC tip when a block's data has not landed four BTC blocks after it was produced (`SETTLEMENT_TIMEOUT` 6 less `ANCHOR_DEPTH` 2, D-046). Each
+  figure is given for two readings of the rate a full block takes, its tenth percentile and its minimum, the second being the kinder one.
+  1. **The cap**: in the recent stretch no block asked more than 100 sat/vB, the node paid 2.2 sat/vB on average and path B was paused at 1.3% (0.3%) of the tips. In April 2024 18.9% of
+     the blocks asked more than the cap, for 144 blocks in a row at the longest, and path B was paused at 19.6% (15.7%) of the tips; in May 2023 19.6% of the blocks, 80 in a row, and
+     19.3% (2.8%). With a cap of 500 the pauses are 7.3% and 8.2% (tenth percentile): what remains is the estimate lagging, item 2.
+  2. **No raise without room** (read from the code, `rescue.rs`): a waiting pair is bumped to the current estimate; it is doubled per BTC block only while the mempool shows room (D-117),
+     and to the next-block estimate once the room was misjudged (D-147). A pair that pays an estimate that turned out too low, with no room, waits for the estimate to rise. With the
+     doubling applied whether or not there is room, the simulation's pauses fall to none in the recent stretch and, with a cap of 500, to 1.7% and 0.4% in the two busy months; with the cap
+     of 100 they stay at 16.8% and 14.7%. How often the estimate lags depends on Bitcoin Core's estimator, which is replaced here by a stand-in (limitations).
+  3. **A race pays the estimate** (read from the code, D-102 item b): while a competing chain is on BTC the node pays the next-block estimate within the cap. What it costs to keep honest
+     data out of `BTC_FINALITY_CONFS` blocks in a row, filling them above the rate the honest pair pays: a median of 5.8 BTC in the recent stretch when the pair pays the cap, and 0.14 BTC
+     when it pays an estimate that does not follow the six stuffed blocks. The second figure is a lower bound resting on that assumption, which was not tested against Bitcoin Core. In
+     April 2024 the cost was nothing in 10.2% of the six-block windows: the market alone asked more than the cap.
+  4. **The room rule** (D-117, D-147) rarely applies on mainnet: 2.1%, 0.3% and 0.35% of the blocks were at most half full. The floor of 2 sat/vB is twice the recent median.
+  5. **What data costs**: the fifth run's load (about 7 ops per second, 82 857 vB per BTC block, D-149) costs 0.27 BTC a day at the recent rates and 7.9 and 9.1 BTC a day in the two busy
+     months, while a node's default path B floor is one base unit and no rate per byte (SPEC §8.2) and `ksana_estimateFee` suggests the lowest rate lately accepted. That answers D-149's
+     first question as it stands: the reward pays for bodies, and nothing ties the price of path B to the BTC a producer spends. Its second question, the contest for the first place in a
+     BTC block, is not answered: block-level data does not show the order within a block.
+- **Limitations and what stays open**: `estimatesmartfee` has no history and is stood in for by the rate at which 95% of the starts in the last 144 blocks landed within the target; there
+  is no mempool history, so room is read from the previous block's weight alone, which overstates it; Ksana's own transactions do not move the market, although the load is 8.3% of a
+  block; package limits, replacement and relay are not modelled. The figures show direction and size, not a guarantee. Three changes follow for the node's local policy and are not made
+  here: a raise per BTC block as the pause comes nearer, with or without room, up to the cap; the cap paid at once in a race; and a default path B floor that follows the node's BTC rate and
+  an operator's KSA price. The default of the cap, and whether `SETTLEMENT_TIMEOUT` should change (a consensus change), are the project owner's to decide.
+- **Impact**: documents only: SPEC (the version history, §14); D-101, D-102, D-117, D-147, D-149.
