@@ -90,9 +90,9 @@ const FEE_HISTORY_BLOCKS: u64 = 20;
 /// built-in transfer action, `ksana_vm::gas::ASSET_TRANSFER_ACTION`).
 const REFERENCE_TRANSFER_GAS: u64 = 10_000;
 
-/// Cost ([`op_cost`]) of an ordinary transfer (KSA, BIP340 signature) in the packing budget: `ksana_estimateFee` uses
-/// it to convert the suggested fee rate into a suggested amount.
-fn reference_transfer_cost(params: &Params, rules: &Rules) -> u64 {
+/// Encoded bytes of an ordinary transfer (KSA, BIP340 signature) and its cost ([`op_cost`]) in the packing budget:
+/// `ksana_estimateFee` uses them to convert the suggested fee rates into a suggested amount.
+fn reference_transfer(params: &Params, rules: &Rules) -> (usize, u64) {
     let op = VmOp {
         version: VMOP_VERSION,
         chain_id: params.chain_id,
@@ -108,7 +108,7 @@ fn reference_transfer_cost(params: &Params, rules: &Rules) -> u64 {
         sig: SigScheme::Bip340([0; 64]),
     };
     let len = op.encode().map(|bytes| bytes.len()).unwrap_or(0);
-    op_cost(params, rules, len, op.max_gas)
+    (len, op_cost(params, rules, len, op.max_gas))
 }
 
 fn internal(e: impl std::fmt::Display) -> ErrorObjectOwned {
@@ -610,22 +610,29 @@ impl Backend for NodeRpc {
 
     fn estimate_fee(&self) -> RpcResult<EstimateFeeJson> {
         let params = self.chain.params();
-        let (min_token_fee, min_fee_per_kib, rules) = {
+        let (min_token_fee, min_fee_per_kib, min_data_fee_per_kib, rules) = {
             let pool = self.pool()?;
             let policy = pool.policy();
-            (policy.min_token_fee, policy.min_fee_per_kib, *pool.rules())
+            (
+                policy.min_token_fee,
+                policy.min_fee_per_kib,
+                policy.min_data_fee_per_kib,
+                *pool.rules(),
+            )
         };
         let feerate = self
             .fees
             .rate(params, self.chain.btc().client().as_ref(), false);
-        // With the operator's KSA price the packing floor follows the fee rate (D-153): a producing node has set it in
-        // the pool's policy already, at most FLOOR_REFRESH ago; one that does not produce answers the same
-        let min_fee_per_kib = min_fee_per_kib.max(self.fees.path_b_floor(feerate).unwrap_or(0));
+        // With the operator's KSA price the packing floor per KiB of an op's bytes follows the fee rate (D-153): a
+        // producing node has set it in the pool's policy already, at most FLOOR_REFRESH ago; one that does not
+        // produce answers the same
+        let per_kib_data = min_data_fee_per_kib.max(self.fees.path_b_floor(feerate).unwrap_or(0));
 
         // Path B: the median (the larger middle value for an even count) over the last FEE_HISTORY_BLOCKS main-chain
         // blocks of each block's lowest path B entry fee rate (sponsored fee per KiB of cost, the same ordering as
         // packing), not below this node's minimum packing fee rate; the suggested amount is that of an ordinary
-        // transfer converted at this rate, not below the minimum sponsored fee for packing
+        // transfer, its cost converted at this rate or its bytes at the rate per KiB of bytes when that is more, not
+        // below the minimum sponsored fee for packing
         let tip = self.chain.tip().map_err(node_err)?;
         let store = self.chain.store();
         let mut rates = Vec::new();
@@ -662,14 +669,18 @@ impl Backend for NodeRpc {
             .copied()
             .unwrap_or(0)
             .max(min_fee_per_kib);
-        let reference = u128::from(reference_transfer_cost(params, &rules));
-        let amount = per_kib
-            .saturating_mul(reference)
-            .div_ceil(1024)
+        let (len, cost) = reference_transfer(params, &rules);
+        let at = |rate: u128, kib_of: u128| rate.saturating_mul(kib_of).div_ceil(1024);
+        let amount = at(per_kib, u128::from(cost))
+            .max(at(per_kib_data, u128::try_from(len).unwrap_or(u128::MAX)))
             .max(min_token_fee);
         Ok(EstimateFeeJson {
             feerate_sat_vb: feerate,
-            path_b: PathBEstimateJson { amount, per_kib },
+            path_b: PathBEstimateJson {
+                amount,
+                per_kib,
+                per_kib_data,
+            },
             at: block_ref(&tip.header, tip.hash),
         })
     }

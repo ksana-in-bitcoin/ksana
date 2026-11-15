@@ -84,10 +84,11 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     min_fee_per_kib: u128,
     /// What one KSA is worth to this operator, in sat (local policy, D-153; a decimal number above 0 with at most 8
-    /// decimals, such as 0.5). With it the minimum fee rate for packing path-B ops follows the BTC fee rate this node
-    /// funds settlements at: a KiB of cost must pay the KSA worth 256 vB at that rate (a byte of an op lands on BTC as
-    /// a quarter of a vB), or --min-fee-per-kib when that is higher. Without it, only --min-fee-per-kib applies. The
-    /// protocol sets no exchange rate: the figure is this operator's own. Only taken with --btc-funding-key-file.
+    /// decimals, such as 0.5). With it a path-B op is packed only when it also pays for its bytes on BTC at the fee
+    /// rate this node funds settlements at: a KiB of the op's encoded bytes, whatever its max_gas, must pay the KSA
+    /// worth 256 vB at that rate (a byte of an op lands on BTC as a quarter of a vB). --min-fee-per-kib, which goes
+    /// by the op's cost, applies beside it. The protocol sets no exchange rate: the figure is this operator's own.
+    /// Only taken with --btc-funding-key-file.
     #[arg(long, requires = "btc_funding_key_file")]
     ksa_price_sat: Option<ksana_node::producer::KsaPrice>,
     /// Payee account of republish payloads (D-095; a Taproot address of this chain's network or 64 hex digits): when

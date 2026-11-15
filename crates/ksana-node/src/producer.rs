@@ -146,8 +146,9 @@ pub struct FeePolicy {
     ksa_price: Option<KsaPrice>,
 }
 
-/// The vB a KiB of path B ops takes on BTC, as the packing floor counts it (D-153): envelope data is witness data, a
-/// quarter of a vB per byte. Compression (D-141) makes it less; the pair's own bytes and the headers make it more.
+/// The vB a KiB of path B ops' encoded bytes takes on BTC, as the packing floor counts it (D-153): envelope data is
+/// witness data, a quarter of a vB per byte. The compact encoding and compression (D-080, D-141) make it less; the
+/// pair's own bytes and the headers make it more.
 pub const PATH_B_VB_PER_KIB: u128 = 256;
 
 /// The base units of one KSA (8 decimals, SPEC §9.1).
@@ -215,9 +216,10 @@ impl FeePolicy {
         self
     }
 
-    /// The least path B fee rate this node packs at while it funds settlements at `feerate` sat/vB (D-153): the KSA
-    /// base units per KiB of an op's cost that are worth, at the operator's price, the fee of the
-    /// [`PATH_B_VB_PER_KIB`] vB a KiB of ops takes on BTC, rounded up. `None` without a price.
+    /// The least a path B op pays per KiB of its encoded bytes for this node to pack it while it funds settlements at
+    /// `feerate` sat/vB (D-153): the KSA base units that are worth, at the operator's price, the fee of the
+    /// [`PATH_B_VB_PER_KIB`] vB a KiB of ops takes on BTC, rounded up. It goes by the op's bytes and not by its cost
+    /// in the packing budget, which grows with `max_gas`: gas takes no room on BTC. `None` without a price.
     pub fn path_b_floor(&self, feerate: u64) -> Option<u128> {
         let sat = u128::from(feerate).saturating_mul(PATH_B_VB_PER_KIB);
         Some(self.ksa_price?.base_units(sat))
@@ -637,10 +639,9 @@ impl Producer {
         };
         cache.floor_at = Some((tip, monotonic_now()));
         let mut pool = self.mempool()?;
-        if pool.raise_fee_floor(floor) {
+        if pool.set_data_fee_floor(floor) {
             eprintln!(
-                "[ksana-node] path B is packed from {} base units per KiB on (local policy, D-153)",
-                pool.policy().min_fee_per_kib
+                "[ksana-node] path B is packed from {floor} base units per KiB of an op's bytes on (local policy, D-153)"
             );
         }
         Ok(())
