@@ -1054,6 +1054,7 @@ dependencies = [
  "ksana-consensus",
  "ksana-contract-sdk",
  "ksana-crypto",
+ "ksana-execution",
  "ksana-primitives",
  "ksana-vm",
  "libfuzzer-sys",

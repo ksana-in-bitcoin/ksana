@@ -14,6 +14,7 @@ use bitcoin::transaction::Version;
 use bitcoin::{Address, Amount, Sequence, Transaction, TxIn, TxOut, Witness, XOnlyPublicKey};
 use ksana_btc::data::data_script;
 use ksana_btc::envelope::envelope_script;
+use ksana_crypto::entries_root;
 use ksana_primitives::codec::encode;
 use ksana_primitives::{
     Action, Block, BlockHeader, Body, BtcAnchor, Entry, EntryData, FeeMode, Funds, Network,
@@ -320,6 +321,64 @@ impl Seeds {
                 }
             }
         }
+        if let Some(signing) = read_json(&vectors.join("signing.json")) {
+            // Blocks over the aggregate case: the sealed entries, whose aggregate verifies, and entry lists whose
+            // aggregate must not (D-154)
+            let case = &signing["aggregate"];
+            let entries = |key: &str| serde_json::from_value::<Vec<Entry>>(case[key].clone()).ok();
+            let second_halves: Vec<[u8; 32]> = case["second_halves"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| hex::decode(v.as_str()?).ok()?.try_into().ok())
+                .collect();
+            let mut lists = Vec::new();
+            if let Some(sealed) = entries("sealed") {
+                lists.push((sealed.clone(), second_halves));
+                let mut unanswered = sealed.clone();
+                unanswered.pop();
+                lists.push((unanswered, Vec::new()));
+                let mut first = sealed;
+                first.rotate_right(1);
+                lists.push((first, Vec::new()));
+            }
+            lists.extend(entries("signed").map(|signed| (signed, Vec::new())));
+            for failing in case["failing"].as_array().into_iter().flatten() {
+                let ops = serde_json::from_value::<Vec<VmOp>>(failing["ops"].clone()).ok();
+                let s = hex_field(failing, "s").and_then(|s| <[u8; 32]>::try_from(s).ok());
+                if let (Some(ops), Some(s)) = (ops, s) {
+                    let mut list: Vec<Entry> =
+                        ops.into_iter().map(|op| Entry::Sponsored { op }).collect();
+                    list.push(Entry::Aggregate { s });
+                    lists.push((list, Vec::new()));
+                }
+            }
+            for (entries, second_halves) in lists {
+                let block = Block {
+                    header: BlockHeader {
+                        version: 2,
+                        height: 1,
+                        parents: vec![[0; 32]],
+                        btc_anchor: BtcAnchor {
+                            height: 0,
+                            hash: [0; 32],
+                        },
+                        entries_root: entries_root(&entries).unwrap_or_default(),
+                        state_root: [0; 32],
+                        producer: [0; 32],
+                        timestamp: 0,
+                        bits: 0x207f_ffff,
+                        nonce: 0,
+                    },
+                    entries,
+                    settlement: None,
+                    second_halves,
+                };
+                if let Ok(bytes) = encode(&block) {
+                    seeds.borsh.push((BorshType::Block, bytes));
+                }
+            }
+        }
         if let Some(pow) = read_json(&vectors.join("pow.json")) {
             for case in pow["cases"].as_array().into_iter().flatten() {
                 if let Ok(header) = serde_json::from_value::<BlockHeader>(case["header"].clone()) {
@@ -580,10 +639,13 @@ fn gen_op(rng: &mut Rng, params: &Params, native: Option<bool>) -> (VmOp, Option
         },
         max_gas: rng.u64_edge(),
         action: gen_action(rng),
-        sig: if rng.chance(50) {
-            SigScheme::Bip340(rng.array())
-        } else {
-            SigScheme::Bip322Simple(rng.some_bytes(120))
+        // The halves of signatures a block holds (D-154) among the whole ones
+        sig: match rng.below(8) {
+            0..=2 => SigScheme::Bip340(rng.array()),
+            3..=4 => SigScheme::Bip322Simple(rng.some_bytes(120)),
+            5 => SigScheme::HalfBip340(rng.array()),
+            6 => SigScheme::HalfBip322(rng.array()),
+            _ => SigScheme::HalfBip322All(rng.array()),
         },
     };
     if let (Some(keypair), true) = (&keypair, rng.chance(70)) {
@@ -680,7 +742,7 @@ fn gen_headers(rng: &mut Rng, max: usize) -> Vec<BlockHeader> {
 }
 
 fn gen_entry_data(rng: &mut Rng, params: &Params) -> EntryData {
-    match rng.below(3) {
+    match rng.below(4) {
         0 => EntryData::Forced {
             btc_txid: rng.array(),
         },
@@ -689,6 +751,7 @@ fn gen_entry_data(rng: &mut Rng, params: &Params) -> EntryData {
             op.chain_id = params.chain_id;
             EntryData::Sponsored { op }
         }
+        2 => EntryData::Aggregate { s: rng.array() },
         _ => EntryData::Unlock {
             height: rng.u64_edge(),
             index: u32::try_from(rng.u64_edge() & 0xffff_ffff).unwrap_or(0),
@@ -749,7 +812,7 @@ fn gen_payload(rng: &mut Rng, params: &Params) -> Payload {
 }
 
 fn gen_entry(rng: &mut Rng) -> Entry {
-    match rng.below(3) {
+    match rng.below(4) {
         0 => Entry::Forced {
             btc_txid: rng.array(),
             op: gen_op(rng, &DEVNET, Some(true)).0,
@@ -757,6 +820,7 @@ fn gen_entry(rng: &mut Rng) -> Entry {
         1 => Entry::Sponsored {
             op: gen_op(rng, &DEVNET, Some(false)).0,
         },
+        2 => Entry::Aggregate { s: rng.array() },
         _ => Entry::Unlock {
             height: rng.u64_edge(),
             index: u32::try_from(rng.u64_edge() & 0xffff_ffff).unwrap_or(0),
@@ -798,6 +862,7 @@ fn gen_borsh(rng: &mut Rng, ty: BorshType) -> Vec<u8> {
                 commit: rng.some_bytes(200),
                 reveal: rng.some_bytes(200),
             }),
+            second_halves: (0..rng.below(3)).map(|_| rng.array()).collect(),
         }),
     };
     encoded.unwrap_or_default()

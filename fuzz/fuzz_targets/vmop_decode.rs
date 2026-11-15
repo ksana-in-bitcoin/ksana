@@ -23,8 +23,24 @@ fuzz_target!(|data: &[u8]| {
         data.starts_with(&unsigned),
         "signature message is not a prefix of the full encoding"
     );
-    op.op_id()
+    let op_id = op
+        .op_id()
         .expect("a successfully decoded VmOp must have an op_id");
+    // Half a signature (D-154): a signature that splits is the half it gives joined with the rest again, and with a
+    // token fee (path B) the op has the same ID by either; half a signature gives the aggregate its term or an
+    // error, never a crash.
+    if let Some((half, s)) = op.split() {
+        assert!(half.sig.is_half() && half.split().is_none());
+        assert_eq!(half.join(&s).as_ref(), Some(&op), "split and join differ");
+        if matches!(op.fee, ksana_primitives::FeeMode::Token { .. }) {
+            assert_eq!(
+                half.op_id().expect("half the op must have an op_id"),
+                op_id,
+                "one op, two IDs"
+            );
+        }
+    }
+    let _ = ksana_crypto::half_signed(&op);
     // Any signature (including a BIP322 placeholder, wrong length, invalid public key) can only fail verification,
     // never crash; a path-C op is verified against the first input of the carrying transaction (D-086).
     let _ = ksana_crypto::verify_vmop(&op);
