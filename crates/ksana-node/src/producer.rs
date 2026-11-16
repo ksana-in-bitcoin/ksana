@@ -98,11 +98,13 @@ pub struct Revenue {
     pub hot_cap_sat: u64,
 }
 
-/// The default highest fee rate of this node's BTC transactions (sat/vB, `--max-settlement-feerate`, D-102).
-pub const DEFAULT_MAX_FEERATE: u64 = 100;
+/// The default highest fee rate of this node's BTC transactions (sat/vB, `--max-settlement-feerate`, D-102; 100
+/// until D-152).
+pub const DEFAULT_MAX_FEERATE: u64 = 1_000;
 /// The default confirmation target of this node's BTC transactions (BTC blocks, `--settlement-conf-target`, D-102).
 pub const DEFAULT_FEE_TARGET: u16 = 3;
-/// The confirmation target while a lighter competing chain is on BTC (D-091): the next block.
+/// The confirmation target of the estimate a pair the room misjudged is bumped to (D-147): the next block. Until
+/// D-152 a race paid this estimate as well.
 pub const URGENT_FEE_TARGET: u16 = 1;
 /// The most virtual bytes bitcoind's mempool holds while the next BTC block still has room for all of it (vB, D-117):
 /// half of a block's 1 000 000 vB, the size up to which mempool.space suggests the minimum fee for the next block.
@@ -115,11 +117,12 @@ pub const ROOMY_BLOCK_WEIGHT: u64 = 2_000_000;
 /// (D-147).
 pub const ROOM_DISTRUST_BLOCKS: u32 = 6;
 
-/// The fee rate policy of this node's BTC transactions (local policy, D-102, D-117, D-147): its settlements, rescues,
-/// republishes, funding splits and CPFP bumps pay bitcoind's estimate for confirming within `target` BTC blocks, kept
-/// within [`floor`, `cap`]; outside a race, its new transactions pay the floor instead while bitcoind's mempool and
-/// its best block show room, and a pair that room left waiting is bumped to the next-block estimate after one BTC
-/// block and to at least an [`escalated`](Self::escalated) rate of its own from the second on. A pair the room left
+/// The fee rate policy of this node's BTC transactions (local policy, D-102, D-117, D-147, D-152): its settlements,
+/// rescues, republishes, funding splits and CPFP bumps pay bitcoind's estimate for confirming within `target` BTC
+/// blocks, kept within [`floor`, `cap`]; outside a race, its new transactions pay the floor instead while bitcoind's
+/// mempool and its best block show room, and a pair that room left waiting is bumped to the next-block estimate after
+/// one BTC block; any pair left waiting is bumped to at least an [`escalated`](Self::escalated) rate of its own from
+/// the second BTC block on; in a race everything but a funding split pays the cap. A pair the room left
 /// waiting is remembered ([`misjudged`](Self::misjudged)): the copies of a policy share that memory, so the producer,
 /// the rescuer and `ksana_estimateFee` of one node read the room alike.
 #[derive(Clone, Debug)]
@@ -159,16 +162,24 @@ impl FeePolicy {
         self
     }
 
-    /// The fee rate (sat/vB) to pay now: [`room_rate`](Self::room_rate) while bitcoind's mempool has room, unless
-    /// `urgent` (a lighter competing chain is racing this node's chain for BTC finality, D-091); otherwise
-    /// [`estimated_rate`](Self::estimated_rate) (D-117).
+    /// The fee rate (sat/vB) to pay now: [`race_rate`](Self::race_rate) when `urgent` (a lighter competing chain is
+    /// racing this node's chain for BTC finality, D-091, D-152); otherwise [`room_rate`](Self::room_rate) while
+    /// bitcoind's mempool has room, and [`estimated_rate`](Self::estimated_rate) when it has none (D-117).
     pub fn rate(&self, params: &Params, client: &dyn BtcClient, urgent: bool) -> u64 {
-        if !urgent {
-            if let Some(rate) = self.room_rate(params, client) {
-                return rate;
-            }
+        if urgent {
+            return self.race_rate(params);
         }
-        self.estimated_rate(params, client, urgent)
+        match self.room_rate(params, client) {
+            Some(rate) => rate,
+            None => self.estimated_rate(params, client, false),
+        }
+    }
+
+    /// The fee rate (sat/vB) in a race (D-152): the cap, whatever bitcoind estimates. Whoever would keep this node's
+    /// data out of the BTC blocks left before the competing chain is final then has to fill each of them above the
+    /// cap, where an estimate follows blocks filled on purpose only later.
+    pub fn race_rate(&self, params: &Params) -> u64 {
+        self.bounds(params).1
     }
 
     /// The fee rate (sat/vB) of a new transaction while the next BTC block has room (D-117, D-147):
@@ -228,11 +239,11 @@ impl FeePolicy {
     }
 
     /// bitcoind's estimate (sat/vB) for confirming within `target` BTC blocks, or within [`URGENT_FEE_TARGET`] when
-    /// `urgent`, kept within [`floor`, `cap`] and never below `MIN_SETTLEMENT_FEERATE` (D-102); the floor when
+    /// `next_block`, kept within [`floor`, `cap`] and never below `MIN_SETTLEMENT_FEERATE` (D-102); the floor when
     /// bitcoind has no estimate or cannot be asked.
-    pub fn estimated_rate(&self, params: &Params, client: &dyn BtcClient, urgent: bool) -> u64 {
+    pub fn estimated_rate(&self, params: &Params, client: &dyn BtcClient, next_block: bool) -> u64 {
         let (floor, cap) = self.bounds(params);
-        let target = if urgent {
+        let target = if next_block {
             URGENT_FEE_TARGET
         } else {
             self.target
@@ -250,7 +261,7 @@ impl FeePolicy {
     }
 
     /// The fee rate (sat/vB) `rate` doubled `doublings` times, kept within [`floor`, `cap`]: what a CPFP bump lifts a
-    /// pair paying `rate` to at least while bitcoind's mempool has room, whatever the estimate (D-117).
+    /// pair paying `rate` to at least, whatever the estimate and with or without room (D-117, D-152).
     pub fn escalated(&self, params: &Params, rate: u64, doublings: u32) -> u64 {
         let (floor, cap) = self.bounds(params);
         let factor = 1u64.checked_shl(doublings).unwrap_or(u64::MAX);
@@ -827,11 +838,18 @@ impl Producer {
                 Some(funding) => {
                     match own_payload(params, &mut payload_headers, &mut payload_bodies, &entries)?
                     {
-                        Some(payload) => match fund(params, &funding_utxos, funding, &payload, {
-                            drafted_at = current_feerate(chain, funding, &snapshot)?;
-                            drafted_at
-                        })? {
-                            Ok(draft) => Some(draft),
+                        Some(payload) => match fund_or_lower(
+                            params,
+                            chain.btc().client().as_ref(),
+                            &funding_utxos,
+                            funding,
+                            &payload,
+                            current_feerate(chain, funding, &snapshot)?,
+                        )? {
+                            Ok((draft, rate)) => {
+                                drafted_at = rate;
+                                Some(draft)
+                            }
                             Err(Unfunded::Insufficient) => None,
                             Err(Unfunded::Failed(reason)) => {
                                 eprintln!(
@@ -1124,6 +1142,37 @@ pub(crate) fn fund(
         }
     }
     Ok(Err(Unfunded::Insufficient))
+}
+
+/// [`fund`] at `feerate`, or, when that is the cap a race pays ([`FeePolicy::race_rate`]) and the funding UTXOs
+/// cannot pay it, at bitcoind's next-block estimate, which a race paid before D-152: a wallet too small for the cap
+/// still sends its data, at no less than it paid before. Returns the draft and the rate it pays.
+pub(crate) fn fund_or_lower(
+    params: &Params,
+    client: &dyn BtcClient,
+    utxos: &[ProducerUtxo],
+    funding: &Funding,
+    payload: &[u8],
+    feerate: u64,
+) -> Result<Result<(Draft, u64), Unfunded>, NodeError> {
+    match fund(params, utxos, funding, payload, feerate)? {
+        Ok(draft) => Ok(Ok((draft, feerate))),
+        Err(Unfunded::Insufficient) if feerate >= funding.fees.race_rate(params) => {
+            let lower = funding.fees.estimated_rate(params, client, true);
+            if lower >= feerate {
+                return Ok(Err(Unfunded::Insufficient));
+            }
+            let funded = fund(params, utxos, funding, payload, lower)?;
+            if funded.is_ok() {
+                eprintln!(
+                    "[ksana-node] the funding UTXOs cannot pay {feerate} sat/vB for a payload of {} bytes: paying the next-block estimate of {lower} sat/vB (D-152)",
+                    payload.len()
+                );
+            }
+            Ok(funded.map(|draft| (draft, lower)))
+        }
+        Err(why) => Ok(Err(why)),
+    }
 }
 
 /// This block's settlement payload within `MAX_BLOCK_DATA_BYTES` (§7.2). `headers` and `bodies` are the headers and

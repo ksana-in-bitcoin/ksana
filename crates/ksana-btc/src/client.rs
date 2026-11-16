@@ -134,7 +134,16 @@ pub trait BtcClient: Send + Sync {
     /// (the settlement's commit and reveal transactions, D-081). Ok(Ok(())) all accepted, Ok(Err(reason)) one of them
     /// was rejected (the first rejection reason).
     fn test_accept(&self, txs: &[&bitcoin::Transaction]) -> Result<Result<(), String>, BtcError>;
-    /// sendrawtransaction: Ok(Ok(())) already in the mempool or already confirmed; Ok(Err(reason)) rejected.
+    /// [`Self::test_accept`] without bitcoind's limit on a transaction's fee rate (`maxfeerate`, 0.10 BTC/kvB by
+    /// default, 10 000 sat/vB), which it answers with `max-fee-exceeded`: for a transaction of the node's own whose
+    /// fee its fee policy bounds. A CPFP child that lifts a large pair pays a rate far above the one the package
+    /// reaches (D-152). The check of a block's settlement transactions keeps the limit.
+    fn test_accept_any_fee(
+        &self,
+        txs: &[&bitcoin::Transaction],
+    ) -> Result<Result<(), String>, BtcError>;
+    /// sendrawtransaction, without bitcoind's limit on the fee rate (the transactions sent are the node's own, or have
+    /// passed [`Self::test_accept`]): Ok(Ok(())) already in the mempool or already confirmed; Ok(Err(reason)) rejected.
     fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<Result<(), String>, BtcError>;
     /// Broadcasts `txs` in order (parents first, e.g. the settlement's commit and reveal transactions): stops when one
     /// is rejected and returns its reason.
@@ -212,6 +221,10 @@ impl<T: BtcClient + ?Sized> BtcClient for Arc<T> {
         (**self).test_accept(txs)
     }
 
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        (**self).test_accept_any_fee(txs)
+    }
+
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         (**self).broadcast(tx)
     }
@@ -251,6 +264,9 @@ const SCAN_BUSY_DELAY: std::time::Duration = std::time::Duration::from_millis(10
 /// The number of locking scripts whose last scan is kept; all are dropped when it is reached.
 const SCAN_CACHE_LIMIT: usize = 16;
 
+/// The `maxfeerate` of `sendrawtransaction` and `testmempoolaccept` that sets no limit (0; bitcoind's default is
+/// 0.10 BTC/kvB).
+const NO_MAX_FEERATE: u64 = 0;
 // Bitcoin Core's JSON-RPC error codes (`src/rpc/protocol.h`).
 /// The object does not exist (block, transaction, mempool entry).
 const RPC_INVALID_ADDRESS_OR_KEY: i32 = -5;
@@ -397,6 +413,52 @@ impl RpcClient {
             )));
         }
         Ok(Some(bool_field(&info, "ismine", METHOD)?))
+    }
+
+    /// testmempoolaccept with bitcoind's default `maxfeerate`, or with the one given.
+    fn test_mempool_accept(
+        &self,
+        txs: &[&Transaction],
+        max_feerate: Option<u64>,
+    ) -> Result<Result<(), String>, BtcError> {
+        const METHOD: &str = "testmempoolaccept";
+        let raw: Vec<String> = txs.iter().map(|tx| serialize_hex(*tx)).collect();
+        let mut params = vec![json!(raw)];
+        params.extend(max_feerate.map(|rate| json!(rate)));
+        let result = match self.call(METHOD, &params) {
+            Ok(result) => result,
+            Err(CallError::Rpc {
+                code: RPC_DESERIALIZATION_ERROR,
+                message,
+            }) => return Ok(Err(message)),
+            Err(e) => return Err(e.into_btc(METHOD)),
+        };
+        let entries = result
+            .as_array()
+            .filter(|entries| entries.len() == txs.len())
+            .ok_or_else(|| {
+                BtcError::Decode(format!(
+                    "{METHOD}: the result does not match the number of transactions"
+                ))
+            })?;
+        for entry in entries {
+            if entry.get("allowed").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            // rejected: reject-reason (from Bitcoin Core 29 also reject-details, "reason, details"); when another
+            // transaction in the package failed and this one was not fully checked there is no allowed, only
+            // package-error
+            let reason = entry.get("reject-reason").and_then(Value::as_str);
+            let details = entry.get("reject-details").and_then(Value::as_str);
+            let package = entry.get("package-error").and_then(Value::as_str);
+            return Ok(Err(match (reason, details) {
+                (Some(reason), Some(details)) if details.starts_with(reason) => details.to_owned(),
+                (Some(reason), Some(details)) => format!("{reason}: {details}"),
+                (Some(reason), None) => reason.to_owned(),
+                (None, _) => package.unwrap_or("unknown reason").to_owned(),
+            }));
+        }
+        Ok(Ok(()))
     }
 
     fn call(&self, method: &str, args: &[Value]) -> Result<Value, CallError> {
@@ -802,47 +864,16 @@ impl BtcClient for RpcClient {
     }
 
     fn test_accept(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
-        const METHOD: &str = "testmempoolaccept";
-        let raw: Vec<String> = txs.iter().map(|tx| serialize_hex(*tx)).collect();
-        let result = match self.call(METHOD, &[json!(raw)]) {
-            Ok(result) => result,
-            Err(CallError::Rpc {
-                code: RPC_DESERIALIZATION_ERROR,
-                message,
-            }) => return Ok(Err(message)),
-            Err(e) => return Err(e.into_btc(METHOD)),
-        };
-        let entries = result
-            .as_array()
-            .filter(|entries| entries.len() == txs.len())
-            .ok_or_else(|| {
-                BtcError::Decode(format!(
-                    "{METHOD}: the result does not match the number of transactions"
-                ))
-            })?;
-        for entry in entries {
-            if entry.get("allowed").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            // rejected: reject-reason (from Bitcoin Core 29 also reject-details, "reason, details"); when another
-            // transaction in the package failed and this one was not fully checked there is no allowed, only
-            // package-error
-            let reason = entry.get("reject-reason").and_then(Value::as_str);
-            let details = entry.get("reject-details").and_then(Value::as_str);
-            let package = entry.get("package-error").and_then(Value::as_str);
-            return Ok(Err(match (reason, details) {
-                (Some(reason), Some(details)) if details.starts_with(reason) => details.to_owned(),
-                (Some(reason), Some(details)) => format!("{reason}: {details}"),
-                (Some(reason), None) => reason.to_owned(),
-                (None, _) => package.unwrap_or("unknown reason").to_owned(),
-            }));
-        }
-        Ok(Ok(()))
+        self.test_mempool_accept(txs, None)
+    }
+
+    fn test_accept_any_fee(&self, txs: &[&Transaction]) -> Result<Result<(), String>, BtcError> {
+        self.test_mempool_accept(txs, Some(NO_MAX_FEERATE))
     }
 
     fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
         const METHOD: &str = "sendrawtransaction";
-        match self.call(METHOD, &[json!(serialize_hex(tx))]) {
+        match self.call(METHOD, &[json!(serialize_hex(tx)), json!(NO_MAX_FEERATE)]) {
             // success: entered the mempool, or the same transaction was already in the mempool.
             Ok(_) => Ok(Ok(())),
             Err(CallError::Rpc {

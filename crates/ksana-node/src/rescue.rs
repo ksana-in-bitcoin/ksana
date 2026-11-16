@@ -39,18 +39,18 @@
 //!   included, in order; at most
 //!   [`MAX_CHAINED_REPUBLISHES`] are in flight, and none is added once the last one's change is spent (D-139).
 //!
-//! - Fee rate and CPFP bumps (D-102, D-117, D-147): every transaction this node sends pays the rate of its fee policy
+//! - Fee rate and CPFP bumps (D-102, D-117, D-147, D-152): every transaction this node sends pays the rate of its fee policy
 //!   ([`crate::producer::FeePolicy::rate`]: bitcoind's estimate for the confirmation target, kept within the floor and
 //!   the cap, or the floor while bitcoind's mempool holds at most half a block and its best block took at most half
-//!   of one; the next-block estimate while a lighter competing chain is on BTC, D-091, whatever room there is). A
+//!   of one; the cap while a lighter competing chain is on BTC, D-091, D-152, whatever room there is). A
 //!   commit / reveal pair this node sent
 //!   (the settlement of a block it produced, a rescue, a republish) that has waited in the mempool for [`BUMP_AFTER`]
 //!   BTC blocks (at once while that competing chain is there) and pays less than the estimated rate
 //!   ([`crate::producer::FeePolicy::estimated_rate`], whether or not the mempool has room: the floor was not enough
-//!   for it) gets a child spending the reveal's change (D-140), lifting the package to that rate;
-//!   once it has waited those blocks while the mempool had room, outside a race, to at least twice the pair's own
-//!   rate, doubling for every further such block, up to the cap, so that the bump does not depend on the estimate
-//!   being above the pair's rate ([`crate::producer::FeePolicy::escalated`], D-117). A pair sent while the room
+//!   for it; the cap in a race) gets a child spending the reveal's change (D-140), lifting the package to that rate,
+//!   and to at least twice the pair's own rate, doubling for every further BTC block it waits, up to the cap, with or
+//!   without room, so that the bump does not depend on the estimate being above the pair's rate
+//!   ([`crate::producer::FeePolicy::escalated`], D-117, D-152). A pair sent while the room
 //!   showed does not wait that long: one BTC block found [`BUMP_GRACE`] or more after this node first saw the pair
 //!   waiting, which left it out, lifts it to the next-block estimate when that is higher, and for
 //!   [`crate::producer::ROOM_DISTRUST_BLOCKS`] BTC blocks this node's new transactions pay the estimate whatever the
@@ -91,7 +91,7 @@ use ksana_btc::tracker::{BlockSummary, BtcSnapshot};
 use ksana_primitives::{compact, Block, BlockHeader, Body, Payload};
 
 use crate::chain::{test_settlement, Chain};
-use crate::producer::{fund, Funding, ROOM_DISTRUST_BLOCKS};
+use crate::producer::{fund_or_lower, Funding, ROOM_DISTRUST_BLOCKS};
 use crate::{settlement, NodeError};
 
 /// Window of the rescue order (D-057): when the k-th block after the block (k ≤ this value) was produced by this node,
@@ -270,9 +270,6 @@ struct Bump {
     /// Whether every round of this node has seen it waiting while the next BTC block showed room, outside a race
     /// (D-147): the room is what it was sent on.
     all_room: bool,
-    /// The BTC tip height since which every round of this node has seen it waiting while bitcoind's mempool had room
-    /// (D-117); `None` after a round without room.
-    room_since: Option<u32>,
     /// The CPFP child sent for it, and the child's fee (sats).
     child: Option<(Sent, u64)>,
 }
@@ -374,10 +371,10 @@ impl Rescuer {
     }
 
     /// Handles one round: rescue settlements, header and body republishing, CPFP bumps of this node's waiting pairs,
-    /// then maintenance of the funding UTXO pool; all at the fee rate of this node's policy now (D-102, D-117), urgent
-    /// while a lighter competing chain is on BTC (D-091), the bumps at the estimated rate, or while the mempool has
-    /// room at least an escalation of a pair's own rate (D-117), and after one missed BTC block the next-block
-    /// estimate for a pair sent on that room, which the policy then remembers (D-147).
+    /// then maintenance of the funding UTXO pool; all at the fee rate of this node's policy now (D-102, D-117), the
+    /// cap while a lighter competing chain is on BTC (D-091, D-152), the bumps at the estimated rate or at least an
+    /// escalation of a pair's own rate (D-117, D-152), and after one missed BTC block the next-block estimate for a
+    /// pair sent on the room, which the policy then remembers (D-147).
     pub fn run_once(&self) -> Result<(), NodeError> {
         let snapshot = self.chain.btc().snapshot()?;
         let Some((btc_tip, _)) = snapshot.tip() else {
@@ -390,9 +387,13 @@ impl Rescuer {
             .chain
             .btc_competitor(&snapshot, params.btc_finality_confs)?;
         let urgent = competitor.is_some();
-        // A pair the room rate left waiting for BUMP_AFTER BTC blocks is bumped to the estimate, or past its own rate
-        // while the room is still there (D-117)
-        let estimated = fees.estimated_rate(params, client, urgent);
+        // A pair left waiting for BUMP_AFTER BTC blocks is bumped to the estimate, or past its own rate when that is
+        // more (D-117, D-152); in a race every pair is bumped to the cap at once (D-152)
+        let estimated = if urgent {
+            fees.race_rate(params)
+        } else {
+            fees.estimated_rate(params, client, false)
+        };
         let reading = if urgent {
             None
         } else {
@@ -1244,8 +1245,16 @@ impl Rescuer {
         let params = self.chain.params();
         let client = self.chain.btc().client();
         let utxos = self.available_utxos(btc_tip)?;
-        let draft = match fund(params, &utxos, &self.funding, payload, feerate)? {
-            Ok(draft) => draft,
+        let funded = fund_or_lower(
+            params,
+            client.as_ref(),
+            &utxos,
+            &self.funding,
+            payload,
+            feerate,
+        )?;
+        let draft = match funded {
+            Ok((draft, _)) => draft,
             Err(why) => {
                 eprintln!("[ksana-node] cannot assemble {what}: {why}");
                 return Ok(None);
@@ -1273,14 +1282,15 @@ impl Rescuer {
 
     /// CPFP bumps of the pairs this node sent (D-102): the settlement transactions of the blocks it produced, its
     /// rescues and its republishes. One waiting in the BTC mempool for [`BUMP_AFTER`] BTC blocks (at once while a
-    /// lighter competing chain is on BTC, D-091) whose package pays less than `feerate`, the estimated rate (D-117),
-    /// gets a child spending the reveal's change (D-140), lifting the package to
-    /// `feerate`. Once the pair has waited [`BUMP_AFTER`] BTC blocks while bitcoind's mempool had `room` (outside a
-    /// race), the target is at least the pair's own rate doubled for every such block from the `BUMP_AFTER`-th on, up
-    /// to the cap: those blocks had space for the pair, so the miners want more than it pays, whatever bitcoind
-    /// estimates (D-117). A pair that every round has seen waiting with room, and that a BTC block has left out after
+    /// lighter competing chain is on BTC, D-091) whose package pays less than `feerate`, the estimated rate (D-117)
+    /// or in a race the cap (D-152), gets a child spending the reveal's change (D-140), lifting the package to
+    /// `feerate`, and to at least the pair's own rate doubled for every BTC block from the `BUMP_AFTER`-th on, up
+    /// to the cap, whether or not bitcoind's mempool had `room`: those blocks left the pair out, so the miners want
+    /// more than it pays, whatever bitcoind estimates (D-117, D-152). A pair that every round has seen waiting with
+    /// room, and that a BTC block has left out after
     /// it had waited [`BUMP_GRACE`], was misjudged by the room (D-147): it is bumped without waiting for `BUMP_AFTER`,
-    /// to at least the next-block estimate, and the fee policy is told ([`FeePolicy::misjudged`]). The child is
+    /// to at least the next-block estimate, and the fee policy is told ([`FeePolicy::misjudged`]). A change that
+    /// cannot pay the target pays what it can ([`cpfp_child`], D-152). The child is
     /// replaced by a richer one when the target rises again. The child's funding input stays reserved until the child
     /// confirms or is gone.
     ///
@@ -1383,15 +1393,9 @@ impl Rescuer {
                 seen: crate::monotonic_now(),
                 aged: None,
                 all_room: true,
-                room_since: None,
                 child: None,
             });
-            // Only the BTC blocks it has waited through while the mempool had room count against the pair's rate: a
-            // round without room starts them again (D-117)
-            if room {
-                bump.room_since.get_or_insert(btc_tip);
-            } else {
-                bump.room_since = None;
+            if !room {
                 bump.all_room = false;
             }
             if bump.aged.is_none() && bump.seen.elapsed() >= self.bump_grace {
@@ -1421,19 +1425,19 @@ impl Rescuer {
                     bitcoin::Txid::from_byte_array(*reveal)
                 );
             }
-            // With room the pair has missed blocks that had space for it: twice its own rate once it has waited
-            // BUMP_AFTER BTC blocks with room, twice as much again for every further one, so that a bump comes even when
-            // bitcoind has no estimate or estimates no more than the floor the pair pays (D-117)
-            let target = match bump.room_since {
-                Some(room_since) if btc_tip >= room_since.saturating_add(wait) => {
-                    let doublings = btc_tip
-                        .saturating_sub(room_since)
-                        .saturating_sub(wait)
-                        .saturating_add(1);
-                    let own = pair_fee.checked_div(pair_vsize).unwrap_or(0);
-                    feerate.max(self.funding.fees.escalated(params, own, doublings))
-                }
-                _ => feerate,
+            // The pair has missed the blocks it has waited through, whether they had room or the estimate it pays was
+            // too low: twice its own rate once it has waited BUMP_AFTER BTC blocks, twice as much again for every
+            // further one up to the cap, so that a bump comes even when bitcoind has no estimate or estimates no more
+            // than the pair pays (D-117, D-152)
+            let target = if btc_tip >= bump.since.saturating_add(wait) {
+                let doublings = btc_tip
+                    .saturating_sub(bump.since)
+                    .saturating_sub(wait)
+                    .saturating_add(1);
+                let own = pair_fee.checked_div(pair_vsize).unwrap_or(0);
+                feerate.max(self.funding.fees.escalated(params, own, doublings))
+            } else {
+                feerate
             };
             let target = if misjudged {
                 target.max(*next_block.get_or_insert_with(|| {
@@ -1493,13 +1497,22 @@ impl Rescuer {
             )
             .map_err(|e| NodeError::Internal(format!("building the CPFP child failed: {e}")))?;
             let Some((tx, fee)) = child else {
-                eprintln!(
-                    "[ksana-node] cannot bump the transaction {} waiting in the BTC mempool: its change does not pay for it",
-                    bitcoin::Txid::from_byte_array(*reveal)
-                );
+                // Said once: with a child sent, the change is spent and every round finds the same
+                if bump.child.is_none() {
+                    eprintln!(
+                        "[ksana-node] cannot bump the transaction {} waiting in the BTC mempool: its change does not pay for it",
+                        bitcoin::Txid::from_byte_array(*reveal)
+                    );
+                }
                 continue;
             };
-            if let Err(reason) = client.test_accept(&[&tx]).map_err(btc)? {
+            // The rate the package reaches: `target`, or less when the change pays no more (D-152)
+            let reached = pair_fee
+                .saturating_add(fee)
+                .checked_div(pair_vsize.saturating_add(tx.weight().to_vbytes_ceil()))
+                .unwrap_or(0);
+            // The child pays for the pair as well, so its own rate may be above bitcoind's `maxfeerate`
+            if let Err(reason) = client.test_accept_any_fee(&[&tx]).map_err(btc)? {
                 eprintln!(
                     "[ksana-node] testmempoolaccept rejected the CPFP child of {}: {reason}",
                     bitcoin::Txid::from_byte_array(*reveal)
@@ -1519,7 +1532,7 @@ impl Rescuer {
             match client.broadcast_all(&sent.refs()) {
                 Ok(Ok(())) => {
                     eprintln!(
-                        "[ksana-node] bumped {} waiting in the BTC mempool to {target} sat/vB by CPFP (D-102): child txid={} fee={fee}",
+                        "[ksana-node] bumped {} waiting in the BTC mempool to {reached} sat/vB by CPFP (D-102; the target is {target}): child txid={} fee={fee}",
                         bitcoin::Txid::from_byte_array(*reveal),
                         sent.shown()
                     );
@@ -1923,8 +1936,16 @@ impl Rescuer {
             .into_iter()
             .chain(self.available_utxos(btc_tip)?)
             .collect();
-        let draft = match fund(params, &utxos, &self.funding, &payload, feerate)? {
-            Ok(draft) => draft,
+        let funded = fund_or_lower(
+            params,
+            client.as_ref(),
+            &utxos,
+            &self.funding,
+            &payload,
+            feerate,
+        )?;
+        let draft = match funded {
+            Ok((draft, _)) => draft,
             Err(why) => {
                 eprintln!(
                     "[ksana-node] cannot assemble the header republish transaction ({count} headers, {body_count} bodies, {} bytes): {why}",

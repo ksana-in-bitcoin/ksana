@@ -715,6 +715,13 @@ impl BtcClient for Lagging {
         self.mock.test_accept(txs)
     }
 
+    fn test_accept_any_fee(
+        &self,
+        txs: &[&bitcoin::Transaction],
+    ) -> Result<Result<(), String>, BtcError> {
+        self.mock.test_accept_any_fee(txs)
+    }
+
     fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<Result<(), String>, BtcError> {
         self.mock.broadcast(tx)
     }

@@ -39,7 +39,7 @@ use common::mock_node::{native_tx, signed_native};
 use common::side::setup;
 use common::{transfer_op, user, User};
 use ksana_btc::client::{BtcClient, MempoolInfo};
-use ksana_btc::mock::{coinbase_script, MockBtc};
+use ksana_btc::mock::{coinbase_script, MockBtc, MAX_FEERATE};
 use ksana_btc::payload::{attached_payload, envelope_payload};
 use ksana_btc::settlement::{draft, finalize, producer_script, ProducerUtxo, SettlementPair};
 use ksana_consensus::{Consensus, Sha256d};
@@ -50,8 +50,8 @@ use ksana_mempool::{Mempool, Policy};
 use ksana_node::chain::{Accepted, Chain};
 use ksana_node::genesis::GenesisFile;
 use ksana_node::producer::{
-    FeePolicy, Funding, Producer, TemplateSync, DEFAULT_FEE_TARGET, ROOMY_BLOCK_WEIGHT,
-    ROOMY_MEMPOOL_VSIZE, ROOM_DISTRUST_BLOCKS, URGENT_FEE_TARGET,
+    FeePolicy, Funding, Producer, TemplateSync, DEFAULT_FEE_TARGET, DEFAULT_MAX_FEERATE,
+    ROOMY_BLOCK_WEIGHT, ROOMY_MEMPOOL_VSIZE, ROOM_DISTRUST_BLOCKS, URGENT_FEE_TARGET,
 };
 use ksana_node::rescue::{Rescuer, BUMP_AFTER, BUMP_GRACE, CLAIM_PATIENCE, REPUBLISH_PATIENCE};
 use ksana_node::rpc::NodeRpc;
@@ -87,6 +87,17 @@ impl Instance {
         params: &Params,
         funded: bool,
     ) -> Instance {
+        Self::open_funded(mock, genesis, name, params, funded.then_some(&[400_000; 4]))
+    }
+
+    /// [`Self::open`] with funding UTXOs of the values given.
+    fn open_funded(
+        mock: &Arc<MockBtc>,
+        genesis: &GenesisFile,
+        name: &str,
+        params: &Params,
+        funded: Option<&[u64]>,
+    ) -> Instance {
         let dir = tempfile::tempdir().unwrap();
         let chain = Arc::new(
             Chain::open_with_algorithm(
@@ -98,10 +109,10 @@ impl Instance {
             )
             .unwrap(),
         );
-        let funding = funded.then(|| {
+        let funding = funded.map(|values| {
             let funding =
                 Funding::new(btc_keypair(&format!("{name}/funding")), 2).with_batching(false);
-            mock.fund(&funding.script, &[400_000; 4]);
+            mock.fund(&funding.script, values);
             funding
         });
         while chain.sync_btc().unwrap() {}
@@ -1302,16 +1313,33 @@ fn the_fee_rate_follows_the_estimate_within_the_floor_and_the_cap() {
     assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "no estimate");
     mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(7));
     assert_eq!(fees.rate(&DEVNET, &mock, false), 7);
-    assert_eq!(fees.rate(&DEVNET, &mock, true), 2, "no next-block estimate");
+    assert_eq!(
+        fees.rate(&DEVNET, &mock, true),
+        50,
+        "a race pays the cap without an estimate (D-152)"
+    );
+    assert_eq!(fees.estimated_rate(&DEVNET, &mock, true), 2);
     mock.set_fee_estimate(1, Some(30));
-    assert_eq!(fees.rate(&DEVNET, &mock, true), 30, "urgent");
+    assert_eq!(fees.rate(&DEVNET, &mock, true), 50, "whatever it is");
+    assert_eq!(fees.race_rate(&DEVNET), 50);
+    assert_eq!(fees.estimated_rate(&DEVNET, &mock, true), 30, "next block");
     assert_eq!(fees.rate(&DEVNET, &mock, false), 7);
     mock.set_fee_estimate(1, Some(500));
-    assert_eq!(fees.rate(&DEVNET, &mock, true), 50, "the cap");
+    assert_eq!(fees.estimated_rate(&DEVNET, &mock, true), 50, "the cap");
     mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(1));
     assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "the floor");
     mock.set_offline(true);
-    assert_eq!(fees.rate(&DEVNET, &mock, true), 2, "bitcoind unavailable");
+    assert_eq!(fees.rate(&DEVNET, &mock, false), 2, "bitcoind unavailable");
+    assert_eq!(fees.rate(&DEVNET, &mock, true), 50, "the cap all the same");
+}
+
+/// The cap is 1 000 sat/vB unless the operator sets another (D-152; 100 before), and never below the floor.
+#[test]
+fn the_default_cap_is_1000_sat_per_vbyte() {
+    assert_eq!(DEFAULT_MAX_FEERATE, 1_000);
+    assert_eq!(FeePolicy::new(2).race_rate(&DEVNET), 1_000);
+    assert_eq!(FeePolicy::new(2_000).race_rate(&DEVNET), 2_000);
+    assert_eq!(FeePolicy::new(2).with_cap(1).race_rate(&DEVNET), 2);
 }
 
 /// While bitcoind's mempool holds at most half a block, the next BTC block takes all of it, so this node's BTC
@@ -1337,8 +1365,8 @@ fn the_fee_rate_is_the_floor_while_the_mempool_has_room() {
     assert_eq!(fees.estimated_rate(&DEVNET, &mock, false), 50);
     assert_eq!(
         fees.rate(&DEVNET, &mock, true),
-        30,
-        "racing a competing chain"
+        50,
+        "racing a competing chain: the cap"
     );
     mempool(1_000, 7);
     assert_eq!(fees.rate(&DEVNET, &mock, false), 7, "the mempool's minimum");
@@ -1573,6 +1601,57 @@ fn a_settlement_left_behind_by_a_fee_spike_is_bumped_by_cpfp() {
         .is_some());
 }
 
+/// A child that lifts a pair to the rate of a fee spike pays for the pair as well, so its own rate is far above the
+/// one the package reaches: above bitcoind's default `maxfeerate` of 10 000 sat/vB here, which `testmempoolaccept`
+/// answers with `max-fee-exceeded`. The node asks without that limit and sends the child (D-152).
+#[test]
+fn a_child_paying_more_than_bitcoinds_default_maximum_is_sent() {
+    let seed = "bump-above-maxfeerate";
+    let (alice, bob) = (
+        user(&format!("adv/liveness/{seed}/alice")),
+        user(&format!("adv/liveness/{seed}/bob")),
+    );
+    let (mock, genesis) = setup(&[(&alice, 1_000)]);
+    let a = Instance::open_funded(&mock, &genesis, seed, &DEVNET, Some(&[5_000_000; 4]));
+    mock.set_min_feerate(5);
+    a.submit(transfer_op(&alice, 0, 2, bob.account, 7));
+    let block = a.produce().unwrap();
+    let pair = SettlementPair::decode(block.settlement.as_ref().unwrap()).unwrap();
+    for _ in 0..DEVNET.settlement_depth {
+        a.produce().unwrap();
+    }
+    a.chain.process_settlements().unwrap();
+    mock.mine(1);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+
+    let funding = a.producer.funding.clone().unwrap();
+    let rescuer = Rescuer::new(
+        a.chain.clone(),
+        funding.with_fees(FeePolicy::new(2).with_cap(5_000)),
+        Some(a.producer.producer),
+        None,
+    );
+    mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(5_000));
+    rescuer.run_once().unwrap();
+    mock.mine(BUMP_AFTER);
+    a.sync();
+    rescuer.run_once().unwrap();
+    let child = children(&mock, &pair);
+    assert_eq!(child.len(), 1, "bumped");
+    let child = &child[0];
+    assert_eq!(package_feerate(&mock, &pair, child), 5_000);
+    let paid = pair.reveal.output[0].value.to_sat() - child.output[0].value.to_sat();
+    assert!(
+        paid / child.vsize() as u64 > MAX_FEERATE,
+        "the child pays {paid} sat for {} vB",
+        child.vsize()
+    );
+    mock.mine(1);
+    a.sync();
+    assert!(landed_at_tip(&a, &pair), "the pair landed");
+}
+
 /// What bitcoind tells of a mempool with room for the next BTC block (D-117): 1 000 vB waiting, the relay minimum of
 /// 1 sat/vB.
 const ROOM: MempoolInfo = MempoolInfo {
@@ -1699,32 +1778,22 @@ fn a_settlement_the_room_left_waiting_is_bumped_without_an_estimate() {
     assert!(landed_at_tip(&a, &pair), "the pair landed");
 }
 
-/// Only the BTC blocks a pair has waited through while the mempool had room count against its rate (D-117): without
-/// room it waits for the estimate as before (D-102), here none above the floor it pays, however long; once the room is
-/// there, it is bumped to twice its rate after `BUMP_AFTER` BTC blocks more, not at once to four times its rate or more
-/// for blocks that had no space for it.
+/// The BTC blocks a pair has waited through count against its rate whether or not the mempool had room (D-152; only
+/// those with room before, D-117): a pair that pays an estimate that was too low, here none above the floor, while the
+/// mempool holds more than half a block is bumped to twice its rate after `BUMP_AFTER` BTC blocks, and lands with its
+/// child although bitcoind's estimate never rose.
 #[test]
-fn only_the_blocks_a_pair_waited_with_room_count_against_its_rate() {
+fn a_pair_left_waiting_without_room_is_bumped_past_the_estimate() {
     let (mock, a, _, pair, rescuer) = room_block("room-gone", None, 3);
     mock.set_mempool_info(Some(MempoolInfo {
         vsize: ROOMY_MEMPOOL_VSIZE + 1,
         min_feerate: 1,
     }));
-    for _ in 0..=BUMP_AFTER {
-        mock.mine(1);
-        a.sync();
-        rescuer.run_once().unwrap();
-        assert!(
-            children(&mock, &pair).is_empty(),
-            "without room the estimate, the floor the pair pays"
-        );
-    }
-    mock.set_mempool_info(Some(ROOM));
     for _ in 0..BUMP_AFTER {
         rescuer.run_once().unwrap();
         assert!(
             children(&mock, &pair).is_empty(),
-            "not bumped before BUMP_AFTER BTC blocks with room"
+            "not bumped before BUMP_AFTER"
         );
         mock.mine(1);
         a.sync();
@@ -1737,6 +1806,31 @@ fn only_the_blocks_a_pair_waited_with_room_count_against_its_rate() {
         package_feerate(&mock, &pair, &child[0]),
         4,
         "twice the pair's rate"
+    );
+    mock.mine(1);
+    a.sync();
+    assert!(landed_at_tip(&a, &pair), "the pair landed");
+}
+
+/// Without room the rate doubles again for every further BTC block as well (D-152): first bumped after
+/// `BUMP_AFTER` + 2 BTC blocks, the pair is lifted to eight times its rate.
+#[test]
+fn a_pair_left_waiting_without_room_longer_is_bumped_further() {
+    let (mock, a, _, pair, rescuer) = room_block("room-gone-longer", None, 9);
+    mock.set_mempool_info(Some(MempoolInfo {
+        vsize: ROOMY_MEMPOOL_VSIZE + 1,
+        min_feerate: 1,
+    }));
+    mock.mine(BUMP_AFTER + 2);
+    a.sync();
+    assert!(in_mempool(&mock, &pair.txid()), "not mined");
+    rescuer.run_once().unwrap();
+    let child = children(&mock, &pair);
+    assert_eq!(child.len(), 1, "bumped");
+    assert_eq!(
+        package_feerate(&mock, &pair, &child[0]),
+        16,
+        "eight times the pair's rate"
     );
     mock.mine(1);
     a.sync();

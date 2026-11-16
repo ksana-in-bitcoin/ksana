@@ -434,6 +434,17 @@ mod slow_headers {
                 .extend(txs.iter().map(|tx| (*tx).clone()));
             self.inner.test_accept(txs)
         }
+
+        fn test_accept_any_fee(
+            &self,
+            txs: &[&Transaction],
+        ) -> Result<Result<(), String>, BtcError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(txs.iter().map(|tx| (*tx).clone()));
+            self.inner.test_accept_any_fee(txs)
+        }
         fn broadcast(&self, tx: &Transaction) -> Result<Result<(), String>, BtcError> {
             self.seen.lock().unwrap().push(tx.clone());
             let result = self.inner.broadcast(tx);

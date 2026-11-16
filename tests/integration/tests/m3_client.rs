@@ -347,6 +347,33 @@ fn transactions_utxos_and_broadcast() {
     assert!(matches!(c.broadcast(&empty), Ok(Err(_))));
 }
 
+/// A transaction paying more than bitcoind's default `maxfeerate` (0.10 BTC/kvB, 10 000 sat/vB) is refused by
+/// `test_accept`, which the check of a block's settlement transactions uses, and accepted by `test_accept_any_fee` and
+/// by `broadcast` (D-152): a CPFP child lifting a large pair towards the node's cap pays such a rate itself, and the
+/// node's fee policy is what bounds its fees.
+#[test]
+fn a_fee_rate_above_bitcoinds_default_maximum_is_accepted_when_asked_so() {
+    let wallet = wallet();
+    let c = client();
+    let (addr, script) = fresh(&wallet);
+
+    let funding = wallet.fund_and_sign(vec![pay(2_000_000, &script)]);
+    assert_eq!(c.broadcast(&funding).unwrap(), Ok(()));
+    wallet.mine(1, &addr);
+    let vout = vout_of(&funding, &script);
+    let tx = wallet.sign_with_wallet(&spend(&[out(&funding, vout)], 500_000, &script));
+    let rate = 1_500_000 / tx.weight().to_vbytes_ceil();
+    assert!(rate > 10_000, "{rate} sat/vB");
+    assert_eq!(
+        c.test_accept(&[&tx]).unwrap(),
+        Err("max-fee-exceeded".to_owned())
+    );
+    assert_eq!(c.test_accept_any_fee(&[&tx]).unwrap(), Ok(()));
+    assert_eq!(c.broadcast(&tx).unwrap(), Ok(()));
+    assert!(c.in_mempool(&txid(&tx)).unwrap());
+    wallet.mine(1, &addr);
+}
+
 #[test]
 fn scan_utxos_of_a_fresh_address() {
     let wallet = wallet();

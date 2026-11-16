@@ -120,7 +120,8 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     settlement_feerate: u64,
     /// Highest fee rate of this node's BTC transactions (sat/vB, D-102): bitcoind's estimate is paid up to this rate,
-    /// also when bumping a waiting settlement by CPFP and while racing a competing chain for BTC finality (D-091).
+    /// a settlement left waiting is bumped by CPFP up to it, doubling per BTC block, and it is the rate paid at once
+    /// while racing a competing chain for BTC finality (D-091, D-152).
     #[arg(long, default_value_t = ksana_node::producer::DEFAULT_MAX_FEERATE)]
     max_settlement_feerate: u64,
     /// Confirmation target of this node's BTC transactions (BTC blocks, D-102): the fee rate is bitcoind's estimate

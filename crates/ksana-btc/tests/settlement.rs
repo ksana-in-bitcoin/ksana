@@ -982,8 +982,8 @@ fn prevout_source_results() {
 }
 
 /// A CPFP child (D-102, D-140): spends the reveal's change, pays the package up to the requested fee rate (and at
-/// least the minimum given) and the rest back to the change's script, signs its input; `None` when the change cannot
-/// pay it.
+/// least the minimum given) and the rest back to the change's script, signs its input; a change that cannot pay it
+/// pays what it can (D-152), and there is no child when that is below the minimum or no more than the pair's rate.
 #[test]
 fn a_cpfp_child_pays_for_the_pair_through_the_reveal_change() {
     let s = settle(3, 2);
@@ -1033,9 +1033,28 @@ fn a_cpfp_child_pays_for_the_pair_through_the_reveal_change() {
     assert_eq!(fee, vsize * DEVNET.min_settlement_feerate_sat_vb);
     let (_, fee) = child(&s.pair.reveal, 1, 7_777, &s.key).unwrap().unwrap();
     assert_eq!(fee, 7_777);
-    // a change too small for the fee and a rest above dust
+    // a change too small for the fee and a rest at the dust floor pays what it can (D-152): all above the dust floor
+    let dust = change.script_pubkey.minimal_non_dust().to_sat();
     let mut poor = s.pair.reveal.clone();
     poor.output[0].value = Amount::from_sat(1_000);
+    let (tx, fee) = child(&poor, 50, 0, &s.key).unwrap().unwrap();
+    assert_eq!(fee, 1_000 - dust);
+    assert!(fee < 50 * (checked.vsize + vsize) - checked.fee);
+    assert_eq!(tx.output[0].value.to_sat(), dust);
+    // not when that is below the minimum given (a replacement cannot pay more than the child it replaces)
+    assert_eq!(child(&poor, 50, 1_000 - dust + 1, &s.key).unwrap(), None);
+    assert!(child(&poor, 50, 1_000 - dust, &s.key).unwrap().is_some());
+    // nor below the child's own minimum
+    poor.output[0].value =
+        Amount::from_sat(dust + vsize * DEVNET.min_settlement_feerate_sat_vb - 1);
+    assert_eq!(child(&poor, 50, 0, &s.key).unwrap(), None);
+    // nor when the child would pay no higher a rate than the pair: a miner takes the pair no sooner for it
+    poor.output[0].value = Amount::from_sat(dust + vsize * checked.fee / checked.vsize);
+    assert_eq!(child(&poor, 50, 0, &s.key).unwrap(), None);
+    poor.output[0].value = Amount::from_sat(dust + vsize * checked.fee.div_ceil(checked.vsize) + 1);
+    assert!(child(&poor, 50, 0, &s.key).unwrap().is_some());
+    // nor a change below the dust floor
+    poor.output[0].value = Amount::from_sat(dust - 1);
     assert_eq!(child(&poor, 50, 0, &s.key).unwrap(), None);
     // only a change of the funding key
     let other = Keypair::from_secret_key(&Secp256k1::new(), &secret("someone else"));
