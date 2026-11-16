@@ -1,8 +1,8 @@
 {
-  "timestamp": "1794324047",
+  "timestamp": "1794851853",
   "btc_anchor": {
-    "height": 330262,
-    "hash": "18057c52ae444d27111e4085abfb48a08a165ee1da178a9bbae029c113000000"
+    "height": 331157,
+    "hash": "bb9100bba32226eb5c6693649f937c266b3a70c6f8c6b564a6087c7905000000"
   },
   "bits": 520523192,
   "allocations": [
