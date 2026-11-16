@@ -548,9 +548,11 @@ export interface FeeEstimate {
   /**
    * Path B: `amount` is the suggested token amount (KSA base units) for a plain transfer; `per_kib` is the suggested fee rate, the
    * token amount per KiB of cost, where cost = max(VmOp encoded bytes, `max_gas × MAX_BLOCK_DATA_BYTES / BLOCK_GAS_LIMIT`); other
-   * operations scale by their own cost (nodes before M23 do not provide it; recorded as 0).
+   * operations scale by their own cost (nodes before M23 do not provide it; recorded as 0). `per_kib_data` is the token amount per
+   * KiB of the VmOp's encoded bytes, whatever its `max_gas`, that a node run with a KSA price asks for carrying the bytes to BTC
+   * (D-153); other nodes do not provide it, and it is recorded as 0. `pathBFee` gives the amount of an operation from the three.
    */
-  path_b: { amount: bigint; per_kib: bigint };
+  path_b: { amount: bigint; per_kib: bigint; per_kib_data: bigint };
   /** The block the estimate is based on (the tip). */
   at: BlockRef;
 }
@@ -573,6 +575,15 @@ export function opCost(params: Params, encodedLen: number, maxGas: bigint): bigi
 export function feeFor(perKib: bigint, cost: bigint, floor = 0n): bigint {
   const amount = (perKib * cost + 1023n) / 1024n;
   return amount > floor ? amount : floor;
+}
+
+/**
+ * Suggested token amount of a path B operation of `encodedLen` encoded bytes and `maxGas`, from a node's estimate: the larger of
+ * its cost (`opCost`) at `per_kib` and its bytes at `per_kib_data`, each rounded up, and not below `amount`.
+ */
+export function pathBFee(params: Params, estimate: FeeEstimate['path_b'], encodedLen: number, maxGas: bigint): bigint {
+  const byCost = feeFor(estimate.per_kib, opCost(params, encodedLen, maxGas), estimate.amount);
+  return feeFor(estimate.per_kib_data, BigInt(encodedLen), byCost);
 }
 
 /** Summary of a new block pushed by `ksana_subscribeBlocks`. */
@@ -1146,10 +1157,14 @@ export function parseSettlementInfo(value: unknown): SettlementInfo {
 /** Parses the result of `ksana_estimateFee`. */
 export function parseFeeEstimate(value: unknown): FeeEstimate {
   const o = record(value, 'fee estimate', ['feerate_sat_vb', 'path_b', 'at']);
-  const b = record(o.path_b, 'path_b', ['amount', 'per_kib']);
+  const b = record(o.path_b, 'path_b', ['amount', 'per_kib', 'per_kib_data']);
   return {
     feerate_sat_vb: decOf(o.feerate_sat_vb, 'feerate_sat_vb'),
-    path_b: { amount: decOf(b.amount, 'path_b.amount'), per_kib: b.per_kib === undefined ? 0n : decOf(b.per_kib, 'path_b.per_kib') },
+    path_b: {
+      amount: decOf(b.amount, 'path_b.amount'),
+      per_kib: b.per_kib === undefined ? 0n : decOf(b.per_kib, 'path_b.per_kib'),
+      per_kib_data: b.per_kib_data === undefined ? 0n : decOf(b.per_kib_data, 'path_b.per_kib_data'),
+    },
     at: parseBlockRef(o.at, 'at'),
   };
 }

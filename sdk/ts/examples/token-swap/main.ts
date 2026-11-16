@@ -42,6 +42,7 @@ import {
   networkOfChainId,
   opId,
   parseAccount,
+  pathBFee,
   randomBytes,
   sha256,
   signedVmop,
@@ -267,17 +268,15 @@ class KsanaNode {
   }
 
   /**
-   * The path B fee of an op of `encodedLen` bytes and `maxGas`: what the node asks by the cost rule of its entry pool, at most
-   * `maxFee`. Nothing checks what the node asks, so a node asking more is refused before anything is signed. Paying above the
+   * The path B fee of an op of `encodedLen` bytes and `maxGas`: what the node asks by the rules of its entry pool (per KiB of
+   * cost and, on a node with a KSA price, per KiB of bytes), at most `maxFee`. Nothing checks what the node asks, so a node asking
+   * more is refused before anything is signed. Paying above the
    * ask would not stay a margin: the ask follows the fee rates recent blocks took, so on a quiet chain an op paying twice it
    * doubles the next ask.
    */
   async fee(encodedLen: number, maxGas: bigint, maxFee: bigint): Promise<bigint> {
     const estimate = await this.rpc.estimateFee();
-    const byGas = (maxGas * BigInt(this.params.max_block_data_bytes)) / this.params.block_gas_limit;
-    const cost = BigInt(encodedLen) > byGas ? BigInt(encodedLen) : byGas;
-    const byRate = (cost * estimate.path_b.per_kib + 1023n) / 1024n;
-    const asked = estimate.path_b.amount > byRate ? estimate.path_b.amount : byRate;
+    const asked = pathBFee(this.params, estimate.path_b, encodedLen, maxGas);
     if (asked > maxFee) {
       throw new Error(`the node asks ${formatUnits(asked, KSA_DECIMALS)} KSA for this op, more than --max-fee ${formatUnits(maxFee, KSA_DECIMALS)} KSA`);
     }

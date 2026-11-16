@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ksana_crypto::{account_of, keypair_from_secret, sign_native_vmop, sign_vmop, Keypair};
 use ksana_execution::keys::{self, AccountState};
 use ksana_execution::{GenesisConfig, MemState, StateSource};
-use ksana_mempool::{fee_rate, op_cost, AdmitError, Mempool, Policy};
+use ksana_mempool::{data_fee_rate, fee_rate, op_cost, AdmitError, Mempool, Policy};
 use ksana_primitives::hash::sha256;
 use ksana_primitives::{
     Action, FeeMode, Funds, OutPoint, Rules, SigScheme, VmOp, DEVNET, KSA_ASSET_ID, VMOP_VERSION,
@@ -565,8 +565,102 @@ fn candidates_are_ordered_by_fee_rate_and_cut_at_the_packing_floor() {
         ..Policy::default()
     };
     assert_eq!(relaxed.relay_floor(), 2);
-    assert!(relaxed.packable(2, 0));
-    assert!(!relaxed.packable(1, u128::MAX));
+    assert!(relaxed.packable(2, 0, 100));
+    assert!(!relaxed.packable(1, u128::MAX, 100));
+}
+
+/// The packing floor's fee per KiB of bytes can be raised and lowered while ops wait (D-153): an op the raised floor
+/// leaves out stays in the pool and is a candidate again once the floor falls, and each change moves the generation.
+#[test]
+fn a_raised_data_fee_floor_leaves_ops_waiting_until_it_falls() {
+    let (a, b, c) = (user("a"), user("b"), user("c"));
+    let s = arc(&state(&[(&a, 100_000), (&b, 100_000), (&c, 100_000)]));
+    let mut p = Mempool::new(
+        DEVNET,
+        Policy {
+            max_ops: 2,
+            ..Policy::default()
+        },
+    );
+    let rate = |o: &VmOp| {
+        let FeeMode::Token { amount } = o.fee else {
+            unreachable!()
+        };
+        data_fee_rate(amount, o.encode().unwrap().len())
+    };
+    let (cheap, dear) = (op(&a, 0, 100), op(&b, 0, 10_000));
+    let (low, high) = (rate(&cheap), rate(&dear));
+    assert!(0 < low && low < high);
+    let cheap_id = p.insert(cheap, &s).unwrap();
+    let dear_id = p.insert(dear, &s).unwrap();
+    let accounts = |p: &Mempool| -> Vec<[u8; 32]> {
+        p.candidates(&s)
+            .unwrap()
+            .iter()
+            .map(|o| o.account)
+            .collect()
+    };
+    assert_eq!(accounts(&p), vec![b.account, a.account]);
+
+    // Raised to what the cheaper op pays: it is still a candidate; one unit more and it waits in the pool
+    assert!(p.set_data_fee_floor(low));
+    assert_eq!(accounts(&p), vec![b.account, a.account]);
+    let generation = p.generation();
+    assert!(p.set_data_fee_floor(low + 1));
+    assert_eq!(p.policy().min_data_fee_per_kib, low + 1);
+    assert_ne!(p.generation(), generation);
+    assert_eq!(accounts(&p), vec![b.account]);
+    assert!(p.contains(&cheap_id));
+
+    // The same floor again changes nothing
+    let generation = p.generation();
+    assert!(!p.set_data_fee_floor(low + 1));
+    assert_eq!(p.generation(), generation);
+
+    // The op left out is the first to make way for a newcomer in a full pool, although the other account's op was
+    // the last one in before the floor moved
+    let newcomer = p.insert(op(&c, 0, 10_000), &s).unwrap();
+    assert!(!p.contains(&cheap_id) && p.contains(&dear_id) && p.contains(&newcomer));
+
+    // Lowered: an op at the old price is a candidate again
+    assert!(p.set_data_fee_floor(0));
+    p.remove(&newcomer);
+    p.insert(op(&a, 0, 100), &s).unwrap();
+    assert_eq!(accounts(&p), vec![b.account, a.account]);
+}
+
+/// The floor per KiB of bytes (D-153) does not grow with an op's `max_gas`, which the floor per KiB of cost does: the
+/// bytes an op takes on BTC are the same whatever gas it may use.
+#[test]
+fn the_data_fee_floor_goes_by_bytes_and_not_by_max_gas() {
+    let a = user("a");
+    let s = arc(&state(&[(&a, 10_000_000)]));
+    let rules = DEVNET.rules(0);
+    let mut thirsty = op(&a, 0, 1_000);
+    thirsty.max_gas = rules.block_gas_limit / 10;
+    thirsty.sig = sign_vmop(&thirsty, &a.kp, &[0; 32]).unwrap();
+    let len = thirsty.encode().unwrap().len();
+    let cost = op_cost(&DEVNET, &rules, len, thirsty.max_gas);
+    assert!(cost > 10 * u64::try_from(len).unwrap());
+    let floor = data_fee_rate(1_000, len);
+    assert!(floor > fee_rate(1_000, cost));
+
+    // By bytes the op pays the floor exactly
+    let mut by_bytes = Mempool::new(DEVNET, Policy::default());
+    by_bytes.set_data_fee_floor(floor);
+    by_bytes.insert(thirsty.clone(), &s).unwrap();
+    assert_eq!(by_bytes.candidates(&s).unwrap().len(), 1);
+
+    // The same figure per KiB of cost leaves it out
+    let mut by_cost = Mempool::new(
+        DEVNET,
+        Policy {
+            min_fee_per_kib: floor,
+            ..Policy::default()
+        },
+    );
+    by_cost.insert(thirsty, &s).unwrap();
+    assert!(by_cost.candidates(&s).unwrap().is_empty());
 }
 
 /// Sybil spam (security audit): accounts funded with dust skip their current nonce and queue the following nonces

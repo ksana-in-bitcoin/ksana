@@ -933,8 +933,8 @@ impl BlockId {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathBEstimateJson {
-    /// Suggested token amount (KSA base units): the amount for an ordinary transfer derived from `per_kib`, not below
-    /// this node's minimum token amount for packing.
+    /// Suggested token amount (KSA base units): the amount for an ordinary transfer derived from `per_kib` and
+    /// `per_kib_data`, not below this node's minimum token amount for packing.
     #[serde(with = "dec_u128")]
     pub amount: u128,
     /// Suggested fee rate: token amount per KiB of cost (cost = max(encoded bytes, bytes equivalent to `max_gas`), the
@@ -942,6 +942,22 @@ pub struct PathBEstimateJson {
     /// 20 main-chain blocks, not below this node's minimum fee rate for packing.
     #[serde(with = "dec_u128")]
     pub per_kib: u128,
+    /// Suggested token amount per KiB of the op's encoded bytes, whatever its `max_gas` (D-153): what carrying the
+    /// bytes to BTC costs a node run with `--ksa-price-sat`. An op is suggested the larger of its cost at `per_kib`
+    /// and its bytes at this rate. 0, and then left out of the JSON, on a node without that price: its answer has
+    /// the fields it had before D-153.
+    #[serde(
+        default,
+        with = "dec_u128",
+        skip_serializing_if = "PathBEstimateJson::no_data_rate"
+    )]
+    pub per_kib_data: u128,
+}
+
+impl PathBEstimateJson {
+    fn no_data_rate(per_kib_data: &u128) -> bool {
+        *per_kib_data == 0
+    }
 }
 
 /// The result of `ksana_estimateFee` (D-054; the path-A part was removed along with path A, D-078).

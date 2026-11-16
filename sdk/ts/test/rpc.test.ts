@@ -17,10 +17,13 @@ import {
   type WebSocketLike,
   blockIdParam,
   encodeVmOp,
+  DEVNET,
   formatOpPosition,
   fromHex,
   fromJson,
+  opCost,
   parseOpPosition,
+  pathBFee,
   subscribeBlocks,
   toHex,
   toJson,
@@ -735,10 +738,15 @@ test('ksana_estimateFee (D-054): no parameters; the result is the settlement fee
   const fee = await client.estimateFee();
   assert.deepEqual(calls[0]!.params, []);
   assert.equal(calls[0]!.method, 'ksana_estimateFee');
-  assert.deepEqual(fee, { feerate_sat_vb: 2n, path_b: { amount: 1000n, per_kib: 40n }, at: { height: 12n, hash: fromHex(H('ab')) } });
+  assert.deepEqual(fee, { feerate_sat_vb: 2n, path_b: { amount: 1000n, per_kib: 40n, per_kib_data: 0n }, at: { height: 12n, hash: fromHex(H('ab')) } });
   // Nodes before M23 give no fee rate: treated as 0
   const older = new KsanaRpcClient('http://node', { fetch: mockFetch(() => ({ ...result, path_b: { amount: '1000' } })) });
-  assert.deepEqual((await older.estimateFee()).path_b, { amount: 1000n, per_kib: 0n });
+  assert.deepEqual((await older.estimateFee()).path_b, { amount: 1000n, per_kib: 0n, per_kib_data: 0n });
+  // A node run with a KSA price also gives a rate per KiB of the op's bytes (D-153)
+  const priced = new KsanaRpcClient('http://node', { fetch: mockFetch(() => ({ ...result, path_b: { amount: '1000', per_kib: '40', per_kib_data: '51200000' } })) });
+  assert.deepEqual((await priced.estimateFee()).path_b, { amount: 1000n, per_kib: 40n, per_kib_data: 51_200_000n });
+  const bad = new KsanaRpcClient('http://node', { fetch: mockFetch(() => ({ ...result, path_b: { amount: '1000', per_kib: '40', per_kib_data: 5 } })) });
+  await assert.rejects(bad.estimateFee(), /path_b\.per_kib_data/);
   // A request object per the old interface (removed in D-078) is not sent to the node: the node accepts no parameters
   const untyped = client.estimateFee.bind(client) as (...args: unknown[]) => Promise<unknown>;
   await untyped({ max_gas: 50_000n, op_bytes: 230, funding: 'p2wpkh' });
@@ -759,6 +767,23 @@ test('ksana_estimateFee (D-054): no parameters; the result is the settlement fee
   }
   const nested = new KsanaRpcClient('http://node', { fetch: mockFetch(() => ({ ...result, path_b: { amount: '1', extra: '2' } })) });
   await assert.rejects(nested.estimateFee(), /path_b has unknown field "extra"/);
+});
+
+test('pathBFee: the larger of the cost at per_kib and the bytes at per_kib_data, not below the amount (D-153)', () => {
+  const params = { ...DEVNET, max_block_data_bytes: 81_920, block_gas_limit: 100_000_000n };
+  // 200 bytes with 1 000 000 gas: the cost is 819 (the gas part), the bytes stay 200
+  assert.equal(opCost(params, 200, 1_000_000n), 819n);
+  const fee = (amount: bigint, per_kib: bigint, per_kib_data: bigint) => pathBFee(params, { amount, per_kib, per_kib_data }, 200, 1_000_000n);
+  assert.equal(fee(7n, 0n, 0n), 7n);
+  assert.equal(fee(7n, 1024n, 0n), 819n);
+  // The rate per KiB of bytes takes no account of max_gas: 200 bytes, not 819
+  assert.equal(fee(7n, 0n, 1024n), 200n);
+  assert.equal(fee(7n, 1024n, 1024n), 819n);
+  assert.equal(fee(7n, 1024n, 5120n), 1000n);
+  assert.equal(fee(2000n, 1024n, 5120n), 2000n);
+  // Rounded up
+  assert.equal(fee(0n, 0n, 1n), 1n);
+  assert.equal(fee(0n, 0n, 6n), 2n);
 });
 
 test('indexer: indexer_status and indexer_stateRoot', async () => {

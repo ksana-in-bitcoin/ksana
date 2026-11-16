@@ -83,6 +83,14 @@ struct Cli {
     /// block's data limit); 0 means no limit.
     #[arg(long, default_value_t = 0)]
     min_fee_per_kib: u128,
+    /// What one KSA is worth to this operator, in sat (local policy, D-153; a decimal number above 0 with at most 8
+    /// decimals, such as 0.5). With it a path-B op is packed only when it also pays for its bytes on BTC at the fee
+    /// rate this node funds settlements at: a KiB of the op's encoded bytes, whatever its max_gas, must pay the KSA
+    /// worth 256 vB at that rate (a byte of an op lands on BTC as a quarter of a vB). --min-fee-per-kib, which goes
+    /// by the op's cost, applies beside it. The protocol sets no exchange rate: the figure is this operator's own.
+    /// Only taken with --btc-funding-key-file.
+    #[arg(long, requires = "btc_funding_key_file")]
+    ksa_price_sat: Option<ksana_node::producer::KsaPrice>,
     /// Payee account of republish payloads (D-095; a Taproot address of this chain's network or 64 hex digits): when
     /// a republish lands some block's data on BTC for the first time, and that data has waited more than
     /// CARRIER_REPOST_DELAY BTC blocks, it takes that block's carrier reward. Defaults to --producer; when neither is
@@ -273,11 +281,15 @@ fn run(cli: Cli) -> Result<(), NodeError> {
         .btc_funding_key_file
         .as_deref()
         .map(|p| {
+            let fees = FeePolicy::new(cli.settlement_feerate)
+                .with_cap(cli.max_settlement_feerate)
+                .with_target(cli.settlement_conf_target);
             load_funding(
                 p,
-                FeePolicy::new(cli.settlement_feerate)
-                    .with_cap(cli.max_settlement_feerate)
-                    .with_target(cli.settlement_conf_target),
+                match cli.ksa_price_sat {
+                    Some(price) => fees.with_ksa_price(price),
+                    None => fees,
+                },
             )
         })
         .transpose()?
@@ -441,6 +453,24 @@ mod tests {
         bitcoin::Address::from_script(script, network)
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn a_ksa_price_is_only_taken_with_a_funding_key_and_above_zero() {
+        let base = ["ksana-node", "--data-dir", "d", "--genesis", "g"];
+        let with = |more: &[&str]| Cli::try_parse_from(base.iter().chain(more).copied());
+        assert!(with(&[]).unwrap().ksa_price_sat.is_none());
+        let refused = with(&["--ksa-price-sat", "0.5"]).unwrap_err().to_string();
+        assert!(refused.contains("--btc-funding-key-file"), "{refused}");
+        let funded = ["--btc-funding-key-file", "k", "--ksa-price-sat"];
+        let price = |price: &'static str| with(&[funded.as_slice(), &[price]].concat());
+        assert_eq!(
+            price("0.5").unwrap().ksa_price_sat,
+            Some("0.5".parse().unwrap())
+        );
+        for bad in ["0", "0.000", "-1", "1e3", "0.123456789", "sat"] {
+            assert!(price(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

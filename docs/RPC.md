@@ -46,7 +46,7 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
 | `ksana_getApprovals` | `account`, `after`?, `limit`? | `{ "approvals": [{ "kind", ... }], "next", "at" }` |
 | `ksana_call` | `{ "contract", "method", "args", "funds"?, "caller"?, "max_gas"? }` | receipt |
 | `ksana_getSettlement` | block identifier | `{ "block", "txid", "txid_rpc", "commit_txid", "commit_txid_rpc", "txs", "carrier_account", "carrier", "status", "confirmed", "settled", "btc_final" }` |
-| `ksana_estimateFee` | none | `{ "feerate_sat_vb", "path_b": { "amount", "per_kib" }, "at" }` |
+| `ksana_estimateFee` | none | `{ "feerate_sat_vb", "path_b": { "amount", "per_kib", "per_kib_data"? }, "at" }` |
 | `ksana_getChainInfo` | none | `{ "chain_id", "tip", "daa_score", "protocol_version", "next_upgrade", "max_known_version", "finalized" }` |
 | `ksana_subscribeBlocks` | none (WebSocket) | pushes `{ "height", "hash", "entries", "timestamp" }` |
 
@@ -184,8 +184,12 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
     BLOCK_GAS_LIMIT`), the same as used for ordering this node's packing candidates (local policy: ordered by fee rate rather than absolute amount, so an op whose `max_gas` fills a whole block cannot squeeze out other ops with a slightly higher
     amount). It is the median, over the last 20 main-chain blocks, of each block's lowest path B entry fee rate (the larger middle value for an even count; blocks without path B entries
     are not counted), not below this node's `--min-fee-per-kib`.
-  - `path_b.amount`: the suggested amount for an ordinary transfer (a KSA transfer, BIP340 signature, `max_gas` 10 000) converted from `per_kib` (rounded up), not below
-    this node's `--min-token-fee`. Other ops are estimated as their own cost multiplied by `per_kib`.
+  - `path_b.per_kib_data` (D-153; only in the answer of a node run with `--ksa-price-sat`, absent otherwise): the token amount per KiB of the op's encoded bytes, whatever its
+    `max_gas`, that this node's producer asks for carrying the bytes to BTC: the KSA worth 256 vB at `feerate_sat_vb` and the operator's price (`feerate_sat_vb × 256 × 10^8 / price`
+    base units, rounded up), or the floor the producer set at most 30 seconds ago when that is higher. A client that finds it absent takes it as 0.
+  - `path_b.amount`: the suggested amount for an ordinary transfer (a KSA transfer, BIP340 signature, `max_gas` 10 000): the larger of its cost at `per_kib` and its encoded bytes
+    at `per_kib_data` (each rounded up), not below this node's `--min-token-fee`. Any other op is estimated the same way from its own cost and bytes, not below `amount` (`pathBFee`
+    in the TypeScript SDK).
   - `at`: the tip the estimate is based on.
 
 ## Indexer JSON-RPC

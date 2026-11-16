@@ -61,6 +61,10 @@ const COINBASE_MATURITY: u32 = 100;
 /// (D-109): they carry no settlement transactions, and their bodies wait for a later settlement (D-077).
 const FUNDING_RETRY: Duration = Duration::from_secs(30);
 
+/// How long the packing floor of path B set from the fee rate stands while the BTC tip stays (D-153): bitcoind is asked
+/// for the rate again after it.
+const FLOOR_REFRESH: Duration = Duration::from_secs(30);
+
 /// Template generation announced by the block production loop: the entry pool generation the template includes.
 #[derive(Default)]
 pub struct TemplateSync {
@@ -137,6 +141,61 @@ pub struct FeePolicy {
     /// The BTC height from which the room is paid by again after a pair it misjudged (D-147); 0 when there was
     /// none. Kept in memory only: a restart forgets it.
     room_from: Arc<AtomicU32>,
+    /// What one KSA is worth to this operator (`--ksa-price-sat`, D-153): with it the packing floor of path B follows
+    /// the fee rate ([`path_b_floor`](Self::path_b_floor)).
+    ksa_price: Option<KsaPrice>,
+}
+
+/// The vB a KiB of path B ops' encoded bytes takes on BTC, as the packing floor counts it (D-153): envelope data is
+/// witness data, a quarter of a vB per byte. The compact encoding and compression (D-080, D-141) make it less; the
+/// pair's own bytes and the headers make it more.
+pub const PATH_B_VB_PER_KIB: u128 = 256;
+
+/// The base units of one KSA (8 decimals, SPEC §9.1).
+const KSA_BASE_UNITS: u128 = 100_000_000;
+
+/// The most decimals of a [`KsaPrice`].
+const KSA_PRICE_DECIMALS: usize = 8;
+
+/// What one KSA is worth to an operator, in sat (`--ksa-price-sat`, D-153): a positive decimal number with at most
+/// [`KSA_PRICE_DECIMALS`] decimals, kept as `num / den`. The protocol has no exchange rate (§8.2): this is one
+/// operator's own figure, and only its own packing floor goes by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KsaPrice {
+    num: u128,
+    den: u128,
+}
+
+impl KsaPrice {
+    /// The KSA base units worth `sat` sat, rounded up (saturating).
+    pub fn base_units(&self, sat: u128) -> u128 {
+        sat.saturating_mul(KSA_BASE_UNITS)
+            .saturating_mul(self.den)
+            .div_ceil(self.num)
+    }
+}
+
+impl std::str::FromStr for KsaPrice {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (whole, decimals) = s.split_once('.').unwrap_or((s, ""));
+        let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+        if whole.is_empty() || !digits(whole) || !digits(decimals) || s.ends_with('.') {
+            return Err(format!("{s:?} is not a decimal number"));
+        }
+        if decimals.len() > KSA_PRICE_DECIMALS {
+            return Err(format!("at most {KSA_PRICE_DECIMALS} decimals"));
+        }
+        let num: u128 = format!("{whole}{decimals}")
+            .parse()
+            .map_err(|_| "the number is too large".to_owned())?;
+        if num == 0 {
+            return Err("the price must be above 0".to_owned());
+        }
+        let den = (0..decimals.len()).fold(1u128, |den, _| den.saturating_mul(10));
+        Ok(KsaPrice { num, den })
+    }
 }
 
 impl FeePolicy {
@@ -147,7 +206,30 @@ impl FeePolicy {
             cap: DEFAULT_MAX_FEERATE.max(floor),
             target: DEFAULT_FEE_TARGET,
             room_from: Arc::default(),
+            ksa_price: None,
         }
+    }
+
+    /// Sets what one KSA is worth to this operator (`--ksa-price-sat`, D-153).
+    pub fn with_ksa_price(mut self, price: KsaPrice) -> Self {
+        self.ksa_price = Some(price);
+        self
+    }
+
+    /// The least a path B op pays per KiB of its encoded bytes for this node to pack it while it funds settlements at
+    /// `feerate` sat/vB (D-153): the KSA base units that are worth, at the operator's price, the fee of the
+    /// [`PATH_B_VB_PER_KIB`] vB a KiB of ops takes on BTC, rounded up. It goes by the op's bytes and not by its cost
+    /// in the packing budget, which grows with `max_gas`: gas takes no room on BTC. `None` without a price.
+    pub fn path_b_floor(&self, feerate: u64) -> Option<u128> {
+        let sat = u128::from(feerate).saturating_mul(PATH_B_VB_PER_KIB);
+        Some(self.ksa_price?.base_units(sat))
+    }
+
+    /// [`path_b_floor`](Self::path_b_floor) at the fee rate of an ordinary settlement sent now
+    /// ([`rate`](Self::rate), not in a race). `None` without a price, in which case bitcoind is not asked.
+    pub fn path_b_floor_now(&self, params: &Params, client: &dyn BtcClient) -> Option<u128> {
+        self.ksa_price?;
+        self.path_b_floor(self.rate(params, client, false))
     }
 
     /// Replaces the cap (`--max-settlement-feerate`).
@@ -408,6 +490,8 @@ pub struct ProducerCache {
     /// The nonces of the accounts in the entry pool at the last template on `nonces_at` (D-130): a template rebuilt on
     /// the same tip reads only the accounts new to the pool.
     nonces: BTreeMap<[u8; 32], u64>,
+    /// The BTC tip and the time at which the packing floor of path B was last set from the fee rate (D-153).
+    floor_at: Option<([u8; 32], std::time::Instant)>,
 }
 
 impl ProducerCache {
@@ -525,6 +609,42 @@ impl Producer {
             Err(NodeError::TipChanged) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Sets the packing floor of path B from the fee rate this node funds settlements at (D-153), when the operator
+    /// gave a KSA price (`--ksa-price-sat`): at each new BTC tip, and every [`FLOOR_REFRESH`] in between. The rate is
+    /// the one of an ordinary settlement ([`FeePolicy::rate`]), never the cap a race pays (D-152): a race is not the
+    /// users' doing, and a floor at the cap would stop path B for as long as it lasts.
+    fn follow_btc_fees(
+        &self,
+        cache: &mut ProducerCache,
+        snapshot: &BtcSnapshot,
+    ) -> Result<(), NodeError> {
+        let Some(fees) = self.funding.as_ref().map(|f| &f.fees) else {
+            return Ok(());
+        };
+        let Some((_, tip)) = snapshot.tip() else {
+            return Ok(());
+        };
+        if cache
+            .floor_at
+            .is_some_and(|(at, set)| at == tip && set.elapsed() < FLOOR_REFRESH)
+        {
+            return Ok(());
+        }
+        let chain = &self.chain;
+        let Some(floor) = fees.path_b_floor_now(chain.params(), chain.btc().client().as_ref())
+        else {
+            return Ok(());
+        };
+        cache.floor_at = Some((tip, monotonic_now()));
+        let mut pool = self.mempool()?;
+        if pool.set_data_fee_floor(floor) {
+            eprintln!(
+                "[ksana-node] path B is packed from {floor} base units per KiB of an op's bytes on (local policy, D-153)"
+            );
+        }
+        Ok(())
     }
 
     fn mempool(&self) -> Result<std::sync::MutexGuard<'_, Mempool>, NodeError> {
@@ -652,6 +772,9 @@ impl Producer {
         let funding_utxos = self.available_utxos(cache, &anchor)?;
         let can_fund = self.funding.is_some() && !funding_utxos.is_empty();
 
+        if fast {
+            self.follow_btc_fees(cache, &snapshot)?;
+        }
         let (generation, candidates) = {
             let pool = self.mempool()?;
             let candidates = if fast {

@@ -23,7 +23,8 @@
 //!   by a tenth of it or more, and by the relay floor or more ([`Policy::replacement_fee`], D-130): each replacement
 //!   costs at least what a new op costs, and replacing one op over and over for one more unit each is not possible.
 //! - **Packing candidates**: for each account, the consecutive run of ops starting at the current nonce, up to the
-//!   first one that does not meet the packing floor (minimum sponsored fee, minimum fee rate); among the queue heads of
+//!   first one that does not meet the packing floor (minimum sponsored fee, minimum fee rate, minimum fee per KiB of
+//!   its bytes); among the queue heads of
 //!   the accounts, selection goes by **fee rate** from high to low (§8.2; fee rate = sponsored fee / cost, cost =
 //!   max(encoded bytes, bytes equivalent to `max_gas`), [`op_cost`]: a block's gas limit is equated with a block's data
 //!   limit, so an op whose `max_gas` fills the whole block cannot squeeze out other ops with a slightly higher
@@ -79,6 +80,10 @@ pub struct Policy {
     pub min_relay_token_fee: u128,
     /// Minimum fee rate for packing: token amount per KiB of cost ([`op_cost`]) ([`fee_rate`]); 0 means no limit.
     pub min_fee_per_kib: u128,
+    /// Minimum fee for packing per KiB of the op's encoded bytes, whatever its `max_gas` ([`data_fee_rate`]); 0 means
+    /// no limit. It is what carrying the op's bytes to BTC costs the node (D-153), which its gas has no part in, and
+    /// the node sets it as the BTC fee rate moves ([`Mempool::set_data_fee_floor`]).
+    pub min_data_fee_per_kib: u128,
     /// Limit on the total number of ops in the pool.
     pub max_ops: usize,
     /// Limit on the total encoded bytes of the ops in the pool (the op count alone would let ops of up to
@@ -103,6 +108,7 @@ impl Default for Policy {
             min_token_fee: 1,
             min_relay_token_fee: 1,
             min_fee_per_kib: 0,
+            min_data_fee_per_kib: 0,
             max_ops: 10_000,
             max_bytes: 32 * 1024 * 1024,
             max_ops_per_account: 64,
@@ -118,9 +124,11 @@ impl Policy {
         self.min_relay_token_fee.min(self.min_token_fee)
     }
 
-    /// Whether an op with sponsored fee `fee` and fee rate `rate` meets the packing floor.
-    pub fn packable(&self, fee: u128, rate: u128) -> bool {
-        fee >= self.min_token_fee && rate >= self.min_fee_per_kib
+    /// Whether an op of `size` encoded bytes with sponsored fee `fee` and fee rate `rate` meets the packing floor.
+    pub fn packable(&self, fee: u128, rate: u128, size: usize) -> bool {
+        fee >= self.min_token_fee
+            && rate >= self.min_fee_per_kib
+            && data_fee_rate(fee, size) >= self.min_data_fee_per_kib
     }
 
     /// The least sponsored fee of an op replacing a queued op that pays `fee` (D-130): `fee` raised by
@@ -152,6 +160,12 @@ pub fn op_cost(params: &Params, rules: &Rules, encoded_len: usize, max_gas: u64)
     };
     let by_gas = u64::try_from(by_gas).unwrap_or(u64::MAX);
     bytes.max(by_gas).max(1)
+}
+
+/// Sponsored fee per KiB of an op's encoded bytes, `fee × 1024 / size` (rounded down, saturating): what
+/// [`Policy::min_data_fee_per_kib`] is compared with.
+pub fn data_fee_rate(fee: u128, size: usize) -> u128 {
+    fee_rate(fee, u64::try_from(size).unwrap_or(u64::MAX))
 }
 
 /// Fee rate: sponsored fee per KiB of cost, `fee × 1024 / cost` (rounded down, saturating).
@@ -305,7 +319,7 @@ impl Queue {
                 Some(rest) => available = rest.checked_sub(pool_op.outflow).unwrap_or(rest),
                 None => standing = standing.min(Standing::Unfunded),
             }
-            if !policy.packable(pool_op.fee, pool_op.rate) {
+            if !policy.packable(pool_op.fee, pool_op.rate, pool_op.size) {
                 standing = standing.min(Standing::Unpackable);
             }
         }
@@ -371,9 +385,27 @@ pub struct Mempool {
 }
 
 impl Mempool {
-    /// The local policy.
+    /// The local policy; its minimum fee per KiB of bytes is the one in force now ([`Mempool::set_data_fee_floor`]).
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    /// Sets the minimum fee for packing per KiB of an op's bytes ([`Policy::min_data_fee_per_kib`]): the node passes
+    /// in what carrying a KiB to BTC costs it now (D-153). The ops in the pool stay; those the new floor leaves out
+    /// wait as ops below the packing floor do, and are candidates again once it falls. Returns whether the floor
+    /// changed, in which case the generation moves ([`Mempool::generation`]).
+    pub fn set_data_fee_floor(&mut self, per_kib: u128) -> bool {
+        if per_kib == self.policy.min_data_fee_per_kib {
+            return false;
+        }
+        self.policy.min_data_fee_per_kib = per_kib;
+        // An account's place in the eviction order goes by whether its ops meet the packing floor
+        let accounts: Vec<[u8; 32]> = self.by_account.keys().copied().collect();
+        for account in &accounts {
+            self.rekey(account, None);
+        }
+        self.bump();
+        true
     }
 
     /// An empty entry pool (admission goes by the rules after genesis until [`Mempool::set_rules`]).
@@ -995,7 +1027,9 @@ fn packing_run<'a>(
 ) -> impl Iterator<Item = &'a PoolOp> + 'a {
     ops.range(nonce..)
         .scan(Some(nonce), |expected, (queued, pool_op)| {
-            if *expected != Some(*queued) || !policy.packable(pool_op.fee, pool_op.rate) {
+            if *expected != Some(*queued)
+                || !policy.packable(pool_op.fee, pool_op.rate, pool_op.size)
+            {
                 return None;
             }
             *expected = queued.checked_add(1);
