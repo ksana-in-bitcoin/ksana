@@ -64,6 +64,7 @@ fn forge_empty_on(a: &Side, parent: &Block, anchor: BtcAnchor, seed: &str) -> Bl
         header,
         entries,
         settlement: None,
+        second_halves: Vec::new(),
     }
 }
 
@@ -258,6 +259,7 @@ fn run_two_blocks(fabricated: bool) -> (u64, u64, u64, bool, bool, u64) {
         header: attacker,
         entries: Vec::new(),
         settlement: None,
+        second_halves: Vec::new(),
     };
     let y_result = a
         .chain

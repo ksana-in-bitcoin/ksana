@@ -36,7 +36,8 @@ impl World {
         let entry = sponsored(u, *nonce, FEE, GAS, action);
         *nonce += 1;
         let mut out = self.chain.block(vec![entry]).expect("valid block");
-        assert_eq!(out.receipts.len(), 1);
+        // The op's receipt and that of the block's aggregate entry (D-154)
+        assert_eq!(out.receipts.len(), 2);
         out.receipts.remove(0)
     }
 

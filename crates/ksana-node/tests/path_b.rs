@@ -63,7 +63,8 @@ fn path_b_op_via_rpc_lands_in_next_block_and_locks_fee_for_producer() {
     let block = block_at(&rt, &c, included.height);
     assert_eq!(block.hash, included.hash);
     assert!(
-        matches!(&block.entries[status.index.unwrap() as usize], Entry::Sponsored { op: o } if *o == op)
+        // The block holds the op by half its signature (D-154)
+        matches!(&block.entries[status.index.unwrap() as usize], Entry::Sponsored { op: o } if Some(o) == op.split().map(|(half, _)| half).as_ref())
     );
     let started = ksana_node::monotonic_now();
     let tx = loop {

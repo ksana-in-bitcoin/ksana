@@ -8,9 +8,10 @@ use std::path::PathBuf;
 
 use bitcoin::hashes::Hash;
 use ksana_crypto::{
-    account_of, bip322, entries_root, keypair_from_secret, merkle_root, native_vmop_sighash,
-    sign_native_vmop, sign_vmop, sign_vmop_bip322_p2tr, tagged_hash, verify_vmop, vmop_sighash,
-    VMOP_SIGHASH_TAG,
+    account_of, bip322, entries_root, half_signed, keypair_from_secret, merkle_root,
+    native_vmop_sighash, schnorr_sign, seal_entries, sign_native_vmop, sign_vmop,
+    sign_vmop_bip322_p2tr, tagged_hash, tweaked_keypair, unseal_entries, verify_vmop,
+    verify_vmops_aggregate, vmop_sighash, VMOP_SIGHASH_TAG,
 };
 use ksana_primitives::codec::encode;
 use ksana_primitives::{
@@ -34,6 +35,7 @@ fn fixed32(label: &str) -> [u8; 32] {
     ksana_primitives::hash::sha256(label.as_bytes())
 }
 
+#[derive(Clone)]
 struct Key {
     secret: [u8; 32],
     aux: [u8; 32],
@@ -211,6 +213,17 @@ fn entries(ops: &[(&'static str, VmOp, Key)]) -> Vec<(&'static str, Entry)> {
     ]
 }
 
+/// The entries as a block holds them (D-154): the path B ops by half their signatures, and after them the aggregate
+/// entry when there is a path B op among them.
+fn sealed(entries: &[Entry]) -> Vec<Entry> {
+    seal_entries(entries).unwrap().0
+}
+
+/// The entries of [`sealed`] as a payload carries them.
+fn sealed_data(entries: &[Entry]) -> Vec<EntryData> {
+    sealed(entries).iter().map(EntryData::from).collect()
+}
+
 /// A payload case: payloads have their own encoding (compressed headers and entries, D-075, D-079, D-080), with
 /// devnet's chain ID.
 fn payload_case(name: &str, value: &Payload) -> Value {
@@ -337,10 +350,39 @@ fn codec_vectors() -> Value {
         &SigScheme::Bip322Simple(vec![]),
     ));
 
+    // The halves a block holds (D-154): the first 32 bytes of a signature, in the form the signature was made in
+    valid.push(case(
+        "SigScheme",
+        "HalfBip340",
+        &SigScheme::HalfBip340([0x34; 32]),
+    ));
+    valid.push(case(
+        "SigScheme",
+        "HalfBip322",
+        &SigScheme::HalfBip322([0x35; 32]),
+    ));
+    valid.push(case(
+        "SigScheme",
+        "HalfBip322All",
+        &SigScheme::HalfBip322All([0x36; 32]),
+    ));
+
     for (name, op, _) in &ops {
         let mut c = case("VmOp", name, op);
         c["op_id"] = json!(hexs(&op.op_id().unwrap()));
         valid.push(c);
+    }
+    // A path B op as a block holds it, by half its signature: the same op_id as with the whole signature (D-154)
+    for (name, op, _) in &ops {
+        if !matches!(op.fee, FeeMode::Token { .. }) {
+            continue;
+        }
+        if let Some((half, _)) = op.split() {
+            assert_eq!(half.op_id().unwrap(), op.op_id().unwrap());
+            let mut c = case("VmOp", &format!("{name}, by half its signature"), &half);
+            c["op_id"] = json!(hexs(&half.op_id().unwrap()));
+            valid.push(c);
+        }
     }
 
     valid.push(case(
@@ -383,6 +425,13 @@ fn codec_vectors() -> Value {
     for (name, e) in &entries {
         valid.push(case("EntryData", name, &EntryData::from(e)));
     }
+    // The entries as a block holds them (D-154): the path B ops by half their signatures, and the aggregate entry last
+    let whole: Vec<Entry> = entries.iter().map(|(_, e)| e.clone()).collect();
+    let (sealed_entries, second_halves) = seal_entries(&whole).unwrap();
+    let aggregate = sealed_entries.last().unwrap().clone();
+    assert!(matches!(aggregate, Entry::Aggregate { .. }));
+    valid.push(case("Entry", "Aggregate", &aggregate));
+    valid.push(case("EntryData", "Aggregate", &EntryData::from(&aggregate)));
 
     valid.push(case(
         "Block",
@@ -391,6 +440,7 @@ fn codec_vectors() -> Value {
             header: genesis.clone(),
             entries: vec![],
             settlement: None,
+            second_halves: Vec::new(),
         },
     ));
     valid.push(case(
@@ -398,11 +448,22 @@ fn codec_vectors() -> Value {
         "all entry types, with settlement transactions (commit and reveal, D-081)",
         &Block {
             header: h2.clone(),
-            entries: entries.iter().map(|(_, e)| e.clone()).collect(),
+            entries: sealed_entries.clone(),
             settlement: Some(SettlementTxs {
                 commit: vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
                 reveal: vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
             }),
+            second_halves: Vec::new(),
+        },
+    ));
+    valid.push(case(
+        "Block",
+        "all entry types, with the second halves of its path B signatures beside it (D-154)",
+        &Block {
+            header: h2.clone(),
+            entries: sealed_entries.clone(),
+            settlement: None,
+            second_halves,
         },
     ));
 
@@ -410,21 +471,17 @@ fn codec_vectors() -> Value {
         "Settlement",
         &Payload::Settlement {
             headers: vec![h1.clone(), h2.clone()],
-            entries: entries.iter().map(|(_, e)| EntryData::from(e)).collect(),
+            entries: sealed_data(&whole),
             bodies: vec![],
         },
     ));
     // Carrying bodies of other blocks (D-077): at least one entry other than forced inclusions
-    let body_entries: Vec<EntryData> = entries.iter().map(|(_, e)| EntryData::from(e)).collect();
+    let body_entries: Vec<EntryData> = sealed_data(&whole);
     valid.push(payload_case(
         "Settlement carrying bodies of other blocks",
         &Payload::Settlement {
             headers: vec![genesis.clone(), h1.clone(), h2.clone()],
-            entries: entries
-                .iter()
-                .take(1)
-                .map(|(_, e)| EntryData::from(e))
-                .collect(),
+            entries: sealed_data(&whole[..1]),
             bodies: vec![
                 Body {
                     header: 0,
@@ -432,7 +489,7 @@ fn codec_vectors() -> Value {
                 },
                 Body {
                     header: 1,
-                    entries: body_entries[1..2].to_vec(),
+                    entries: sealed_data(&whole[1..2]),
                 },
             ],
         },
@@ -526,11 +583,7 @@ fn codec_vectors() -> Value {
         "Settlement compressed: carrying headers of parallel blocks",
         &Payload::Settlement {
             headers: dag[..4].to_vec(),
-            entries: entries
-                .iter()
-                .take(2)
-                .map(|(_, e)| EntryData::from(e))
-                .collect(),
+            entries: sealed_data(&whole[..2]),
             bodies: vec![],
         },
     ));
@@ -632,6 +685,15 @@ fn codec_vectors() -> Value {
             SigScheme::Bip340([0x5b; 64]),
         ),
     };
+    let half_of = |entry: &EntryData, half: SigScheme| match entry {
+        EntryData::Sponsored { op } => EntryData::Sponsored {
+            op: VmOp {
+                sig: half,
+                ..op.clone()
+            },
+        },
+        other => other.clone(),
+    };
     let ch1 = header(1, vec![genesis.hash()], "ksana/vectors/compress/h1");
     let ch2 = header(2, vec![ch1.hash()], "ksana/vectors/compress/h2");
     valid.push(payload_case(
@@ -650,10 +712,29 @@ fn codec_vectors() -> Value {
                 transfer_to(bob, 7, alice, 128),
                 compress_call,
                 compress_deploy,
+                half_of(
+                    &transfer_to(alice, 2, bob, 3),
+                    SigScheme::HalfBip340([0x5c; 32]),
+                ),
+                half_of(
+                    &transfer_to(bob, 8, alice, 4),
+                    SigScheme::HalfBip322([0x5d; 32]),
+                ),
+                half_of(
+                    &transfer_to(alice, 3, bob, 5),
+                    SigScheme::HalfBip322All([0x5e; 32]),
+                ),
+                EntryData::Aggregate { s: [0x5f; 32] },
             ],
             bodies: vec![Body {
                 header: 0,
-                entries: vec![transfer_to(alice, 0, bob, 5)],
+                entries: vec![
+                    half_of(
+                        &transfer_to(alice, 0, bob, 5),
+                        SigScheme::HalfBip340([0x60; 32]),
+                    ),
+                    EntryData::Aggregate { s: [0x61; 32] },
+                ],
             }],
         },
     ));
@@ -667,7 +748,7 @@ fn codec_vectors() -> Value {
     bad_fee[fee_tag] = 2;
     let mut bad_sig = op_bytes.clone();
     let sig_tag = op_bytes.len() - 65;
-    bad_sig[sig_tag] = 2;
+    bad_sig[sig_tag] = 5;
     let call_op = &ops[0].1;
     let call_bytes = encode(call_op).unwrap();
     let method_len_at = 1 + 4 + 32 + 8 + (1 + 16) + 8 + 1 + 32;
@@ -679,11 +760,14 @@ fn codec_vectors() -> Value {
         header: genesis.clone(),
         entries: vec![],
         settlement: None,
+        second_halves: Vec::new(),
     })
     .unwrap();
     let mut bad_option = block_none.clone();
-    let last = bad_option.len() - 1;
-    bad_option[last] = 2;
+    // The tag of `settlement`, before the empty list of second halves (D-154)
+    let tag = bad_option.len() - 5;
+    assert_eq!(bad_option[tag], 0);
+    bad_option[tag] = 2;
 
     // Non-canonical compressed headers (D-075): starting from a canonical sequence, corrupt one item at a time; `error`
     // is the error message fragment shared by Rust and the TS SDK. A writes out all fields (190 bytes); B has the same
@@ -802,12 +886,12 @@ fn codec_vectors() -> Value {
         json!({"type": "VmOp", "name": "truncated by 1 byte", "borsh": hexs(&op_bytes[..op_bytes.len() - 1])}),
         json!({"type": "VmOp", "name": "FeeMode variant index 2", "borsh": hexs(&bad_fee)}),
         json!({"type": "VmOp", "name": "Action variant index 3", "borsh": hexs(&bad_action)}),
-        json!({"type": "VmOp", "name": "SigScheme variant index 2", "borsh": hexs(&bad_sig)}),
+        json!({"type": "VmOp", "name": "SigScheme variant index 5", "borsh": hexs(&bad_sig)}),
         json!({"type": "VmOp", "name": "method name is not valid UTF-8", "borsh": hexs(&bad_utf8)}),
         json!({"type": "VmOp", "name": "empty input", "borsh": ""}),
         json!({"type": "Block", "name": "Option tag is 2", "borsh": hexs(&bad_option)}),
-        json!({"type": "Entry", "name": "Entry variant index 3", "borsh": "03"}),
-        json!({"type": "EntryData", "name": "EntryData variant index 3", "borsh": "03"}),
+        json!({"type": "Entry", "name": "Entry variant index 4", "borsh": "04"}),
+        json!({"type": "EntryData", "name": "EntryData variant index 4", "borsh": "04"}),
         json!({"type": "Payload", "name": "Payload variant index 3", "borsh": "03"}),
         json!({"type": "Payload", "name": "Headers length prefix exceeds the actual data", "borsh": "02ffffffff"}),
         json!({"type": "Payload", "name": "Headers compressed: truncated by 1 byte", "borsh": hexs(&canonical[..canonical.len() - 1])}),
@@ -876,12 +960,22 @@ fn codec_vectors() -> Value {
     ksa_full.extend_from_slice(&KSA_ASSET_ID);
     let mut bip340 = vec![0];
     bip340.extend_from_slice(&[0x5a; 64]);
+    let mut half_bip340 = vec![2];
+    half_bip340.extend_from_slice(&[0x5a; 32]);
+    let mut aggregate_bytes = vec![3];
+    aggregate_bytes.extend_from_slice(&[0x5f; 32]);
     let token_fee: &[u8] = &[0, 2];
     let good = transfer_bytes(&[0], token_fee, &[1], &bob_full, &[5], &bip340);
-    assert!(
-        Payload::decode(&hex::decode(one_entry(&good)).unwrap(), &DEVNET).is_ok(),
-        "the entry is valid before being corrupted"
-    );
+    for valid in [
+        &good,
+        &transfer_bytes(&[0], token_fee, &[1], &bob_full, &[5], &half_bip340),
+        &aggregate_bytes,
+    ] {
+        assert!(
+            Payload::decode(&hex::decode(one_entry(valid)).unwrap(), &DEVNET).is_ok(),
+            "the entry is valid before being corrupted"
+        );
+    }
     let mut u128_over = vec![0xff; 18];
     u128_over.push(0x04);
     let mut call_bad_utf8 = vec![1, VMOP_VERSION, 0];
@@ -963,14 +1057,50 @@ fn codec_vectors() -> Value {
                 &[1],
                 &bob_full,
                 &[5],
-                &[2],
+                &[5],
             )),
             "unknown signature scheme",
         ),
         (
             "unknown entry variant",
-            one_entry(&[3]),
+            one_entry(&[4]),
             "unknown entry variant",
+        ),
+        (
+            "half a signature (D-154) truncated by 1 byte",
+            one_entry(&transfer_bytes(
+                &[0],
+                token_fee,
+                &[1],
+                &bob_full,
+                &[5],
+                &half_bip340[..half_bip340.len() - 1],
+            )),
+            "",
+        ),
+        (
+            "half a signature (D-154) followed by its second half",
+            one_entry(&{
+                let mut whole =
+                    transfer_bytes(&[0], token_fee, &[1], &bob_full, &[5], &half_bip340);
+                whole.extend_from_slice(&[0x5a; 32]);
+                whole
+            }),
+            "",
+        ),
+        (
+            "aggregate entry (D-154) truncated by 1 byte",
+            one_entry(&aggregate_bytes[..aggregate_bytes.len() - 1]),
+            "",
+        ),
+        (
+            "aggregate entry (D-154) with 1 trailing byte",
+            one_entry(&{
+                let mut long = aggregate_bytes.clone();
+                long.push(0);
+                long
+            }),
+            "",
         ),
         (
             "unknown action",
@@ -993,12 +1123,16 @@ fn codec_vectors() -> Value {
         ),
     ];
     for (name, borsh, error) in entry_invalid {
-        invalid.push(json!({
+        let mut case = json!({
             "type": "Payload",
             "name": format!("entry compression: {name}"),
             "borsh": borsh,
-            "error": error,
-        }));
+        });
+        // A wrong length has no message shared by Rust and the TS SDK
+        if !error.is_empty() {
+            case["error"] = json!(error);
+        }
+        invalid.push(case);
     }
     for (name, borsh, error) in compact_invalid {
         invalid.push(json!({
@@ -1217,6 +1351,139 @@ fn signing_vectors() -> Value {
         }));
     }
 
+    // The aggregate of a block's path B signatures (D-154): the three forms a path B signature has, two of them by one
+    // account, between entries that take no part in it
+    let aggregate = {
+        let path_b: Vec<(VmOp, Key)> = signed_ops()
+            .into_iter()
+            .filter(|(_, op, _)| matches!(op.fee, FeeMode::Token { .. }))
+            .map(|(_, op, key)| (op, key))
+            .collect();
+        let (first, first_key) = path_b[0].clone();
+        let (second, second_key) = path_b[1].clone();
+        let unsigned = |op: &VmOp, nonce: u64| VmOp {
+            nonce,
+            ..op.clone()
+        };
+        let first_kp = keypair_from_secret(&first_key.secret).unwrap();
+        let second_kp = keypair_from_secret(&second_key.secret).unwrap();
+        let mut by_wallet = unsigned(&first, first.nonce + 1);
+        by_wallet.sig = sign_vmop_bip322_p2tr(&by_wallet, &first_kp, &first_key.aux).unwrap();
+        // BIP322 with SIGHASH_ALL, as some wallets sign: a witness of one item of 65 bytes
+        let mut by_wallet_all = unsigned(&second, second.nonce + 1);
+        let message = bip322::vmop_message(&vmop_sighash(&by_wallet_all).unwrap());
+        let digest = bip322::account_sighash(&by_wallet_all.account, &message, true).unwrap();
+        let sig = schnorr_sign(
+            &digest,
+            &tweaked_keypair(&second_kp).unwrap(),
+            &second_key.aux,
+        );
+        let mut witness = vec![1, 65];
+        witness.extend(sig);
+        witness.push(1);
+        by_wallet_all.sig = SigScheme::Bip322Simple(witness);
+
+        let ops = [first, second, by_wallet, by_wallet_all];
+        for op in &ops {
+            verify_vmop(op).unwrap();
+        }
+        let forced = signed_ops()
+            .into_iter()
+            .find(|(_, op, _)| matches!(op.fee, FeeMode::BtcNative))
+            .map(|(_, op, _)| op)
+            .unwrap();
+        let mut signed = vec![Entry::Forced {
+            btc_txid: fixed32("ksana/vectors/native-tx"),
+            op: forced,
+        }];
+        signed.extend(ops.iter().cloned().map(|op| Entry::Sponsored { op }));
+        signed.insert(
+            3,
+            Entry::Unlock {
+                height: 1_234_567,
+                index: 3,
+            },
+        );
+        let (sealed, second_halves) = seal_entries(&signed).unwrap();
+        let Some(Entry::Aggregate { s }) = sealed.last() else {
+            unreachable!()
+        };
+        let halves: Vec<&VmOp> = sealed
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Sponsored { op } => Some(op),
+                _ => None,
+            })
+            .collect();
+        verify_vmops_aggregate(halves.iter().copied(), s).unwrap();
+        assert_eq!(
+            unseal_entries(&sealed, &second_halves).unwrap(),
+            ops.to_vec()
+        );
+        let items = halves
+            .iter()
+            .map(|half| {
+                let item = half_signed(half).unwrap();
+                json!({
+                    "pubkey": hexs(&item.pubkey),
+                    "msg": hexs(&item.msg),
+                    "r": hexs(&item.r),
+                    "op_id": hexs(&half.op_id().unwrap()),
+                })
+            })
+            .collect::<Vec<_>>();
+        // Each of these fails: the aggregate answers for every signature and for their order
+        let mut swapped = sealed.clone();
+        swapped.swap(1, 2);
+        let mut other_s = *s;
+        other_s[31] ^= 1;
+        let mut dropped = sealed.clone();
+        dropped.remove(1);
+        let mut other_form = sealed.clone();
+        if let Entry::Sponsored { op } = &mut other_form[1] {
+            if let SigScheme::HalfBip340(r) = op.sig {
+                op.sig = SigScheme::HalfBip322(r);
+            }
+        }
+        let mut failing = Vec::new();
+        for (name, entries, s) in [
+            ("two path B entries change places", swapped, *s),
+            ("the aggregate differs in one bit", sealed.clone(), other_s),
+            ("a path B entry is left out", dropped, *s),
+            (
+                "half a BIP340 signature given as half a BIP322 signature",
+                other_form,
+                *s,
+            ),
+        ] {
+            let halves: Vec<&VmOp> = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Sponsored { op } => Some(op),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                verify_vmops_aggregate(halves.iter().copied(), &s).is_err(),
+                "{name}"
+            );
+            failing.push(json!({
+                "name": name,
+                "ops": halves.iter().map(|op| serde_json::to_value(op).unwrap()).collect::<Vec<_>>(),
+                "s": hexs(&s),
+            }));
+        }
+        json!({
+            "signed": serde_json::to_value(&signed).unwrap(),
+            "sealed": serde_json::to_value(&sealed).unwrap(),
+            "second_halves": second_halves.iter().map(|half| hexs(half)).collect::<Vec<_>>(),
+            "items": items,
+            "s": hexs(s),
+            "entries_root": hexs(&entries_root(&sealed).unwrap()),
+            "failing": failing,
+        })
+    };
+
     let tagged = [
         (VMOP_SIGHASH_TAG, Vec::new()),
         (VMOP_SIGHASH_TAG, b"abc".to_vec()),
@@ -1227,12 +1494,13 @@ fn signing_vectors() -> Value {
     .collect::<Vec<_>>();
 
     json!({
-        "description": "VmOp signing vectors (SPEC §4.2). sighash = tagged_hash(\"Ksana/VmOp/v1\", unsigned_borsh), where unsigned_borsh is the Borsh encoding of the VmOp without sig; for path C (fee is BtcNative, D-086) the message is unsigned_borsh ‖ first_input.txid ‖ first_input.vout (little-endian u32), where first_input is the output spent by the first input of the carrying transaction, and verification with a different input must fail; the account is the x-only public key of secret_key tweaked per BIP86 (D-092: i.e. the output public key of that secret key's Taproot address), and the signature is BIP340(tweaked secret key, sighash, aux_rand). Every op in tampered must fail verification. bip322 (D-052, D-092): message is the lowercase hex of sighash, message_hash = tagged_hash(\"BIP0322-signed-message\", message), to_spend / to_sign are built per BIP322 (transaction IDs in Bitcoin internal byte order, D-001), the address is OP_1 <account> (script_pubkey), witness is the consensus encoding of the to_sign witness stack, i.e. the Bip322Simple signature bytes, a P2TR key-path signature made with the tweaked key per BIP340(aux_rand); only P2TR, P2WPKH no longer corresponds to an account.",
+        "description": "VmOp signing vectors (SPEC §4.2). sighash = tagged_hash(\"Ksana/VmOp/v1\", unsigned_borsh), where unsigned_borsh is the Borsh encoding of the VmOp without sig; for path C (fee is BtcNative, D-086) the message is unsigned_borsh ‖ first_input.txid ‖ first_input.vout (little-endian u32), where first_input is the output spent by the first input of the carrying transaction, and verification with a different input must fail; the account is the x-only public key of secret_key tweaked per BIP86 (D-092: i.e. the output public key of that secret key's Taproot address), and the signature is BIP340(tweaked secret key, sighash, aux_rand). Every op in tampered must fail verification. bip322 (D-052, D-092): message is the lowercase hex of sighash, message_hash = tagged_hash(\"BIP0322-signed-message\", message), to_spend / to_sign are built per BIP322 (transaction IDs in Bitcoin internal byte order, D-001), the address is OP_1 <account> (script_pubkey), witness is the consensus encoding of the to_sign witness stack, i.e. the Bip322Simple signature bytes, a P2TR key-path signature made with the tweaked key per BIP340(aux_rand); only P2TR, P2WPKH no longer corresponds to an account. aggregate (D-154): signed are a block's entries with the signatures the accounts made, sealed the entries the block holds: each path B op by the first 32 bytes of its BIP340 signature (taken out of the witness for a BIP322 signature) in the form HalfBip340, HalfBip322 (SIGHASH_DEFAULT) or HalfBip322All (SIGHASH_ALL), and last the Aggregate entry with s; second_halves are the 32 bytes taken off each path B signature, in the entries' order. items are the path B entries in order: pubkey the account, msg the digest the BIP340 signature is over (the sighash for HalfBip340, the BIP322 to_sign signature hash otherwise), r the half, and op_id the hash of the op's encoding with the half, which is the op's ID with the whole signature too. s is the half-aggregation (BlockstreamResearch/cross-input-aggregation, half-aggregation.mediawiki) of the items' signatures: s = Σ z_i·s_i mod n with z_0 = 1 and z_i = int(tagged_hash(\"HalfAgg/randomizer\", r_0 ‖ pubkey_0 ‖ msg_0 ‖ … ‖ r_i ‖ pubkey_i ‖ msg_i)) mod n, and it verifies when s·G = Σ z_i·R_i + Σ z_i·e_i·P_i with e_i the BIP340 challenge. Each case of failing gives path B ops and an s that must not verify.",
         "tag": VMOP_SIGHASH_TAG,
         "tagged_hash": tagged,
         "cases": cases,
         "tampered": tampered,
         "bip322": bip322_cases,
+        "aggregate": aggregate,
     })
 }
 
@@ -1261,11 +1529,16 @@ fn merkle_vectors() -> Value {
 
     let ops = signed_ops();
     let all: Vec<Entry> = entries(&ops).into_iter().map(|(_, e)| e).collect();
+    // As a block holds them (D-154): a block with path B ops ends with the aggregate entry, a leaf like the others
     let entry_cases = [
         ("empty block", vec![]),
-        ("single entry", vec![all[2].clone()]),
-        ("three entries", all[..3].to_vec()),
-        ("all entries (three variants)", all.clone()),
+        ("single entry (path C)", vec![all[0].clone()]),
+        (
+            "one path B entry and the aggregate entry",
+            sealed(&all[2..3]),
+        ),
+        ("three entries and the aggregate entry", sealed(&all[..3])),
+        ("all entries (four variants)", sealed(&all)),
     ]
     .iter()
     .map(|(name, es)| {

@@ -28,8 +28,9 @@ The TypeScript SDK (`sdk/ts`) mirrors the Rust code that decides what bytes mean
 (`playground/src/abi/codec.ts`, used by the testnet points service too) mirrors the contract SDK's Borsh decoding. The
 library `ksana_fuzz::differential` (`src/differential/`) sends each request to the Rust implementation and, through the
 Node.js oracle `differential/oracle.mjs`, to the TypeScript one; each describes what it made of the input as JSON (refused,
-or the value in the D-007 JSON form with what is derived from it: hashes, signature verdicts, a transaction's carrier,
-payload and native op), and the two descriptions must be equal. The oracle loads the built SDK (`sdk/ts/dist`) and bundles
+or the value in the D-007 JSON form with what is derived from it: hashes, signature verdicts, whether a block's entries
+satisfy the rule on its aggregate (D-154), a transaction's carrier, payload and native op), and the two descriptions must
+be equal. The oracle loads the built SDK (`sdk/ts/dist`) and bundles
 the playground's codec and parser with the SDK's esbuild; at its start it checks that the playground's parser reads the
 test's ABI types (`src/differential/abi.rs`) as the test wrote them.
 

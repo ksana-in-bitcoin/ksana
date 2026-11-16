@@ -51,16 +51,16 @@ fn static_rules_follow_the_block_version() {
         versioned(&alice, 0, 2, part, bob.account),
         versioned(&alice, 1, 2, part, bob.account),
     ];
-    let err = check_entries_static(&p, &old, &big).unwrap_err();
+    let err = check_entries_static(&p, &old, &sealed(big.clone())).unwrap_err();
     assert!(err.contains("BLOCK_GAS_LIMIT"), "{err}");
-    assert_eq!(check_entries_static(&p, &new, &big), Ok(()));
+    assert_eq!(check_entries_static(&p, &new, &sealed(big.clone())), Ok(()));
     // VmOp version 3 is accepted only under the new rules, version 4 under neither
     let v3 = vec![versioned(&alice, 0, 3, 100_000, bob.account)];
-    let err = check_entries_static(&p, &old, &v3).unwrap_err();
+    let err = check_entries_static(&p, &old, &sealed(v3.clone())).unwrap_err();
     assert!(err.contains("unsupported VmOp version 3"), "{err}");
-    assert_eq!(check_entries_static(&p, &new, &v3), Ok(()));
+    assert_eq!(check_entries_static(&p, &new, &sealed(v3.clone())), Ok(()));
     let v4 = vec![versioned(&alice, 0, 4, 100_000, bob.account)];
-    assert!(check_entries_static(&p, &new, &v4).is_err());
+    assert!(check_entries_static(&p, &new, &sealed(v4.clone())).is_err());
 }
 
 #[test]

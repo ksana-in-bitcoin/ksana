@@ -16,9 +16,10 @@
 //! input; misuse returns [`SigError::FirstInputRequired`] or [`SigError::UnexpectedFirstInput`] and never silently
 //! yields a verifiable signature.
 
-use ksana_primitives::{FeeMode, OutPoint, SigScheme, VmOp};
+use ksana_primitives::{Entry, FeeMode, OutPoint, SigScheme, VmOp};
 
 use crate::bip322;
+use crate::halfagg::{aggregate, verify_aggregate, HalfSigned};
 use crate::schnorr::{account_of, schnorr_sign, schnorr_verify, tweaked_keypair, Keypair};
 use crate::tagged::tagged_hash;
 use crate::SigError;
@@ -95,7 +96,100 @@ fn verify(op: &VmOp, first_input: Option<&OutPoint>) -> Result<(), SigError> {
         SigScheme::Bip322Simple(sig) => {
             bip322::verify_for_account(&op.account, &bip322::vmop_message(&sighash), sig)
         }
+        // Half a signature proves nothing alone: it is checked in its block's aggregate (D-154)
+        SigScheme::HalfBip340(_) | SigScheme::HalfBip322(_) | SigScheme::HalfBip322All(_) => {
+            Err(SigError::InvalidSignature)
+        }
     }
+}
+
+/// What a block's aggregate checks of the path B op `op` (D-154): the account, the first half `r` of the signature
+/// (`op.sig` may be full or half), and the hash the signature signs: the op's signature hash for `Bip340`, and for
+/// `Bip322Simple` BIP341's signature hash of the BIP322 spend ([`bip322::account_sighash`]). A signature without a
+/// half form is [`SigError::InvalidSignature`]; a path C op is [`SigError::FirstInputRequired`].
+pub fn half_signed(op: &VmOp) -> Result<HalfSigned, SigError> {
+    let sighash = vmop_sighash(op)?;
+    let bip322 =
+        |hash_all| bip322::account_sighash(&op.account, &bip322::vmop_message(&sighash), hash_all);
+    let (r, msg) = match op.sig.half().ok_or(SigError::InvalidSignature)? {
+        SigScheme::HalfBip340(r) => (r, sighash),
+        SigScheme::HalfBip322(r) => (r, bip322(false)?),
+        SigScheme::HalfBip322All(r) => (r, bip322(true)?),
+        SigScheme::Bip340(_) | SigScheme::Bip322Simple(_) => {
+            return Err(SigError::InvalidSignature)
+        }
+    };
+    Ok(HalfSigned {
+        pubkey: op.account,
+        msg,
+        r,
+    })
+}
+
+/// The entries of a block from the entries a producer chose (D-154): each path B op with its signature in the half
+/// form, followed by the aggregate entry when there are path B entries; and the second halves of those signatures in
+/// order, which with the block's entries give the signed ops back ([`unseal_entries`]). The signatures are not
+/// verified here. `entries` must hold full signatures and no aggregate entry ([`SigError::InvalidSignature`]).
+pub fn seal_entries(entries: &[Entry]) -> Result<(Vec<Entry>, Vec<[u8; 32]>), SigError> {
+    let mut sealed = Vec::with_capacity(entries.len().saturating_add(1));
+    let mut items = Vec::new();
+    let mut seconds = Vec::new();
+    for entry in entries {
+        match entry {
+            Entry::Sponsored { op } => {
+                let (half, s) = op.split().ok_or(SigError::InvalidSignature)?;
+                items.push(half_signed(&half)?);
+                seconds.push(s);
+                sealed.push(Entry::Sponsored { op: half });
+            }
+            Entry::Aggregate { .. } => return Err(SigError::InvalidSignature),
+            Entry::Forced { .. } | Entry::Unlock { .. } => sealed.push(entry.clone()),
+        }
+    }
+    if !items.is_empty() {
+        sealed.push(Entry::Aggregate {
+            s: aggregate(&items, &seconds)?,
+        });
+    }
+    Ok((sealed, seconds))
+}
+
+/// The path B ops of a block's entries with their full signatures, from the second halves `seconds` a node holds
+/// beside the block (D-154): `None` when there is not one second half for each path B entry. The halves are not
+/// committed to by the block, so a signature made here is verified before it is relied on.
+pub fn unseal_entries(entries: &[Entry], seconds: &[[u8; 32]]) -> Option<Vec<VmOp>> {
+    let ops: Vec<&VmOp> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Sponsored { op } => Some(op),
+            _ => None,
+        })
+        .collect();
+    if ops.len() != seconds.len() {
+        return None;
+    }
+    ops.into_iter()
+        .zip(seconds)
+        .map(|(op, s)| op.join(s))
+        .collect()
+}
+
+/// Verify the aggregate `s` of the path B ops `ops` of one block, in order (D-154): every op carries half a
+/// signature, and `s` is the aggregate of signatures by the ops' accounts over what each signs ([`half_signed`]).
+pub fn verify_vmops_aggregate<'a>(
+    ops: impl IntoIterator<Item = &'a VmOp>,
+    s: &[u8; 32],
+) -> Result<(), SigError> {
+    let items = ops
+        .into_iter()
+        .map(|op| {
+            if !op.sig.is_half() {
+                return Err(SigError::InvalidSignature);
+            }
+            half_signed(op)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    verify_aggregate(&items, s)
 }
 
 /// BIP340-sign the path B op `op`, returning the value to be written into `op.sig`.
@@ -144,6 +238,10 @@ pub fn sign_native_vmop_bip322_p2tr(
 /// Path C ops return [`SigError::FirstInputRequired`]: they must be verified against the carrying transaction with
 /// [`verify_native_vmop`].
 pub fn verify_vmop(op: &VmOp) -> Result<(), SigError> {
+    // A block holds a path B op by half its signature (D-154): one without a half form cannot be included
+    if op.sig.split().is_none() {
+        return Err(SigError::InvalidSignature);
+    }
     verify(op, None)
 }
 

@@ -17,8 +17,16 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-16, the signatures of a block's path B ops are half-aggregated (M66, D-154)**: a consensus change after the freeze, decided by the project owner before mainnet; devnet
+  and the signet restart from genesis. Measured on the fifth stress run, 71% of the bytes the chain landed on BTC were 64-byte signatures. A block now holds each path B op by the
+  first half of its signature (32 bytes) and ends with one aggregate entry, 32 bytes that stand for all the second halves (BIP340 half-aggregation); the block is valid when that
+  aggregate verifies. Users and wallets sign as before, and ops are submitted, checked and relayed with whole signatures: only the producer aggregates. Every op's content, every
+  first half and the aggregate are on BTC and under `entries_root`, so anyone still recomputes and checks the whole chain from BTC data alone (§1); what is lost is checking one
+  op's signature apart from its block's body. `op_id` of a path B op is taken over the op with half its signature. Path C is unchanged. The scheme has security proofs and a draft
+  specification, not yet a BIP, and goes into the external audit's scope (§4.1, §4.4, §4.5, §6.1, §6.3, §7.1, §11.1). The fifth run's settlements, encoded again this way, take
+  30.7% fewer vB, and the floor of D-153 that follows the BTC fee rate asks for 128 vB per KiB where it asked for 256 (local policy, §8.2).
 - **2026-11-16, with the operator's KSA price the packing floor of path B follows the BTC fee rate (M65, D-153)**: local policy of the node, no consensus change; the third change
-  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's encoded bytes must pay the KSA worth 256 vB
+  D-150 named. A new option, `--ksa-price-sat`, tells the node what one KSA is worth to its operator in sat. With it, a KiB of a path B op's encoded bytes must pay the KSA worth 256 vB (128 since D-154)
   at the fee rate the node funds settlements at (an op's bytes land on BTC as a quarter of a vB each), whatever its `max_gas`; `--min-fee-per-kib`, which goes by the op's cost,
   applies beside it. The producer sets this floor again at each BTC block, ops below it wait in the pool, and `ksana_estimateFee` answers the rate in a new field,
   `path_b.per_kib_data`, that only such a node gives, and suggests an amount that meets it. The option has no default, since the protocol has no exchange rate and KSA no
@@ -335,6 +343,9 @@ pub struct Funds { pub asset: [u8; 32], pub amount: u128 }   // built-in asset a
 pub enum SigScheme {
     Bip340([u8; 64]),          // used by the SDK and CLI
     Bip322Simple(Vec<u8>),     // used by browser wallets (D-052)
+    HalfBip340([u8; 32]),      // variants 2 to 4: the first half (R) of a signature, only in a path B entry of a block (§4.5, D-154)
+    HalfBip322([u8; 32]),      //   of a BIP322 simple signature made with SIGHASH_DEFAULT
+    HalfBip322All([u8; 32]),   //   of a BIP322 simple signature made with SIGHASH_ALL
 }
 ```
 
@@ -367,6 +378,9 @@ pub enum SigScheme {
     its scriptSig is `OP_0 PUSH32[message_hash]`, and its only output has amount 0 and locking script `message_challenge`; `to_sign` has a single `OP_RETURN` output.
   - The official BIP322 test vectors are stored in `crates/ksana-crypto/tests/data/bip322/` (the TS SDK keeps another copy) and are checked one by one.
 
+- The three half variants are never a signature by themselves: an op carrying one fails these rules wherever a single op is checked (the entry pool, the RPC, P2P relay, path C).
+  They are checked only as part of a block (§4.5).
+
 ### 4.3 nonce and replay
 
 - Each account has one nonce, strictly increasing. The nonce of a path B entry must equal the account's nonce at execution time: when a main-chain block's own entry does not satisfy this, the block cannot land on BTC; when an entry of a merged
@@ -377,11 +391,37 @@ pub enum SigScheme {
 
 ### 4.4 Identifiers and limits
 
-- `op_id = sha256(full VmOp encoding, including sig)`, used for indexing and queries.
+- `op_id`, used for indexing and queries: for a path C op, `sha256(full VmOp encoding, including sig)`; for a path B op, the same hash over the encoding with `sig` in its half form
+  (§4.5, D-154), whichever form the op is held in. An op therefore has one ID from the moment it is signed: the client computes it from the whole signature, and the indexer from the
+  half that is on BTC. The first half of a signature fixes the second for a given account and message, so no op has two IDs. A `Bip322Simple` whose bytes have no half form (§4.5)
+  never verifies; its ID is the hash of its full encoding.
 - The encoded length of a single VmOp must not exceed `MAX_OP_BYTES` (section 13); anything longer is rejected outright; external input is checked against the length limit before decoding, and the input must be fully consumed.
 - The asset ID of the project token KSA is 32 zero bytes; the asset ID of an asset issued by a contract is `sha256(issuing contract ID ‖ sub_id)` (`docs/ABI.md` §6).
 - JSON representation of the types (RPC, shared vectors, D-007): byte strings are lowercase hex, `u64` / `u128` are decimal strings, `u8` / `u32` are numbers, enums are
   externally tagged, and unknown fields are rejected.
+
+### 4.5 Half-aggregated signatures in a block (D-154)
+
+A BIP340 signature is 64 bytes, `R ‖ s`. A block does not hold the signatures of its path B ops whole: it holds each op with `R` alone and one 32-byte scalar for all of them
+(BIP340 half-aggregation: Chalkias, Garillot, Kondi, Nikolaenko 2021; Chen, Zhao 2022; the draft specification `half-aggregation.mediawiki` of
+BlockstreamResearch/cross-input-aggregation, whose test vectors the implementation reproduces byte for byte). Users sign as §4.2 says; only the producer of a block aggregates.
+
+- **Half form** of a path B op: the same op with `sig` replaced. `Bip340(R ‖ s)` → `HalfBip340(R)`. `Bip322Simple(bytes)` has a half form only when `bytes` are exactly
+  `01 40 ‖ R ‖ s` (one 64-byte witness item, `SIGHASH_DEFAULT`) → `HalfBip322(R)`, or exactly `01 41 ‖ R ‖ s ‖ 01` (one 65-byte item, `SIGHASH_ALL`) → `HalfBip322All(R)`; these
+  are the only bytes §4.2 accepts. The whole signature is restored from the half form and `s` by the reverse.
+- **The item of an op** in the aggregate is `(pk, m, R)`: `pk = account`; `m` is the 32-byte message the signature of §4.2 is over, that is `sighash` for `HalfBip340`, and for the
+  two BIP322 forms the BIP341 key-path sighash of BIP322's `to_sign` for that account and message, with `SIGHASH_DEFAULT` or `SIGHASH_ALL` respectively.
+- **Aggregate** (the producer): for the path B entries of the block in their order, items `(pk_i, m_i, R_i)` and second halves `s_i`, `i = 0 … u−1`:
+  `z_0 = 1`, `z_i = int(tagged_hash("HalfAgg/randomizer", R_0 ‖ pk_0 ‖ m_0 ‖ … ‖ R_i ‖ pk_i ‖ m_i)) mod n` for `i ≥ 1`, and `s = Σ z_i · s_i mod n`, written as 32 bytes big-endian.
+- **Verify** (every node and the indexer): `s < n`, every `pk_i` and `R_i` is the x coordinate of a curve point (lifted with even y as in BIP340), and
+  `s·G = Σ z_i·R_i + Σ z_i·e_i·P_i` with `e_i = int(tagged_hash("BIP0340/challenge", R_i ‖ pk_i ‖ m_i)) mod n`. At most 2^16 − 1 items (far more than a block holds).
+- **The rule of a block** (§6.3): every path B entry carries its op in half form; a block with at least one path B entry has exactly one `Aggregate { s }` entry, as its last entry,
+  and a block without path B entries has none; the aggregate verifies over the path B entries in their order.
+- **The aggregate is the rule, for every node.** An aggregate can verify although one of the signatures it stands for would not verify alone (the draft specification says so), so
+  a node that also holds the second halves (§6.1, §11.1) must still decide by the aggregate and never by checking the restored signatures one by one: it would otherwise judge a
+  block differently from the indexer, which sees only what is on BTC. Forging an aggregate without the accounts' keys is what the scheme's security proof excludes.
+- An op's signature in a block can be checked only together with the block's whole body, not alone. Nothing in the protocol needs the latter: a single op is checked alone before
+  it is in a block, with its whole signature.
 
 ## 5. The two submission paths
 
@@ -467,6 +507,7 @@ pub struct Block {
     pub header: BlockHeader,
     pub entries: Vec<Entry>,
     pub settlement: Option<SettlementTxs>,   // the settlement transactions carried by the block (may be absent, §7.2, §7.5)
+    pub second_halves: Vec<[u8; 32]>,        // the second halves of the path B signatures, in the entries' order; beside the block, not part of it (below, D-154)
 }
 
 pub struct SettlementTxs { pub commit: Vec<u8>, pub reveal: Vec<u8> }   // Bitcoin network serialization (D-081)
@@ -475,13 +516,20 @@ pub enum Entry {
     Forced { btc_txid: [u8; 32], op: VmOp },   // path C (variant 0)
     Sponsored { op: VmOp },                     // path B (variant 1)
     Unlock { height: u64, index: u32 },         // cumulative unlock up to and including this acceptance position, see §8.5 (variant 2)
+    Aggregate { s: [u8; 32] },                  // the aggregate of the second halves of the block's path B signatures, §4.5 (variant 3)
 }
 ```
 
 - The block hash is `sha256d(borsh(header))` (the header is 168 + 32 × parent-count bytes). The header does not reference the settlement transactions, because they are constructed only after the PoW is solved,
   and they in turn contain the header.
 - `entries_root` (D-004): the RFC 6962 Merkle tree hash with SHA-256: `MTH({}) = sha256("")`, leaves `sha256(0x00 ‖ borsh(Entry))`, internal nodes
-  `sha256(0x01 ‖ left ‖ right)`, and for n > 1, k is the largest power of 2 less than n. The root of the empty entry list, `sha256("")`, identifies an empty block.
+  `sha256(0x01 ‖ left ‖ right)`, and for n > 1, k is the largest power of 2 less than n. The root of the empty entry list, `sha256("")`, identifies an empty block. The entries
+  are those of the block as it is: path B ops in half form, and the aggregate entry a leaf like any other (D-154). Were the aggregate not under the root, anyone could land on BTC
+  a body with every op right and a wrong aggregate and make a valid block look invalid; under it, a wrong aggregate is a wrong copy (§6.3).
+- `second_halves` (D-154) are like `settlement` no part of what the header commits to, and no rule of validity reads them. A producer gives them with its block, one per path B
+  entry, and a node keeps them only to restore the whole signatures when the block leaves the main chain and its ops return to the entry pool (§9.6), where each is checked alone
+  as any op is. They are not on BTC: a block rebuilt from BTC has none, and ops of such a block that leave the main chain are submitted again by their senders. A list that does
+  not restore valid signatures is as good as none.
 - **Genesis block** (D-027): `version = 2`, height 0, empty `parents`, `btc_anchor` from the network config, no entries, `state_root` the root of the genesis state (genesis allocation),
   `producer` all 0, timestamp from the network config, `bits` defaulting to `pow_limit_bits` (configurable to be harder; it is the ASERT anchor target), `nonce = 0`; the genesis block's
   PoW is not checked. Genesis config file (`--genesis`, the same for node and indexer):
@@ -539,8 +587,10 @@ Header rules (depend only on the header and the DAG; a violation makes the block
 Body rules (depend on the entries and on the BTC data of the anchor chain):
 
 - The Merkle root of the entries equals `entries_root`. A mismatch only means this copy is wrong and does not mark the block hash invalid (the block hash does not cover the entries or the settlement transactions, D-041).
-- State-independent entry rules (by the rules at the block's own DAA score, §6.9; block invalid): the entry order is forced → unlock → path B; at most one unlock entry per block;
-  total gas (§8.3); for path B entries, the VmOp version, the chain ID, an encoded length not exceeding `MAX_OP_BYTES`, fee mode `Token`, and a valid signature.
+- State-independent entry rules (by the rules at the block's own DAA score, §6.9; block invalid): the entry order is forced → unlock → path B → aggregate; at most one unlock entry
+  per block; total gas (§8.3); for path B entries, the VmOp version, the chain ID, an encoded length not exceeding `MAX_OP_BYTES`, fee mode `Token`, and a signature in half form;
+  exactly one aggregate entry, the last, when there is a path B entry and none otherwise, and the aggregate verifies over the path B entries (§4.5, D-154). A path B entry with a
+  whole signature makes the block invalid like any other breach.
 - The body fits in a payload (D-100; block invalid): when the block needs a body (it has entries other than forced inclusions, §6.4), a republish payload (§7.1) carrying only its header and its entries, with a 32-byte payee
   and every key of the entries written in full (none taken from the payload's key dictionary), is no longer than `MAX_BLOCK_DATA_BYTES`. That is the bound every node measures a body by when it lands someone else's (§7.5,
   §7.6), so anyone can land its data on BTC. A block with only forced-inclusion entries needs no body and is not bound by it (§7.4).
@@ -878,8 +928,9 @@ pub struct Body { pub header: u32, pub entries: Vec<EntryData> }   // header is 
 
 pub enum EntryData {                   // the payload form of Entry; variant indices are the same as Entry's
     Forced { btc_txid: [u8; 32] },
-    Sponsored { op: VmOp },
+    Sponsored { op: VmOp },            // with half its signature, as in the block (§4.5)
     Unlock { height: u64, index: u32 },
+    Aggregate { s: [u8; 32] },
 }
 ```
 
@@ -912,22 +963,24 @@ preloaded with KSA's asset ID (the 1st):
 
 | Element | Encoding |
 | --- | --- |
-| Entry | `u8` variant (0 forced, 1 path B, 2 unlock), followed by that variant's fields |
+| Entry | `u8` variant (0 forced, 1 path B, 2 unlock, 3 aggregate), followed by that variant's fields |
 | Forced | 32-byte BTC transaction ID |
 | Unlock | varint height, varint acceptance index |
+| Aggregate | 32 bytes |
 | Path B | VmOp: `version: u8`, key `account`, varint `nonce`, fee, varint `max_gas`, action, signature; `chain_id` is not written and is taken from the network parameters when decoding |
 | Fee | `u8` variant: 0 `Token` followed by a varint amount; 1 `BtcNative` |
 | Action | `u8` variant: 0 `Deploy` (byte string `code`, byte string `init_args`, asset list); 1 `Call` (key `contract`, string `method`, byte string `args`, asset list); 2 `AssetTransfer` (key `asset`, key `to`, varint `amount`) |
 | Asset list | varint count, each item a key `asset` and a varint `amount` |
-| Signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string |
+| Signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string; 2 `HalfBip340`, 3 `HalfBip322`, 4 `HalfBip322All`, each followed by 32 bytes (§4.5) |
 | Key | varint `r`: `r ≥ 1` is the `r`-th key in the dictionary; `r = 0` is followed by 32 bytes, which are appended to the end of the dictionary |
 | Byte string, string | varint length and the content; a string must be valid UTF-8 |
 | Entry list | varint count and the entries |
 | Body list | varint count, each body a varint header index and an entry list |
 
 All integers are LEB128 varints (unsigned, minimal encoding, not exceeding the field's type; `u128` at most 19 bytes). The encoding is canonical: a key already in the dictionary must be referenced, a reference may not be out of range,
-and varints must be minimal, otherwise decoding fails. When encoding, a VmOp whose chain ID differs from the network's is an error. A path B KSA transfer (BIP340 signature) is about 143 bytes when both keys occur for the first time,
-about 79 bytes when both are already in the dictionary (Borsh is 217 bytes); a forced-inclusion entry is 33 bytes.
+and varints must be minimal, otherwise decoding fails. When encoding, a VmOp whose chain ID differs from the network's is an error. A path B KSA transfer (half a BIP340 signature, as a valid body holds it) is about 111 bytes when both keys occur for the first time,
+about 47 bytes when both are already in the dictionary (Borsh is 185 bytes; 32 more each with a whole signature); a forced-inclusion entry and an aggregate entry are 33 bytes each.
+The decoder reads any of the five signature forms and an aggregate entry anywhere: whether a body is one a block may have is §6.3's rule, not the encoding's.
 
 **Canonical form of bodies** (D-077, checked when decoding): `header` strictly increasing and less than the header count, and in `Settlement` it may not point at the last header (this block's entries are in
 `entries`); each body has at least one entry that is not `Forced`. The whole payload does not exceed `MAX_BLOCK_DATA_BYTES`, with at most `MAX_SETTLEMENT_HEADERS` headers (checked on the count before any header is decoded, D-100; a payload with
@@ -1161,9 +1214,9 @@ Path B is priced in KSA; path C pays only the transaction fee to BTC miners. The
   decides whether an op enters the entry pool and is forwarded: an op that reaches the relay floor but not the packing floor enters the pool and is forwarded, to be packed by another producer. The protocol provides no on-chain reference exchange rate; the price risk between the token and BTC is borne by the producer
   itself.
 - The packing floor can follow the BTC fee rate (D-153): a producer that settles and is given what one KSA is worth to its operator in sat (`--ksa-price-sat`, a decimal number above
-  0; no default) packs an op only when it also pays, per KiB of its encoded bytes, the KSA worth 256 vB at the fee rate the producer funds an ordinary settlement at now (§7.7; not the cap paid in
-  a race): `rate × 256 × 10^8 / price` base units per KiB, rounded up. This floor goes by the op's bytes, whatever its `max_gas`, since gas takes no room on BTC; the minimum amount
-  and the minimum fee rate per KiB of cost apply beside it. 256 vB per KiB is the op's data as witness bytes; the pair's own bytes, the headers and the compression are not counted. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
+  0; no default) packs an op only when it also pays, per KiB of its encoded bytes, the KSA worth 128 vB at the fee rate the producer funds an ordinary settlement at now (§7.7; not the cap paid in
+  a race): `rate × 128 × 10^8 / price` base units per KiB, rounded up. This floor goes by the op's bytes, whatever its `max_gas`, since gas takes no room on BTC; the minimum amount
+  and the minimum fee rate per KiB of cost apply beside it. 128 vB per KiB (D-154; 256 before half signatures) is the op's data as witness bytes at less than half its encoded size: measured, the fifth stress run's ops took 78 vB per KiB with the pairs' own bytes and the headers, and transfers that share no account 125 to 131 for their data alone; with few ops in a settlement the pair's own bytes make it more. The producer sets the floor at each new BTC tip and every 30 seconds in between. Ops in the pool that the floor leaves out stay and are
   candidates again when it falls; the relay floor does not move. The price is the operator's own figure and binds nobody else: other producers pack by their own floors.
 - Entry pool (`ksana-mempool`): admission first does stateless checks (version, chain ID, encoded length, fee mode, signature), then checks against the current state (nonce not below the account nonce; KSA
   balance sufficient to pay the sponsored fees of all queued ops of this account), then policy (relay floor, pool capacity default 10 000, at most 64 queued ops per account, a replacement must raise the sponsored fee by at least a tenth and by at least the relay floor, D-130).
@@ -1373,11 +1426,15 @@ the other blocks are executed within the chain block that merges them. In lenien
 - forced-inclusion entries execute as in strict mode: an entry naming no native transaction of C's anchor chain (at heights up to C's anchor) that carries its op makes C invalid (§7.4, D-100), so executing C again in
   anchor-invalid mode finds the transactions its first execution found;
 - entry order and the gas limit are the merged block's own validity rules (§6.3) and are not checked again here;
-- when C is at the settlement backlog limit, the merged blocks' path B entries are all skipped.
+- when C is at the settlement backlog limit, the merged blocks' path B entries are all skipped;
+- the signatures of a merged block's path B entries were checked as that block's aggregate when the block was accepted (§6.3) and are not checked again here.
+
+An aggregate entry (§4.5) changes no state in either mode: it uses no gas and its receipt is an empty success without an op ID.
 
 Outcomes fall into three classes: **failed op** (receipt `Failed`, the block stays valid), **invalid / disqualified block** (determined only by the block's content, the parent state, the BTC data at the anchor and the block context the DAG
 gives deterministically), **local fault** (storage, VM engine or BTC data source failure: abort processing, never judge the block invalid; a block executed again in anchor-invalid mode is never judged invalid or
-disqualified by its execution either, §6.8). `Skipped` is not a final status: an op that is still valid returns to the entry pool and may be included again later.
+disqualified by its execution either, §6.8). `Skipped` is not a final status: an op that is still valid returns to the entry pool and may be included again later. So do the ops of a block that leaves the main chain. The pool
+holds whole signatures, so a path B op returns only on a node that holds the second halves of its block (§6.1, D-154); elsewhere its sender submits it again.
 
 ## 10. State storage and the standalone indexer
 
@@ -1554,6 +1611,10 @@ D-059, D-063).
   checks against the BTC view and the settlement transactions come before the signature checks. A block missing a parent refused for itself, not because the local BTC view lags, is refused with it,
   for as long as the parent's refusal is remembered, instead of being kept as an orphan, whose missing parent would be fetched and checked again at every sync for as long as the BTC chain stands;
   remembering such a refusal drops the orphans waiting for the block, and those waiting for them, which come back with it in a later sync (local policy, D-104).
+- The second halves beside a block (§6.1, D-154) travel with it by gossip and by sync, as the node holds them: the producer's, or none for a block rebuilt from BTC. A block whose
+  list is neither empty nor one per path B entry is refused as a malformed message (Reject) without the block being judged, so the same block is accepted with a right list or
+  without one. The node keeps the list of the first copy it accepts and does not check it then: a list of the right length that restores no valid signatures only means the block's
+  ops do not return to this node's entry pool (§9.6).
 - Limits (local policy, D-040, D-132): gossip blocks 16 MiB, gossip ops `MAX_OP_BYTES` (a longer one cannot be valid, §4: it is rejected before it is decoded and penalized); sync requests
   64 KiB, sync responses 32 MiB, those to `Status` 64 KiB and to `GetMempool` 4 MiB (the server sends the leading ops that fit; a client refuses a response longer than its request's limit
   unread, without a penalty while it is within 32 MiB); the length is checked before decoding and full consumption is required. A `GetBlocks` server loads only the leading blocks that fit.
@@ -1617,6 +1678,9 @@ Indexer (`ksana-indexer --rpc-addr`, default `127.0.0.1:8546`): `indexer_status`
 - Hashes (tagged hash, sighash, `op_id`, block hash, `entries_root`), accounts (`accountOf` is the BIP86 output key; BIP340 signing uses the tweaked private key),
   BIP322 messages and local signing (the account's Taproot address), local self-check; conversion between accounts and addresses (`accountToAddress` / `accountFromAddress` / `parseAccount`,
   D-092); path C signing, signature verification and the wallet signing flow all carry `firstInput` (§4.2).
+- Half-aggregated signatures (§4.5, D-154): the five signature forms and the aggregate entry in the codec, the JSON and the compact entries; `splitVmOp` / `joinVmOp` between an op with its whole
+  signature and with half of it; `opId` of a path B op is the same in both forms; `sealEntries` / `unsealEntries`, `aggregate` / `verifyAggregate` and `verifyEntriesAggregate` (the rule on a block's
+  path B signatures) as a local check of what a node answers. A signed op is submitted with its whole signature, as before.
 - Path B: sign and call `ksana_submitOp` directly. Path C: the KSN1 data script and the native transaction (unsigned PSBT, may carry payment outputs; weight limit 400 000 WU); the op is signed with
   `nativeFirstInput(utxos[0])`, and `buildNativeTx` rejects an op not bound to the first UTXO, so the wallet's BIP322 signing request must be issued after coin selection.
 - Top-up (§5.3): reading and parsing the exchange contract's locks, `lockArgs` / `claimArgs`, `quoteTopUp`, `buildTopUp` (a claim op signed with a one-time key and bound to `utxos[0]`
@@ -1655,7 +1719,7 @@ ksana/
 ├── clippy.toml               # bans HashMap / HashSet / SystemTime::now / Instant::now
 ├── crates/
 │   ├── ksana-primitives/     # consensus types, Borsh codec (length limit checked first), hashes, compact headers and entries, bodies, protocol parameters and upgrade schedule
-│   ├── ksana-crypto/         # BIP340 tagged hash, Schnorr, VmOp signatures (BIP340 and BIP322 simple; path C binds the first input), Merkle utilities
+│   ├── ksana-crypto/         # BIP340 tagged hash, Schnorr, VmOp signatures (BIP340 and BIP322 simple; path C binds the first input), the half-aggregation of a block's path B signatures, Merkle utilities
 │   ├── ksana-state/          # JMT (jmt 0.12) + RocksDB: version = height, commit / rollback / prune / pinned-version read view
 │   ├── ksana-vm/             # wasmtime 49 engine config, static checks at deploy time, runtime stack metering instrumentation, host functions and gas table
 │   ├── ksana-execution/      # block execution (shared by node and indexer): merge execution, entry rules, sponsored fees and unlocking, rewards, built-in Account / Asset, genesis
@@ -1898,7 +1962,11 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
   (M28, D-101, D-102; A2-09's pinning residual in M48, D-131), and so is D-101's known limitation (M29, D-104); the second audit's A2-08, entry-pool churn, is fixed as local policy (M47, D-130), and so are the first audit's F-28 and F-29, the limits of the P2P layer and the RPC servers (M49, D-132); an external audit follows. Withholding a heavy empty block (§16) is narrowed by `GHOSTDAG_K` 16; what remains on an idle chain is in §16 and §17.4.
 - Update the web explorer's parameter table and settlement page per D-095.
 
-Research items (after mainnet, §17.3): inclusion lists, a settlement funding pool, signature half-aggregation and a global dictionary by account index, forced-inclusion entries carrying the VmOp,
+- Half-aggregated signatures (M66, D-154): the verification is measured on x86_64 only, where a block's aggregate takes about twice the time of checking its signatures one by one
+  (60 against 29 µs per signature, over libsecp256k1's public interface); measure on aarch64, and decide whether a faster sum is worth its code. The scheme is not yet a BIP: it
+  goes into the external audit's scope (§16). The 128 vB per KiB of the floor that follows the BTC fee rate (D-153, D-154) is set from the fifth run's bytes encoded again, not from a load run with half signatures: measure it on one.
+
+Research items (after mainnet, §17.3): inclusion lists, a settlement funding pool, a global dictionary by account index, forced-inclusion entries carrying the VmOp,
 syncing new nodes from a state snapshot at the pruning point, Kademlia node discovery, interoperability with Ethereum. Do not start implementing these items before they are settled.
 
 ## 15. Test plan
@@ -2077,7 +2145,7 @@ by the measured GPU advantage (the retuning path of D-094, a work item before ma
 | Carrier reward ratios and wait | 500 / 5 000 / 2 (D-095) | The two ratios are retuned via the upgrade schedule after observation on signet; if the fixed part tempts producers to attach their own settlement to every block, switch to counting by bytes (D-095 "to be observed"); `CARRIER_REPOST_DELAY` is fixed per network; observed on the signet (D-149): no producer did, and the fixed part does not pay for it |
 | Sell-pressure hedging for the token | No fee burning, no token-holding threshold for producers (contracts can burn their own assets) | To be decided from fee-market data once mainnet is running |
 | Inclusion lists | None; producers choose entries freely | If producers become highly concentrated and censorship appears, wire in inclusion lists similar to Ethereum's FOCIL via the upgrade schedule |
-| Further compression | None | Signature half-aggregation, a global dictionary by account index (the latter makes decoding depend on state): to be re-evaluated when BTC fees become the main cost |
+| Further compression | Signatures are half-aggregated (§4.5, D-154); nothing more | A global dictionary by account index makes decoding depend on state: to be re-evaluated with mainnet's traffic. Measured on the fifth run it saved about 10% (49 accounts) |
 | Interoperability with Ethereum | Not in this phase | Integration approach and trust model for a later phase |
 | Syncing new nodes from a state snapshot at the pruning point | New nodes sync from the genesis block, served from the block stores of pruned peers (D-097) | Kaspa-style snapshot sync needs a commitment and proof format for the state and a new sync protocol; worth it once syncing from genesis takes too long |
 | Items 5 to 9 of the implementation limit cleanup (D-084 reward slots overlapping with merged blocks, D-085 exchange details, D-086 path C restrictions, the entry environment of merged blocks, stopping when a finalized block is invalid) | Keep as is | Accepted together with the project owner's sign-off. Since D-101 an invalid block is never decided final, so stopping remains only for a non-determinism bug |

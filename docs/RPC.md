@@ -141,6 +141,10 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
   `funds` (D-073): attached funds `[{ "asset", "amount" }]` (`amount` is a decimal string), simulated as a transfer from `caller` to the contract, empty by default;
   the receipt is a failure when the balance of `caller` is insufficient.
 - Receipt: `{ "op_id", "success", "error", "gas_used", "output", "events": [{ "contract", "data" }], "asset_changes" }`; on failure `gas_used` is `max_gas`.
+- Signatures in a block (D-154, SPEC §4.5): `ksana_submitOp` takes an op with its whole signature, and answers the op ID, which for a path B op is the hash of the op with half its
+  signature. A block's `entries` hold each path B op with that half (`"sig": { "HalfBip340": "<64 hex chars>" }`, `HalfBip322`, `HalfBip322All`) and end with one entry
+  `{ "Aggregate": { "s": "<64 hex chars>" } }` when the block has a path B op; the aggregate entry has a receipt like every entry, a success without an `op_id`. An op with half a
+  signature is refused by `ksana_submitOp` (`-32010`, an invalid signature).
   - `asset_changes` (D-122): the changes the op made to built-in assets, in the order it made them, each with its `kind`, the `asset` and `events`, the number of the op's events
     recorded before it (a JSON number), so that the two lists interleave as the op made them. The kinds, with their other fields (accounts in hex, amounts as decimal strings):
     - `transfer` (`from`, `to`, `amount`): the `AssetTransfer` action, from its signer;
@@ -185,7 +189,7 @@ batches its calls keeps to 64 of them and sends a batch refused this way again i
     amount). It is the median, over the last 20 main-chain blocks, of each block's lowest path B entry fee rate (the larger middle value for an even count; blocks without path B entries
     are not counted), not below this node's `--min-fee-per-kib`.
   - `path_b.per_kib_data` (D-153; only in the answer of a node run with `--ksa-price-sat`, absent otherwise): the token amount per KiB of the op's encoded bytes, whatever its
-    `max_gas`, that this node's producer asks for carrying the bytes to BTC: the KSA worth 256 vB at `feerate_sat_vb` and the operator's price (`feerate_sat_vb × 256 × 10^8 / price`
+    `max_gas`, that this node's producer asks for carrying the bytes to BTC: the KSA worth 128 vB at `feerate_sat_vb` and the operator's price (`feerate_sat_vb × 128 × 10^8 / price`
     base units, rounded up), or the floor the producer set at most 30 seconds ago when that is higher. A client that finds it absent takes it as 0.
   - `path_b.amount`: the suggested amount for an ordinary transfer (a KSA transfer, BIP340 signature, `max_gas` 10 000): the larger of its cost at `per_kib` and its encoded bytes
     at `per_kib_data` (each rounded up), not below this node's `--min-token-fee`. Any other op is estimated the same way from its own cost and bytes, not below `amount` (`pathBFee`

@@ -93,6 +93,9 @@ const ActionDef = enumType<Action>([
 const SigSchemeDef = enumType<SigScheme>([
   tupleVariant('Bip340', 'bytes', fixedBytes(64)),
   tupleVariant('Bip322Simple', 'bytes', vecU8),
+  tupleVariant('HalfBip340', 'bytes', bytes32),
+  tupleVariant('HalfBip322', 'bytes', bytes32),
+  tupleVariant('HalfBip322All', 'bytes', bytes32),
 ]);
 
 const unsignedVmOpFields = [
@@ -138,6 +141,7 @@ const EntryDef = enumType<Entry>([
     ['height', u64],
     ['index', u32],
   ]),
+  structVariant('Aggregate', [['s', bytes32]]),
 ]);
 
 const EntryDataDef = enumType<EntryData>([
@@ -147,6 +151,7 @@ const EntryDataDef = enumType<EntryData>([
     ['height', u64],
     ['index', u32],
   ]),
+  structVariant('Aggregate', [['s', bytes32]]),
 ]);
 
 const SettlementTxsDef = struct<SettlementTxs>([
@@ -154,11 +159,30 @@ const SettlementTxsDef = struct<SettlementTxs>([
   ['reveal', vecU8],
 ]);
 
-const BlockDef = struct<Block>([
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const BlockFieldsDef = struct<Block>([
   ['header', BlockHeaderDef],
   ['entries', vec(EntryDef)],
   ['settlement', option(SettlementTxsDef)],
+  ['second_halves', vec(bytes32)],
 ]);
+
+/** A block: in JSON `second_halves` is left out when empty, as the node writes it (D-154). */
+const BlockDef: TypeDef<Block> = {
+  ...BlockFieldsDef,
+  toJson: (value, path) => {
+    const json = BlockFieldsDef.toJson(value, path);
+    if (isRecord(json) && Array.isArray(json.second_halves) && json.second_halves.length === 0) {
+      const { second_halves: _, ...rest } = json;
+      return rest;
+    }
+    return json;
+  },
+  fromJson: (json, path) =>
+    BlockFieldsDef.fromJson(isRecord(json) && !Object.hasOwn(json, 'second_halves') ? { ...json, second_halves: [] } : json, path),
+};
 
 const BodyDef = struct<Body>([
   ['header', u32],

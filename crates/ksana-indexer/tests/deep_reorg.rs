@@ -512,8 +512,10 @@ fn in_mempool(mock: &ksana_btc::mock::MockBtc, txid: &[u8; 32]) -> bool {
 
 /// Whether the block includes `op` (path B or forced).
 fn includes(block: &Block, op: &VmOp) -> bool {
+    // By its ID: a block holds a path B op by half its signature (D-154)
     block.entries.iter().any(|entry| {
-        matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. } if included == op)
+        matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. }
+            if included.op_id().unwrap() == op.op_id().unwrap())
     })
 }
 
@@ -614,7 +616,8 @@ fn a_retreat_into_a_full_entry_pool() {
     for nonce in 0..6 {
         a.submit(transfer(&alice, nonce, token(3), bob.account, 1));
         if nonce % 2 == 1 {
-            assert_eq!(a.mine().entries.len(), 2);
+            // the two ops and the block's aggregate entry (D-154)
+            assert_eq!(a.mine().entries.len(), 3);
         }
     }
     assert_eq!(ksa(&a, &bob), 6);
@@ -637,7 +640,8 @@ fn a_retreat_into_a_full_entry_pool() {
         .iter()
         .all(|op| op.account == alice.account && op.nonce < 4));
     let block = a.mine();
-    assert_eq!(block.entries.len(), cap);
+    // and the block's aggregate entry (D-154)
+    assert_eq!(block.entries.len(), cap + 1);
     assert!(kept.iter().all(|op| includes(&block, op)));
     assert_eq!(ksa(&a, &bob), 4);
     assert!(a.mempool.lock().unwrap().is_empty());
@@ -954,7 +958,8 @@ fn a_path_c_op_included_again_can_fail_out_of_turn() {
     let w = a.mine();
     let at = |op: &VmOp| {
         w.entries.iter().position(|entry| {
-            matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. } if included == op)
+            matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. }
+                if included.op_id().unwrap() == op.op_id().unwrap())
         })
     };
     let (forced, sponsored) = (at(&path_c).unwrap(), at(&path_b).unwrap());
@@ -1217,7 +1222,8 @@ fn mainnet_depths() -> Params {
 /// Where `op` is among the entries of the side's main-chain block `block`, and its outcome there.
 fn outcome_of(side: &Side, block: &Block, op: &VmOp) -> Option<(usize, OpStatus)> {
     let index = block.entries.iter().position(|entry| {
-        matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. } if included == op)
+        matches!(entry, Entry::Sponsored { op: included } | Entry::Forced { op: included, .. }
+                if included.op_id().unwrap() == op.op_id().unwrap())
     })?;
     let receipts = side
         .chain

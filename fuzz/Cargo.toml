@@ -30,6 +30,8 @@ ksana-primitives = { path = "../crates/ksana-primitives" }
 ksana-crypto = { path = "../crates/ksana-crypto" }
 ksana-btc = { path = "../crates/ksana-btc" }
 ksana-vm = { path = "../crates/ksana-vm" }
+# The rule on a block's aggregate entry, compared with the SDK's halfagg.ts (D-154)
+ksana-execution = { path = "../crates/ksana-execution" }
 # The PoW targets and Argon2id, compared with the SDK's pow.ts (D-133)
 ksana-consensus = { path = "../crates/ksana-consensus" }
 # The token standards' events (KS-20, KS-721) and the Borsh decoding contracts use, compared with the SDK's standards.ts

@@ -109,6 +109,7 @@ function borsh(req) {
   if (req.type === 'Block') {
     out.hash = hex(sdk.blockHash(value.header));
     out.entries_root = hex(sdk.entriesRoot(value.entries));
+    out.aggregate = sdk.verifyEntriesAggregate(value.entries);
   }
   return out;
 }

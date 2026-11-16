@@ -298,10 +298,9 @@ fn exceeding_the_merge_limit_abandons_the_lighter_side() {
     // the op
     let next = b.mine();
     assert_eq!(next.header.parents, vec![a_blocks[5].header.hash()]);
-    assert!(next
-        .entries
-        .iter()
-        .any(|e| matches!(e, Entry::Sponsored { op: o } if *o == op)));
+    assert!(next.entries.iter().any(
+        |e| matches!(e, Entry::Sponsored { op: o } if o.op_id().unwrap() == op.op_id().unwrap())
+    ));
     for block in b_blocks.iter().chain([&next]) {
         a.accept(block).unwrap();
     }

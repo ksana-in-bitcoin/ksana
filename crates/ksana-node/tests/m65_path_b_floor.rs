@@ -1,5 +1,5 @@
 //! The packing floor of path B follows the BTC fee rate at the operator's KSA price (D-153, local policy): with
-//! `--ksa-price-sat` a KiB of an op's encoded bytes must pay the KSA worth the 256 vB it takes on BTC at the rate this
+//! `--ksa-price-sat` a KiB of an op's encoded bytes must pay the KSA worth the 128 vB it takes on BTC at the rate this
 //! node funds settlements at, whatever the op's `max_gas`; the producer sets the floor at each new BTC tip, ops below
 //! it wait in the pool, and `ksana_estimateFee` gives the rate and suggests an amount that meets it. Without a price
 //! nothing changes, and the answer of `ksana_estimateFee` has the fields it had.
@@ -51,13 +51,13 @@ fn a_ksa_price_is_a_positive_decimal_number() {
 }
 
 #[test]
-fn the_floor_is_the_ksa_worth_256_vb_per_kib() {
+fn the_floor_is_the_ksa_worth_128_vb_per_kib() {
     let fees = FeePolicy::new(2);
     assert_eq!(fees.path_b_floor(50), None, "no price, no floor");
     let fees = fees.with_ksa_price("1000".parse().unwrap());
-    assert_eq!(PATH_B_VB_PER_KIB, 256);
-    assert_eq!(fees.path_b_floor(2), Some(51_200_000));
-    assert_eq!(fees.path_b_floor(1_000), Some(25_600_000_000));
+    assert_eq!(PATH_B_VB_PER_KIB, 128);
+    assert_eq!(fees.path_b_floor(2), Some(25_600_000));
+    assert_eq!(fees.path_b_floor(1_000), Some(12_800_000_000));
     assert_eq!(fees.path_b_floor(0), Some(0));
 }
 
@@ -79,13 +79,13 @@ fn the_producer_packs_path_b_from_the_btc_fee_rate_on() {
     let transfer =
         |nonce: u64, amount: u128| signed(&alice, nonce, FeeMode::Token { amount }, bob.account, 1);
 
-    // No estimate from bitcoind: the node pays its floor of 2 sat/vB, so a KiB must pay 512 sat, 51 200 000 base
+    // No estimate from bitcoind: the node pays its floor of 2 sat/vB, so a KiB must pay 256 sat, 25 600 000 base
     // units at 1 000 sat a KSA
     let low = estimate();
     assert_eq!(low.feerate_sat_vb, 2);
     assert_eq!(
         (low.path_b.per_kib, low.path_b.per_kib_data),
-        (0, 51_200_000)
+        (0, 25_600_000)
     );
     assert!(low.path_b.amount > 1);
     // The suggested amount is packed, one base unit less is not
@@ -117,7 +117,7 @@ fn the_producer_packs_path_b_from_the_btc_fee_rate_on() {
     n.mock.set_fee_estimate(DEFAULT_FEE_TARGET, Some(10));
     let high = estimate();
     assert_eq!(high.feerate_sat_vb, 10);
-    assert_eq!(high.path_b.per_kib_data, 256_000_000);
+    assert_eq!(high.path_b.per_kib_data, 128_000_000);
     assert!(high.path_b.amount > low.path_b.amount * 4);
     n.mock.mine(1);
     common::mock_node::wait("the node to see the BTC block", || {
@@ -139,10 +139,10 @@ fn the_producer_packs_path_b_from_the_btc_fee_rate_on() {
     // waited is packed after the next BTC block
     n.mock.set_fee_estimate(DEFAULT_FEE_TARGET, None);
     let e = estimate();
-    assert_eq!((e.feerate_sat_vb, e.path_b.per_kib_data), (2, 256_000_000));
+    assert_eq!((e.feerate_sat_vb, e.path_b.per_kib_data), (2, 128_000_000));
     n.mock.mine(1);
     assert_eq!(n.wait_included(&waiting).status, OpState::FastConfirmed);
-    assert_eq!(estimate().path_b.per_kib_data, 51_200_000);
+    assert_eq!(estimate().path_b.per_kib_data, 25_600_000);
     assert_eq!(status(&cheap), OpState::Pending);
 }
 

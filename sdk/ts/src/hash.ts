@@ -8,7 +8,7 @@ import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
 
 import { assertBytes, concatBytes, utf8 } from './bytes.js';
 import { encodeBlockHeader, encodeEntry, encodeVmOp, encodeVmOpUnsigned } from './codec.js';
-import type { BlockHeader, Entry, OutPoint, UnsignedVmOp, VmOp } from './types.js';
+import type { BlockHeader, Entry, OutPoint, SigScheme, UnsignedVmOp, VmOp } from './types.js';
 
 /** SHA-256. */
 export function sha256(data: Uint8Array): Uint8Array {
@@ -67,9 +67,68 @@ export function vmopSighash(op: UnsignedVmOp, firstInput?: OutPoint): Uint8Array
   return taggedHash(VMOP_SIGHASH_TAG, vmopSigningMessage(op, firstInput));
 }
 
-/** `op_id = sha256(full VmOp encoding)` (SPEC §4.4). */
+const WITNESS_ONE_ITEM = 0x01;
+const SIGHASH_ALL = 0x01;
+
+/**
+ * A whole signature as its half form and its second half `s` (SPEC §4.5, D-154): `Bip340(R ‖ s)` gives `HalfBip340(R)`;
+ * a `Bip322Simple` splits only when its bytes are exactly `01 40 ‖ R ‖ s` (`HalfBip322`) or `01 41 ‖ R ‖ s ‖ 01`
+ * (`HalfBip322All`), the two witnesses consensus accepts. `null` for any other bytes and for half a signature.
+ */
+export function splitSig(sig: SigScheme): { half: SigScheme; s: Uint8Array } | null {
+  const halves = (kind: 'HalfBip340' | 'HalfBip322' | 'HalfBip322All', bytes: Uint8Array) =>
+    bytes.length === 64 ? { half: { kind, bytes: bytes.slice(0, 32) }, s: bytes.slice(32) } : null;
+  switch (sig.kind) {
+    case 'Bip340':
+      return halves('HalfBip340', sig.bytes);
+    case 'Bip322Simple': {
+      const w = sig.bytes;
+      if (w.length === 66 && w[0] === WITNESS_ONE_ITEM && w[1] === 64) return halves('HalfBip322', w.subarray(2));
+      if (w.length === 67 && w[0] === WITNESS_ONE_ITEM && w[1] === 65 && w[66] === SIGHASH_ALL) {
+        return halves('HalfBip322All', w.subarray(2, 66));
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** The whole signature of half a signature and its second half `s` (32 bytes), the reverse of `splitSig`; `null` for a whole signature. */
+export function joinSig(half: SigScheme, s: Uint8Array): SigScheme | null {
+  if (s.length !== 32) throw new Error('the second half of a signature must be 32 bytes');
+  if (half.kind !== 'HalfBip340' && half.kind !== 'HalfBip322' && half.kind !== 'HalfBip322All') return null;
+  if (half.bytes.length !== 32) throw new Error('half a signature must be 32 bytes');
+  switch (half.kind) {
+    case 'HalfBip340':
+      return { kind: 'Bip340', bytes: concatBytes(half.bytes, s) };
+    case 'HalfBip322':
+      return { kind: 'Bip322Simple', bytes: concatBytes(Uint8Array.of(WITNESS_ONE_ITEM, 64), half.bytes, s) };
+    case 'HalfBip322All':
+      return { kind: 'Bip322Simple', bytes: concatBytes(Uint8Array.of(WITNESS_ONE_ITEM, 65), half.bytes, s, Uint8Array.of(SIGHASH_ALL)) };
+  }
+}
+
+/** A VmOp with a whole signature as the op a block holds, with half its signature, and the second half (D-154); `null` as for `splitSig`. */
+export function splitVmOp(op: VmOp): { half: VmOp; s: Uint8Array } | null {
+  const split = splitSig(op.sig);
+  return split === null ? null : { half: { ...op, sig: split.half }, s: split.s };
+}
+
+/** The VmOp with its whole signature, from the op a block holds and the second half beside the block (D-154); `null` as for `joinSig`. */
+export function joinVmOp(half: VmOp, s: Uint8Array): VmOp | null {
+  const sig = joinSig(half.sig, s);
+  return sig === null ? null : { ...half, sig };
+}
+
+/**
+ * `op_id` (SPEC §4.4, D-154): for a path C op `sha256(full VmOp encoding)`; for a path B op the same hash over the op with
+ * half its signature, whichever form is given, so the ID a client computes when it signs is the ID of the op in a block.
+ * A path B op whose signature has no half form (it never verifies) hashes as it is.
+ */
 export function opId(op: VmOp): Uint8Array {
-  return nobleSha256(encodeVmOp(op));
+  const split = op.fee.kind === 'Token' ? splitVmOp(op) : null;
+  return nobleSha256(encodeVmOp(split === null ? op : split.half));
 }
 
 /** Block hash: `sha256d(borsh(header))` (SPEC §6.1). */

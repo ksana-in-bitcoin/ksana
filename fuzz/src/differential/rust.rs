@@ -114,6 +114,8 @@ fn signature_hex(sig: Result<SigScheme, ksana_crypto::SigError>) -> Option<Strin
     match sig.ok()? {
         SigScheme::Bip340(bytes) => Some(hex(bytes)),
         SigScheme::Bip322Simple(bytes) => Some(hex(bytes)),
+        // Signing gives a whole signature: half of one is what a block holds (D-154)
+        SigScheme::HalfBip340(_) | SigScheme::HalfBip322(_) | SigScheme::HalfBip322All(_) => None,
     }
 }
 
@@ -178,6 +180,7 @@ fn borsh(ty: BorshType, bytes: &[u8]) -> Value {
                 "value": v,
                 "hash": hex(block.header.hash()),
                 "entries_root": entries_root(&block.entries).ok().map(hex),
+                "aggregate": ksana_execution::check_aggregate(&block.entries).is_ok(),
             })
         }),
     };

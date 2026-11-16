@@ -1007,7 +1007,7 @@ impl ChainStore {
         for (index, entry) in block.entries.iter().enumerate() {
             let op = match entry {
                 Entry::Forced { op, .. } | Entry::Sponsored { op } => op,
-                Entry::Unlock { .. } => continue,
+                Entry::Unlock { .. } | Entry::Aggregate { .. } => continue,
             };
             let receipt = receipts
                 .get(index)
@@ -1205,7 +1205,7 @@ impl ChainStore {
             for entry in &block.entries {
                 let op = match entry {
                     Entry::Forced { op, .. } | Entry::Sponsored { op } => op,
-                    Entry::Unlock { .. } => continue,
+                    Entry::Unlock { .. } | Entry::Aggregate { .. } => continue,
                 };
                 let op_id = op.op_id()?;
                 let points_here = self
@@ -1275,7 +1275,7 @@ impl ChainStore {
             for (index, entry) in block.entries.iter().enumerate() {
                 let op = match entry {
                     Entry::Forced { op, .. } | Entry::Sponsored { op } => op,
-                    Entry::Unlock { .. } => continue,
+                    Entry::Unlock { .. } | Entry::Aggregate { .. } => continue,
                 };
                 let op_id = op.op_id()?;
                 let skipped = receipts

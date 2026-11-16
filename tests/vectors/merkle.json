@@ -9,6 +9,35 @@
     {
       "entries": [
         {
+          "Forced": {
+            "btc_txid": "7a665812bfbb5a0f225029366582fbdc6b8744f2308ef7ec354b39a00d1480ef",
+            "op": {
+              "account": "29fe43712d7dd1b758485be175b71fc7ec8840059a629426f7a06e9e66af7072",
+              "action": {
+                "Deploy": {
+                  "code": "0061736d01000000",
+                  "funds": [],
+                  "init_args": ""
+                }
+              },
+              "chain_id": 1001,
+              "fee": "BtcNative",
+              "max_gas": "1000000",
+              "nonce": "1",
+              "sig": {
+                "Bip340": "a9dac975ea4852777bdc892086a74e97188d1c82fd633d8373c0bbeb8d4d9805d05f4b0942846a0388688191a6871d38b3d01696d3a949f315ee17fca64b6d2b"
+              },
+              "version": 2
+            }
+          }
+        }
+      ],
+      "entries_root": "7b29945976ae3db4ac1ceae1b7696722294d7649d645f1909bf1af536e6286c7",
+      "name": "single entry (path C)"
+    },
+    {
+      "entries": [
+        {
           "Sponsored": {
             "op": {
               "account": "a5ccc90b8fd02cd11cf4d7148f0918866fca7f395dd2ef31cd6850c8afdc25e1",
@@ -38,15 +67,20 @@
               "max_gas": "200000",
               "nonce": "0",
               "sig": {
-                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+                "HalfBip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1a"
               },
               "version": 2
             }
           }
+        },
+        {
+          "Aggregate": {
+            "s": "c50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+          }
         }
       ],
-      "entries_root": "edb9f20d36f07f8bb9f5414efd2c6cd7e77de627e9d2eef4c4fa147c4684fcda",
-      "name": "single entry"
+      "entries_root": "15368869aacb0094b93fe60c1201b27f1fd06a90a1d07c85766517a1bb045264",
+      "name": "one path B entry and the aggregate entry"
     },
     {
       "entries": [
@@ -93,7 +127,7 @@
               "max_gas": "50000",
               "nonce": "7",
               "sig": {
-                "Bip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49"
+                "HalfBip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81"
               },
               "version": 2
             }
@@ -129,15 +163,20 @@
               "max_gas": "200000",
               "nonce": "0",
               "sig": {
-                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+                "HalfBip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1a"
               },
               "version": 2
             }
           }
+        },
+        {
+          "Aggregate": {
+            "s": "da354ef1ff529bea1728e447737171f18ba85689e7249c2a80f886768245eb3a"
+          }
         }
       ],
-      "entries_root": "3c066258146ca4fe05fc9d3c65b2e534cdc6c534effb09d4fc568d3e9d8fb18e",
-      "name": "three entries"
+      "entries_root": "6a3b29a74698ef912b7248034b7482041ca643e8e081e5ba5e22d66d6c0c8d4e",
+      "name": "three entries and the aggregate entry"
     },
     {
       "entries": [
@@ -184,7 +223,7 @@
               "max_gas": "50000",
               "nonce": "7",
               "sig": {
-                "Bip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81f7ce8fc1fbdb3898715f07e12490bec849a2b5958e0b010a8e72edc02358ed49"
+                "HalfBip340": "617c8b802d9bc43081f77d1bea888fa9abd64351f81fc8c9f13997437e44da81"
               },
               "version": 2
             }
@@ -220,7 +259,7 @@
               "max_gas": "200000",
               "nonce": "0",
               "sig": {
-                "Bip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1ac50d2701b7d8d71d54ce1f57725ac584218974346745865c4d401c5a3f500aec"
+                "HalfBip340": "994e115c3875546b659fc640b9f3ff10d6c3bfeb1db5907705a5affc0419ea1a"
               },
               "version": 2
             }
@@ -231,10 +270,15 @@
             "height": "1234567",
             "index": 3
           }
+        },
+        {
+          "Aggregate": {
+            "s": "da354ef1ff529bea1728e447737171f18ba85689e7249c2a80f886768245eb3a"
+          }
         }
       ],
-      "entries_root": "98041c82ec7bf625f982619e38b5d4841cd1a98d2c2baaf1b6825f960d88b1db",
-      "name": "all entries (three variants)"
+      "entries_root": "2e7f3f17b39b9971b8af04deea0be7bce6344ca60697a4ddfd3d4a11be3c3825",
+      "name": "all entries (four variants)"
     }
   ],
   "rfc6962": [

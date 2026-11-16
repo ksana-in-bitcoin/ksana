@@ -27,7 +27,7 @@ state root the nodes committed to.
   `check_meta`, the issuer capability bits `CAP_*` and the status flags `STATUS_*` with their names, D-121).
 - `ksana-crypto`: BIP340 tagged hash, Schnorr signing / verification, accounts (`account_of` = the BIP86 output key, i.e. the witness program of the Taproot address, D-092; account ↔ address
   and text parsing in `account.rs`), VmOp signatures (BIP340 with the tweaked private key; BIP322 simple accepts only the P2TR key-path of the account's address, `bip322.rs`, D-052, D-092;
-  the path C signing message ends with the first input of the carrying transaction, the `*_native_*` interfaces, D-086), Merkle utilities (`entries_root`, RFC 6962; a root from leaf hashes,
+  the path C signing message ends with the first input of the carrying transaction, the `*_native_*` interfaces, D-086; BIP340 half-aggregation of a block's path B signatures over libsecp256k1's public interface, `halfagg.rs`, and a block's entries with half signatures and their aggregate, `seal_entries` / `unseal_entries` / `verify_vmops_aggregate`, SPEC §4.5, D-154), Merkle utilities (`entries_root`, RFC 6962; a root from leaf hashes,
   `root_of_leaf_hashes`, and an entry's leaf hash, `entry_leaf`, D-135).
 - `ksana-state`: JMT (jmt 0.12) + RocksDB, version = fast-lane height, commit / rollback / pruning / fixed-version read view / clear (`reset`, for rebuilding from genesis, D-093),
   `state_root` (D-024), the root of a block's writes before they are committed (`preview_root`, whose tree the commit of the same writes then writes instead of computing it again, D-151), the same on top of an older kept version (`preview_root_at`, for the finality verdict, D-101); the RocksDB memory bounds every

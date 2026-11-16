@@ -80,6 +80,9 @@ pub fn sig_scheme() -> impl Strategy<Value = SigScheme> {
     prop_oneof![
         any::<[u8; 64]>().prop_map(SigScheme::Bip340),
         small_bytes().prop_map(SigScheme::Bip322Simple),
+        bytes32().prop_map(SigScheme::HalfBip340),
+        bytes32().prop_map(SigScheme::HalfBip322),
+        bytes32().prop_map(SigScheme::HalfBip322All),
     ]
 }
 
@@ -161,6 +164,7 @@ pub fn entry() -> impl Strategy<Value = Entry> {
         (bytes32(), vmop()).prop_map(|(btc_txid, op)| Entry::Forced { btc_txid, op }),
         vmop().prop_map(|op| Entry::Sponsored { op }),
         any::<(u64, u32)>().prop_map(|(height, index)| Entry::Unlock { height, index }),
+        bytes32().prop_map(|s| Entry::Aggregate { s }),
     ]
 }
 
@@ -170,6 +174,7 @@ pub fn entry_data() -> impl Strategy<Value = EntryData> {
         bytes32().prop_map(|btc_txid| EntryData::Forced { btc_txid }),
         vmop().prop_map(|op| EntryData::Sponsored { op }),
         any::<(u64, u32)>().prop_map(|(height, index)| EntryData::Unlock { height, index }),
+        bytes32().prop_map(|s| EntryData::Aggregate { s }),
     ]
 }
 
@@ -179,11 +184,13 @@ pub fn block() -> impl Strategy<Value = Block> {
         block_header(),
         vec(entry(), 0..4),
         option::of((small_bytes(), small_bytes())),
+        vec(bytes32(), 0..4),
     )
-        .prop_map(|(header, entries, settlement)| Block {
+        .prop_map(|(header, entries, settlement, second_halves)| Block {
             header,
             entries,
             settlement: settlement.map(|(commit, reveal)| SettlementTxs { commit, reveal }),
+            second_halves,
         })
 }
 
@@ -192,6 +199,7 @@ fn body_entry_data() -> impl Strategy<Value = EntryData> {
     prop_oneof![
         vmop().prop_map(|op| EntryData::Sponsored { op }),
         any::<(u64, u32)>().prop_map(|(height, index)| EntryData::Unlock { height, index }),
+        bytes32().prop_map(|s| EntryData::Aggregate { s }),
     ]
 }
 

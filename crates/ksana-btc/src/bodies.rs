@@ -51,6 +51,7 @@ fn non_forced(data: &EntryData) -> Option<Entry> {
             height: *height,
             index: *index,
         }),
+        EntryData::Aggregate { s } => Some(Entry::Aggregate { s: *s }),
     }
 }
 

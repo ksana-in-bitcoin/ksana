@@ -94,7 +94,8 @@ impl World {
             .chain
             .block(vec![entry])
             .expect("block should be valid");
-        assert_eq!(out.receipts.len(), 1);
+        // The op's receipt and that of the block's aggregate entry (D-154)
+        assert_eq!(out.receipts.len(), 2);
         out.receipts.remove(0)
     }
 

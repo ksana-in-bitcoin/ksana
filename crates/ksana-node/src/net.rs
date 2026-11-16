@@ -158,6 +158,12 @@ impl Handler for NetHandler {
     }
 
     fn on_block(&self, _from: PeerId, block: Block, gossip: bool) -> Verdict {
+        // Not a judgement on the block: the same block with the second halves a producer gave it is still accepted
+        if !block.second_halves_fit() {
+            return Verdict::Reject(
+                "the second halves beside the block are not one per path B entry (D-154)".into(),
+            );
+        }
         let now = gossip.then(unix_now);
         let height = block.header.height;
         let mut retries = 0;

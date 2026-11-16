@@ -51,7 +51,16 @@ export type SigScheme =
   /** BIP340 Schnorr signature (64 bytes). */
   | { kind: 'Bip340'; bytes: Uint8Array }
   /** BIP322 simple signature: the consensus encoding of the witness stack of the `to_sign` input (D-052). */
-  | { kind: 'Bip322Simple'; bytes: Uint8Array };
+  | { kind: 'Bip322Simple'; bytes: Uint8Array }
+  /**
+   * The first half (R, 32 bytes) of a signature, as a path B entry of a block carries it (SPEC §4.5, D-154): of a BIP340
+   * signature, of a BIP322 simple signature made with `SIGHASH_DEFAULT`, and of one made with `SIGHASH_ALL`. Never a
+   * signature by itself: the block's `Aggregate` entry answers for the second halves, and an op carrying one of these is
+   * refused wherever a single op is checked (`splitVmOp` / `joinVmOp` in `hash`).
+   */
+  | { kind: 'HalfBip340'; bytes: Uint8Array }
+  | { kind: 'HalfBip322'; bytes: Uint8Array }
+  | { kind: 'HalfBip322All'; bytes: Uint8Array };
 
 /** A VM operation signed by the user (SPEC §4.1). */
 export interface VmOp {
@@ -112,20 +121,26 @@ export interface BlockHeader {
 export type Entry =
   /** Path C: a force-included native transaction. */
   | { kind: 'Forced'; btc_txid: Uint8Array; op: VmOp }
-  /** Path B: sponsored. */
+  /** Path B: sponsored. In a block the op carries half its signature (D-154). */
   | { kind: 'Sponsored'; op: VmOp }
   /**
    * Unlock sponsored fees and block rewards (§8.5, D-074, D-079): cumulative unlock in acceptance order up to this position:
    * the height `height` of the chain block that accepted it and its index `index` in that chain block's acceptance order
    * (the merged blocks are 0, 1, … in turn, the chain block itself comes last).
    */
-  | { kind: 'Unlock'; height: bigint; index: number };
+  | { kind: 'Unlock'; height: bigint; index: number }
+  /**
+   * The aggregate of the second halves of the signatures of the block's path B entries (SPEC §4.5, D-154): the last entry
+   * of a block that has path B entries, absent from one that has none.
+   */
+  | { kind: 'Aggregate'; s: Uint8Array };
 
 /** Entry in a settlement payload (D-003): one-to-one with `Entry`; `Forced` only writes `btc_txid`. */
 export type EntryData =
   | { kind: 'Forced'; btc_txid: Uint8Array }
   | { kind: 'Sponsored'; op: VmOp }
-  | { kind: 'Unlock'; height: bigint; index: number };
+  | { kind: 'Unlock'; height: bigint; index: number }
+  | { kind: 'Aggregate'; s: Uint8Array };
 
 /** The settlement transactions carried by a block (D-081): the commit transaction and the reveal transaction, both in Bitcoin network serialization. The payload is in the witness of the reveal transaction (KSN1 envelope). */
 export interface SettlementTxs {
@@ -143,6 +158,11 @@ export interface Block {
   entries: Entry[];
   /** The signed settlement transactions (commit and reveal, D-081); `null` when there are none. */
   settlement: SettlementTxs | null;
+  /**
+   * The second halves of the signatures of the path B entries, in their order (D-154): beside the block, not under its
+   * header. Empty for a block rebuilt from BTC; in JSON the field is left out when empty.
+   */
+  second_halves: Uint8Array[];
 }
 
 /** The body of one block carried by a payload (D-077): all entries (in payload form) of the block that header number `header` of the same payload refers to. */

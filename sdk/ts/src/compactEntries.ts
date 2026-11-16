@@ -6,14 +6,15 @@
  *
  * | Element | Encoding |
  * | --- | --- |
- * | entry | `u8` variant (0 forced inclusion, 1 path B, 2 unlock), followed by that variant's fields |
+ * | entry | `u8` variant (0 forced inclusion, 1 path B, 2 unlock, 3 aggregate), followed by that variant's fields |
  * | forced inclusion | the 32-byte BTC transaction ID |
  * | unlock | varint height, varint acceptance index (D-079) |
+ * | aggregate | 32 bytes (D-154) |
  * | path B | the VmOp: `version: u8`, key `account`, varint `nonce`, fee, varint `max_gas`, action, signature; `chain_id` is not written and is taken from the network parameters when decoding |
  * | fee | `u8` variant: 0 `Token` followed by the varint amount; 1 `BtcNative` |
  * | action | `u8` variant: 0 `Deploy` (byte string `code`, byte string `init_args`, asset list); 1 `Call` (key `contract`, string `method`, byte string `args`, asset list); 2 `AssetTransfer` (key `asset`, key `to`, varint `amount`) |
  * | asset list | varint count, each item a key `asset` and a varint `amount` |
- * | signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string |
+ * | signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string; 2 `HalfBip340`, 3 `HalfBip322`, 4 `HalfBip322All`, each followed by 32 bytes (D-154) |
  * | key | varint `r`: `r ≥ 1` is the `r`-th key in the dictionary; `r = 0` is followed by the 32 bytes, which are appended to the end of the dictionary |
  * | byte string, string | varint length and the content; a string must be valid UTF-8 |
  * | entry list | varint count and the entries |
@@ -34,6 +35,7 @@ import type { Action, Body, EntryData, FeeMode, Funds, SigScheme, VmOp } from '.
 const FORCED = 0;
 const SPONSORED = 1;
 const UNLOCK = 2;
+const AGGREGATE = 3;
 const FEE_TOKEN = 0;
 const FEE_NATIVE = 1;
 const ACTION_DEPLOY = 0;
@@ -41,6 +43,9 @@ const ACTION_CALL = 1;
 const ACTION_TRANSFER = 2;
 const SIG_BIP340 = 0;
 const SIG_BIP322 = 1;
+const SIG_HALF_BIP340 = 2;
+const SIG_HALF_BIP322 = 3;
+const SIG_HALF_BIP322_ALL = 4;
 const U32_MAX = 0xffff_ffffn;
 const U128_MAX = (1n << 128n) - 1n;
 /** The KSA asset ID: 32 zero bytes, the 1st key preset in the dictionary. */
@@ -172,14 +177,28 @@ export class EntryEncoder {
           return;
       }
     };
+    const half = (tag: number, r: Uint8Array): void => {
+      if (r.length !== 32) throw new CodecError('Borsh encode failed: half a signature must be 32 bytes');
+      out.push(tag);
+      push(r);
+    };
     const sig = (value: SigScheme): void => {
-      if (value.kind === 'Bip340') {
-        if (value.bytes.length !== 64) throw new CodecError('Borsh encode failed: a BIP340 signature must be 64 bytes');
-        out.push(SIG_BIP340);
-        push(value.bytes);
-      } else {
-        out.push(SIG_BIP322);
-        bytes(value.bytes);
+      switch (value.kind) {
+        case 'Bip340':
+          if (value.bytes.length !== 64) throw new CodecError('Borsh encode failed: a BIP340 signature must be 64 bytes');
+          out.push(SIG_BIP340);
+          push(value.bytes);
+          return;
+        case 'Bip322Simple':
+          out.push(SIG_BIP322);
+          bytes(value.bytes);
+          return;
+        case 'HalfBip340':
+          return half(SIG_HALF_BIP340, value.bytes);
+        case 'HalfBip322':
+          return half(SIG_HALF_BIP322, value.bytes);
+        case 'HalfBip322All':
+          return half(SIG_HALF_BIP322_ALL, value.bytes);
       }
     };
     const op = (value: VmOp): void => {
@@ -208,6 +227,11 @@ export class EntryEncoder {
         varint(entry.height);
         checkUnsigned(BigInt(entry.index), U32_MAX, 'acceptance index');
         varint(BigInt(entry.index));
+        break;
+      case 'Aggregate':
+        if (entry.s.length !== 32) throw new CodecError('Borsh encode failed: an aggregate must be 32 bytes');
+        out.push(AGGREGATE);
+        push(entry.s);
         break;
     }
     return { bytes: Uint8Array.from(out), newKeys };
@@ -325,6 +349,15 @@ export class EntryDecoder {
       case SIG_BIP322:
         sig = { kind: 'Bip322Simple', bytes: readBytes(reader) };
         break;
+      case SIG_HALF_BIP340:
+        sig = { kind: 'HalfBip340', bytes: reader.read(32) };
+        break;
+      case SIG_HALF_BIP322:
+        sig = { kind: 'HalfBip322', bytes: reader.read(32) };
+        break;
+      case SIG_HALF_BIP322_ALL:
+        sig = { kind: 'HalfBip322All', bytes: reader.read(32) };
+        break;
       default:
         return invalid('unknown signature scheme');
     }
@@ -340,6 +373,8 @@ export class EntryDecoder {
         return { kind: 'Sponsored', op: this.op(reader) };
       case UNLOCK:
         return { kind: 'Unlock', height: readVarint(reader), index: readVarintU32(reader) };
+      case AGGREGATE:
+        return { kind: 'Aggregate', s: reader.read(32) };
       default:
         return invalid('unknown entry variant');
     }

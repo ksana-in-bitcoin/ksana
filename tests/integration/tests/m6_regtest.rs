@@ -16,7 +16,7 @@
 //!   set `KSANA_SKIP_BROWSER=1` to skip, `KSANA_DEMO_SCREENSHOT=<path>` to save a screenshot once done.
 //!
 //! This test prepares the chain and funds, and checks independently on the node: the signature scheme is
-//! `Bip322Simple`, the fee is deducted from the account per the VmOp, the ops become btc_final once the settlement is
+//! `Bip322Simple` (in a block the first half of it for a path B op, D-154), the fee is deducted from the account per the VmOp, the ops become btc_final once the settlement is
 //! confirmed deep enough; the native transactions are force-included and execute successfully.
 
 mod common;
@@ -49,7 +49,11 @@ fn check_sponsored(fast: &Fast, u: &User, kind: &str, op_id: &[u8; 32], fee: u12
         .expect("path-B entry");
     assert_eq!(op.account, u.account, "{kind}");
     assert!(
-        matches!(&op.sig, SigScheme::Bip322Simple(_)),
+        // The block holds the first half of the wallet's BIP322 signature (D-154)
+        matches!(
+            &op.sig,
+            SigScheme::HalfBip322(_) | SigScheme::HalfBip322All(_)
+        ),
         "{kind}: the VmOp is BIP322-signed by the wallet"
     );
     assert_eq!(op.fee, FeeMode::Token { amount: fee }, "{kind}");

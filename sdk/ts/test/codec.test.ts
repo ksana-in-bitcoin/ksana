@@ -67,9 +67,9 @@ test('codec.json covers all consensus types and enum variants', () => {
   const variants: [TypeName, string[]][] = [
     ['FeeMode', ['Token', 'BtcNative']],
     ['Action', ['Deploy', 'Call', 'AssetTransfer']],
-    ['SigScheme', ['Bip340', 'Bip322Simple']],
-    ['Entry', ['Forced', 'Sponsored', 'Unlock']],
-    ['EntryData', ['Forced', 'Sponsored', 'Unlock']],
+    ['SigScheme', ['Bip340', 'Bip322Simple', 'HalfBip340', 'HalfBip322', 'HalfBip322All']],
+    ['Entry', ['Forced', 'Sponsored', 'Unlock', 'Aggregate']],
+    ['EntryData', ['Forced', 'Sponsored', 'Unlock', 'Aggregate']],
     ['Payload', ['Settlement', 'NativeOp', 'Headers']],
   ];
   for (const [type, names] of variants) {
@@ -114,7 +114,7 @@ for (const v of vectors.invalid) {
 test('EntryData and Entry encode byte-for-byte identically except for Forced (D-003)', () => {
   const entries = vectors.valid.filter((v: { type: string }) => v.type === 'Entry');
   const data = vectors.valid.filter((v: { type: string }) => v.type === 'EntryData');
-  assert.equal(entries.length, 4);
+  assert.equal(entries.length, 5);
   for (const [i, e] of entries.entries()) {
     const entry = fromJson('Entry', e.value);
     const expected = data[i];
@@ -177,11 +177,18 @@ test('trailing bytes, truncation and invalid tags are all rejected', () => {
   assert.throws(() => decode('BlockHeader', concatBytes(bytes, Uint8Array.of(0)), 1000), /trailing bytes/);
   assert.throws(() => decode('BlockHeader', bytes.slice(0, bytes.length - 1), 1000), CodecError);
   // an Option tag can only be 0 or 1
-  const block = concatBytes(bytes, u32le(0), Uint8Array.of(1), u32le(1), Uint8Array.of(7), u32le(1), Uint8Array.of(8));
+  const settled = concatBytes(bytes, u32le(0), Uint8Array.of(1), u32le(1), Uint8Array.of(7), u32le(1), Uint8Array.of(8));
+  const block = concatBytes(settled, u32le(0));
   assert.deepEqual(decode('Block', block, 1000).settlement, { commit: Uint8Array.of(7), reveal: Uint8Array.of(8) });
+  assert.deepEqual(decode('Block', block, 1000).second_halves, []);
+  // the list of second halves is part of the encoding even when empty (D-154), and each is 32 bytes
+  assert.throws(() => decode('Block', settled, 1000), CodecError);
+  const beside = concatBytes(settled, u32le(1), new Uint8Array(32).fill(9));
+  assert.deepEqual(decode('Block', beside, 1000).second_halves, [new Uint8Array(32).fill(9)]);
+  assert.throws(() => decode('Block', beside.slice(0, beside.length - 1), 1000), CodecError);
   // only the commit transaction, the reveal transaction missing (D-081): truncated
-  assert.throws(() => decode('Block', block.slice(0, block.length - 5), 1000), CodecError);
-  const badOption = concatBytes(bytes, u32le(0), Uint8Array.of(2));
+  assert.throws(() => decode('Block', settled.slice(0, settled.length - 5), 1000), CodecError);
+  const badOption = concatBytes(bytes, u32le(0), Uint8Array.of(2), u32le(0));
   assert.throws(() => decode('Block', badOption, 1000), CodecError);
   // fixed-size and variable-length byte strings
   assert.throws(() => decode('OutPoint', new Uint8Array(35), 100), CodecError);

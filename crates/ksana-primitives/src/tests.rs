@@ -170,9 +170,74 @@ proptest! {
         }
     }
 
+    /// The ID of a path B op is the hash of its encoding with the signature in the half form (D-154), so it is the
+    /// same before a block and in it; the ID of any other op is the hash of its encoding.
     #[test]
-    fn op_id_is_sha256_of_full_encoding(op in strategies::vmop()) {
-        prop_assert_eq!(op.op_id().unwrap(), hash::sha256(&op.encode().unwrap()));
+    fn op_id_is_sha256_of_the_encoding_with_half_the_signature_for_path_b(op in strategies::vmop()) {
+        let half = match (&op.fee, op.sig.split()) {
+            (FeeMode::Token { .. }, Some((sig, _))) => VmOp { sig, ..op.clone() },
+            _ => op.clone(),
+        };
+        prop_assert_eq!(op.op_id().unwrap(), hash::sha256(&half.encode().unwrap()));
+        prop_assert_eq!(half.op_id().unwrap(), op.op_id().unwrap());
+    }
+
+    /// Splitting a signature and joining its halves gives it back, and a half is never split.
+    #[test]
+    fn a_signature_splits_into_halves_that_join_into_it(sig in strategies::sig_scheme()) {
+        match sig.split() {
+            Some((half, s)) => {
+                prop_assert!(half.is_half() && !sig.is_half());
+                prop_assert_eq!(half.join(&s), Some(sig.clone()));
+                prop_assert_eq!(sig.half(), Some(half.clone()));
+                prop_assert_eq!(half.split(), None);
+            }
+            None => prop_assert_eq!(sig.join(&[0; 32]).is_some(), sig.is_half()),
+        }
+    }
+}
+
+/// The halves of the three signature forms that have them (D-154), and the `Bip322Simple` bytes that have none: every
+/// witness but one item of 64 bytes or of 65 ending in `SIGHASH_ALL`.
+#[test]
+fn the_forms_of_signature_that_split() {
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&[0xaa; 32]);
+    sig[32..].copy_from_slice(&[0xbb; 32]);
+    assert_eq!(
+        SigScheme::Bip340(sig).split(),
+        Some((SigScheme::HalfBip340([0xaa; 32]), [0xbb; 32]))
+    );
+    let witness = |len: u8, tail: &[u8]| {
+        let mut witness = vec![1, len];
+        witness.extend(sig);
+        witness.extend(tail);
+        SigScheme::Bip322Simple(witness)
+    };
+    assert_eq!(
+        witness(64, &[]).split(),
+        Some((SigScheme::HalfBip322([0xaa; 32]), [0xbb; 32]))
+    );
+    assert_eq!(
+        witness(65, &[1]).split(),
+        Some((SigScheme::HalfBip322All([0xaa; 32]), [0xbb; 32]))
+    );
+    for other in [
+        witness(65, &[0]),
+        witness(65, &[3]),
+        witness(64, &[1]),
+        witness(66, &[1, 1]),
+        SigScheme::Bip322Simple(vec![2, 64]),
+        SigScheme::Bip322Simple(vec![]),
+        SigScheme::Bip322Simple({
+            let mut two = vec![2, 64];
+            two.extend(sig);
+            two.push(0);
+            two
+        }),
+    ] {
+        assert_eq!(other.split(), None, "{other:?}");
+        assert_eq!(other.half(), None);
     }
 }
 

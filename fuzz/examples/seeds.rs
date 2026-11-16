@@ -343,10 +343,12 @@ fn main() {
         "headers_dag",
         &dag.encode(&DEVNET).expect("encode"),
     );
-    // Republish payload carrying bodies (D-077): forced-inclusion, path-B and unlock entries
-    let sponsored = sample_ops()
+    // Republish payload carrying bodies (D-077): forced-inclusion, path-B and unlock entries; the path-B op by half its
+    // signature under the body's aggregate entry, as a block holds it (D-154)
+    let (sponsored, s) = sample_ops()
         .into_iter()
         .find(|op| matches!(op.fee, FeeMode::Token { .. }))
+        .and_then(|op| op.split())
         .expect("there is a path-B sample");
     let with_bodies = Payload::Headers {
         headers: dag_headers,
@@ -356,6 +358,7 @@ fn main() {
                 entries: vec![
                     EntryData::Forced { btc_txid: [9; 32] },
                     EntryData::Sponsored { op: sponsored },
+                    EntryData::Aggregate { s },
                 ],
             },
             Body {

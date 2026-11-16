@@ -179,7 +179,8 @@ fn the_indexer_follows_an_asset_with_issuer_capabilities() {
         a.submit(op.clone());
     }
     let b1 = a.mine();
-    assert_eq!(b1.entries.len(), ops.len(), "every step in one block");
+    // and the block's aggregate entry after them (D-154)
+    assert_eq!(b1.entries.len(), ops.len() + 1, "every step in one block");
     for (step, (op, status)) in ops.iter().enumerate() {
         assert_eq!(status_of(&a, 1, op), *status, "step {step}");
     }

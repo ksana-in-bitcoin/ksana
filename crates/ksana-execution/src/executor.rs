@@ -79,7 +79,7 @@
 
 use std::sync::Arc;
 
-use ksana_crypto::{verify_native_vmop, verify_vmop};
+use ksana_crypto::{verify_native_vmop, verify_vmop, verify_vmops_aggregate};
 use ksana_primitives::{
     check_funds, Action, BtcAnchor, Entry, FeeMode, Funds, OutPoint, Params, Rules, VmOp,
     KSA_ASSET_ID,
@@ -399,7 +399,9 @@ impl Executor {
         merged: &[MergedBlock],
         entries: &[Entry],
     ) -> Result<BlockOutcome, BlockError> {
+        check_aggregate(entries).map_err(BlockError::Invalid)?;
         self.build_chain_block(base, btc, env, merged, |builder| {
+            builder.aggregate_checked = true;
             for entry in entries {
                 builder.push(entry)?;
             }
@@ -522,6 +524,7 @@ impl Executor {
         rules: &Rules,
         fee: &FeeOwner,
         op: &VmOp,
+        aggregate_checked: bool,
     ) -> Result<[u8; 32], BlockError> {
         let op_id = self
             .check_op_static(rules, op)
@@ -531,7 +534,25 @@ impl Executor {
                 "fee mode of a Sponsored entry must be Token".into(),
             ));
         };
-        verify_vmop(op).map_err(|e| BlockError::Invalid(format!("invalid signature: {e}")))?;
+        // Half a signature was checked in its block's aggregate (D-154); a full one, of an op the producer is
+        // including, is checked alone
+        match (op.sig.is_half(), aggregate_checked) {
+            (true, true) => {}
+            (false, false) => verify_vmop(op)
+                .map_err(|e| BlockError::Invalid(format!("invalid signature: {e}")))?,
+            (true, false) => {
+                return Err(BlockError::Invalid(
+                    "invalid signature: half a signature outside a block's aggregate".into(),
+                ))
+            }
+            (false, true) => {
+                return Err(BlockError::Invalid(
+                    "invalid signature: a path B entry of a block carries a whole signature, not the half \
+                     the aggregate answers for"
+                        .into(),
+                ))
+            }
+        }
 
         let mut account = builtin::account_state(ov, &op.account)?;
         if account.nonce != op.nonce {
@@ -996,7 +1017,7 @@ fn op_static(params: &Params, rules: &Rules, op: &VmOp) -> Result<[u8; 32], Stri
     if encoded.len() > params.max_op_bytes {
         return Err("VmOp encoding exceeds MAX_OP_BYTES".into());
     }
-    Ok(ksana_primitives::hash::sha256(&encoded))
+    op.op_id().map_err(|e| e.to_string())
 }
 
 /// The authentication of a path C op that needs neither state nor the BTC view (§7.4, §8.1): version (the range
@@ -1049,7 +1070,7 @@ pub fn check_entries_static(
         let counted = entry_gas(entry, rules);
         gas = match entry {
             Entry::Forced { .. } => gas.saturating_add(counted),
-            Entry::Unlock { .. } => gas,
+            Entry::Unlock { .. } | Entry::Aggregate { .. } => gas,
             Entry::Sponsored { .. } => gas
                 .checked_add(counted)
                 .filter(|g| *g <= rules.block_gas_limit)
@@ -1064,9 +1085,44 @@ pub fn check_entries_static(
                 "entry {index}: fee mode does not match the entry type"
             ));
         }
-        verify_vmop(op).map_err(|e| format!("entry {index}: invalid signature: {e}"))?;
     }
-    Ok(())
+    check_aggregate(entries)
+}
+
+/// The rule on the signatures of a block's path B entries (SPEC §4.5, D-154): each carries half a signature, a block
+/// with path B entries ends with exactly one aggregate entry and a block without them has none, and the aggregate
+/// verifies for the path B ops in their order ([`ksana_crypto::verify_vmops_aggregate`]). The aggregate is the rule:
+/// it is not replaced by checks of the signatures it was made from.
+pub fn check_aggregate(entries: &[Entry]) -> Result<(), String> {
+    let ops = || {
+        entries.iter().filter_map(|entry| match entry {
+            Entry::Sponsored { op } => Some(op),
+            _ => None,
+        })
+    };
+    let aggregates = entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Aggregate { .. }))
+        .count();
+    match (ops().next().is_some(), entries.last()) {
+        (false, _) if aggregates == 0 => Ok(()),
+        (false, _) => Err("an aggregate entry in a block without path B entries (D-154)".into()),
+        (true, Some(Entry::Aggregate { s })) if aggregates == 1 => {
+            if let Some(index) = entries
+                .iter()
+                .position(|e| matches!(e, Entry::Sponsored { op } if !op.sig.is_half()))
+            {
+                return Err(format!(
+                    "entry {index}: a path B entry of a block carries a whole signature, not the half the aggregate answers for (D-154)"
+                ));
+            }
+            verify_vmops_aggregate(ops(), s)
+                .map_err(|e| format!("invalid signature: the block's aggregate: {e}"))
+        }
+        (true, _) => {
+            Err("a block with path B entries ends with exactly one aggregate entry (D-154)".into())
+        }
+    }
 }
 
 /// Runs on a dedicated thread with a stack of `EXECUTION_THREAD_STACK` (D-014).
@@ -1101,6 +1157,12 @@ pub struct BlockBuilder<'a> {
     gas: u64,
     /// This block already includes an unlock entry (at most one per block, D-074).
     unlocked: bool,
+    /// The number of path B entries of this block so far, and whether its aggregate entry follows them (D-154).
+    sponsored: usize,
+    aggregated: bool,
+    /// The aggregate of the entries to come was verified ([`check_aggregate`]): they carry half signatures. Otherwise
+    /// (the producer building) each path B entry carries a full signature, checked alone.
+    aggregate_checked: bool,
 }
 
 impl<'a> BlockBuilder<'a> {
@@ -1123,6 +1185,9 @@ impl<'a> BlockBuilder<'a> {
             phase: 0,
             gas: 0,
             unlocked: false,
+            sponsored: 0,
+            aggregated: false,
+            aggregate_checked: false,
         })
     }
 
@@ -1162,7 +1227,8 @@ impl<'a> BlockBuilder<'a> {
             let ov = self.ov.take().ok_or_else(|| {
                 BlockError::Fatal("block building was aborted by an internal error".into())
             })?;
-            let receipt = match self.run_entry(ov, entry, &fee) {
+            // A merged block passed its own rules, its aggregate among them ([`check_entries_static`])
+            let receipt = match self.run_entry(ov, entry, &fee, true) {
                 Ok((ov, receipt)) => {
                     self.ov = Some(ov);
                     receipt
@@ -1232,13 +1298,20 @@ impl<'a> BlockBuilder<'a> {
                 "at most one unlock entry per block (D-074)".into(),
             ));
         }
+        let is_aggregate = matches!(entry, Entry::Aggregate { .. });
+        if self.aggregated || (is_aggregate && self.sponsored == 0) {
+            return Err(BlockError::Invalid(
+                "the aggregate entry is the last entry of a block with path B entries (D-154)"
+                    .into(),
+            ));
+        }
         let counted = entry_gas(entry, &self.env.rules);
         let gas = match entry {
             // Forced-inclusion entries are not bound by BLOCK_GAS_LIMIT (D-036); the total saturates and never
             // overflows
             Entry::Forced { .. } => self.gas.saturating_add(counted),
             // An unlock entry counts 0 gas, does not increase the total and is therefore not bound by the limit (D-036)
-            Entry::Unlock { .. } => self.gas,
+            Entry::Unlock { .. } | Entry::Aggregate { .. } => self.gas,
             Entry::Sponsored { .. } => self
                 .gas
                 .checked_add(counted)
@@ -1256,12 +1329,16 @@ impl<'a> BlockBuilder<'a> {
         let ov = self.ov.take().ok_or_else(|| {
             BlockError::Fatal("block building was aborted by an internal error".into())
         })?;
-        match self.run_entry(ov, entry, &fee) {
+        match self.run_entry(ov, entry, &fee, self.aggregate_checked) {
             Ok((ov, receipt)) => {
                 self.ov = Some(ov);
                 self.phase = phase;
                 self.gas = gas;
                 self.unlocked |= is_unlock;
+                self.aggregated |= is_aggregate;
+                if matches!(entry, Entry::Sponsored { .. }) {
+                    self.sponsored = self.sponsored.saturating_add(1);
+                }
                 self.receipts.push(receipt);
                 self.receipts
                     .last()
@@ -1282,6 +1359,7 @@ impl<'a> BlockBuilder<'a> {
         mut ov: Overlay,
         entry: &Entry,
         fee: &FeeOwner,
+        aggregate_checked: bool,
     ) -> Result<(Overlay, Receipt), (Option<Overlay>, BlockError)> {
         let exec = self.exec;
         let executed = match entry {
@@ -1308,7 +1386,7 @@ impl<'a> BlockBuilder<'a> {
                 }
             }
             Entry::Sponsored { op } => {
-                match exec.sponsored_prepare(&mut ov, &self.env.rules, fee, op) {
+                match exec.sponsored_prepare(&mut ov, &self.env.rules, fee, op, aggregate_checked) {
                     Ok(op_id) => {
                         // The preparation writes (fee deduction, nonce) are committed first and kept even if the action
                         // fails
@@ -1324,6 +1402,8 @@ impl<'a> BlockBuilder<'a> {
                     Err(e) => return Err((Some(ov), e)),
                 }
             }
+            // The aggregate changes no state: its receipt is that of a bookkeeping entry (D-154)
+            Entry::Aggregate { .. } => Ok(bookkeeping_receipt(ov)),
         };
         executed.map_err(|e| (None, e))
     }
@@ -1338,6 +1418,11 @@ impl<'a> BlockBuilder<'a> {
     }
 
     fn finish(self) -> Result<BlockOutcome, BlockError> {
+        if self.sponsored > 0 && !self.aggregated {
+            return Err(BlockError::Invalid(
+                "a block with path B entries ends with its aggregate entry (D-154)".into(),
+            ));
+        }
         let ov = self.ov.ok_or_else(|| {
             BlockError::Fatal("block building was aborted by an internal error".into())
         })?;
@@ -1355,6 +1440,7 @@ fn entry_phase(entry: &Entry) -> u8 {
         Entry::Forced { .. } => 0,
         Entry::Unlock { .. } => 1,
         Entry::Sponsored { .. } => 2,
+        Entry::Aggregate { .. } => 3,
     }
 }
 
@@ -1364,7 +1450,7 @@ fn entry_gas(entry: &Entry, rules: &Rules) -> u64 {
     match entry {
         Entry::Forced { op, .. } => op.max_gas.min(rules.native_max_gas),
         Entry::Sponsored { op } => op.max_gas,
-        Entry::Unlock { .. } => 0,
+        Entry::Unlock { .. } | Entry::Aggregate { .. } => 0,
     }
 }
 
@@ -1399,7 +1485,7 @@ fn simulated_failure(max_gas: u64, reason: String) -> Receipt {
 fn skipped_receipt(entry: &Entry, reason: String) -> Receipt {
     let op_id = match entry {
         Entry::Forced { op, .. } | Entry::Sponsored { op } => op.op_id().ok(),
-        Entry::Unlock { .. } => None,
+        Entry::Unlock { .. } | Entry::Aggregate { .. } => None,
     };
     Receipt {
         op_id,

@@ -159,7 +159,8 @@ fn unlock_in_a_later_block_and_twice_in_one_block() {
             sponsored(&a, 3, 4, GAS, transfer(b.account, 1)),
         ])
         .unwrap();
-    assert_eq!(out.receipts.len(), 2);
+    // The unlock, the op and the block's aggregate entry (D-154)
+    assert_eq!(out.receipts.len(), 3);
     assert!(out.receipts.iter().all(|r| r.status == OpStatus::Success));
     assert_eq!(chain.ksa(&producer), PRODUCER_KSA + 12 + 3);
     assert_eq!(chain.locked_fee(&block1), None);
@@ -254,8 +255,9 @@ fn unlock_batch_is_bounded() {
 fn two_unlock_entries_violate_the_static_rules() {
     let one = vec![unlock(1, 0)];
     let two = vec![unlock(1, 0), unlock(2, 0)];
-    check_entries_static(&NO_REWARD, &NO_REWARD.rules(0), &one).unwrap();
-    let err = check_entries_static(&NO_REWARD, &NO_REWARD.rules(0), &two).unwrap_err();
+    check_entries_static(&NO_REWARD, &NO_REWARD.rules(0), &sealed(one.clone())).unwrap();
+    let err =
+        check_entries_static(&NO_REWARD, &NO_REWARD.rules(0), &sealed(two.clone())).unwrap_err();
     assert!(err.contains("at most one"), "{err}");
 }
 
@@ -473,13 +475,14 @@ fn rejected_unlock_leaves_the_built_block_unchanged() {
                 }
             }
             assert_eq!(builder.gas(), GAS, "an unlock entry counts 0 gas");
+            push_aggregate(builder, &[&good, &fast])?;
             Ok(rejected)
         })
         .unwrap();
     assert_eq!(rejected.len(), 3, "{rejected:?}");
     let validated = chain
         .exec
-        .execute_block(base, btc, &env, &[good, fast])
+        .execute_block(base, btc, &env, &sealed(vec![good, fast]))
         .unwrap();
     assert_eq!(built, validated);
 }

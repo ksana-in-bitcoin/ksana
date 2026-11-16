@@ -6,6 +6,8 @@
  * - hashing: tagged hash, VmOp sighash, `op_id`, block hash, `entries_root` (`hash`); the PoW target and verification of
  *   the network algorithm Argon2id (`pow`, D-094);
  * - BIP340 signing and verification of VmOps (`sign`), BIP322 simple messages and signatures (`bip322`, D-052);
+ * - the half signatures a block holds its path B ops by and the block's aggregate: splitting and joining (`hash`), the
+ *   aggregate and its verification (`halfagg`, D-154);
  * - path C KSN1 data outputs and native transactions (`pathC`, D-032, D-036); a path B op is submitted directly with
  *   `ksana_submitOp` after signing; the KSN1 envelope that carries settlement and republish payloads (`envelope`, D-081);
  * - top-up: the seller locks KSA for the buyer, and the buyer pays the lock with one BTC transaction and claims the KSA
@@ -32,6 +34,7 @@ export {
 } from './compact.js';
 export { EntryDecoder, EntryEncoder } from './compactEntries.js';
 export * from './hash.js';
+export * from './halfagg.js';
 export * from './pow.js';
 export * from './keys.js';
 export * from './sign.js';

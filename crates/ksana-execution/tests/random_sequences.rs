@@ -195,23 +195,24 @@ fn run(vm: Vm, blocks: &[Vec<Intent>]) -> Vec<(String, [u8; 32])> {
             rules: DEVNET.rules(height),
             unlockable: segment,
         };
-        let summary = match exec.execute_block(Arc::new(view), Arc::new(SeqBtc), &env, &entries) {
-            Ok(out) => {
-                db.commit(height, &out.writes).unwrap();
-                let root = db.root(height).unwrap();
-                main.push(UnlockItem {
-                    height,
-                    index: 0,
-                    hash: sha256(&[root.as_slice(), &height.to_le_bytes()].concat()),
-                    producer,
-                    daa_score: height,
-                    weight: 1,
-                    rewarded: true,
-                });
-                format!("{:?}", out.receipts)
-            }
-            Err(e) => format!("invalid: {e}"),
-        };
+        let summary =
+            match exec.execute_block(Arc::new(view), Arc::new(SeqBtc), &env, &sealed(entries)) {
+                Ok(out) => {
+                    db.commit(height, &out.writes).unwrap();
+                    let root = db.root(height).unwrap();
+                    main.push(UnlockItem {
+                        height,
+                        index: 0,
+                        hash: sha256(&[root.as_slice(), &height.to_le_bytes()].concat()),
+                        producer,
+                        daa_score: height,
+                        weight: 1,
+                        rewarded: true,
+                    });
+                    format!("{:?}", out.receipts)
+                }
+                Err(e) => format!("invalid: {e}"),
+            };
         let root = db.root(db.latest_version().unwrap()).unwrap();
         results.push((summary, root));
     }

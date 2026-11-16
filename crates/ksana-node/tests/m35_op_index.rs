@@ -70,9 +70,10 @@ fn position(block: &Block, height: u64, slot: u32, op: &VmOp) -> OpPosition {
     let entry = block
         .entries
         .iter()
-        .position(
-            |e| matches!(e, Entry::Sponsored { op: o } | Entry::Forced { op: o, .. } if o == op),
-        )
+        .position(|e| {
+            // A block holds a path B op by half its signature (D-154): the op ID is the same
+            matches!(e, Entry::Sponsored { op: o } | Entry::Forced { op: o, .. } if o.op_id().unwrap() == op.op_id().unwrap())
+        })
         .expect("the block includes the op");
     OpPosition {
         height,

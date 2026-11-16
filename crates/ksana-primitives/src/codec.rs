@@ -7,7 +7,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::hash::sha256;
 use crate::params::Params;
-use crate::types::{Payload, VmOp};
+use crate::types::{FeeMode, Payload, VmOp};
 
 /// Encoding / decoding errors.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -73,9 +73,46 @@ impl VmOp {
         Ok(buf)
     }
 
-    /// `op_id = sha256(full VmOp encoding)` (SPEC §4.4).
+    /// `op_id` (SPEC §4.4, D-154): the hash of the Borsh encoding of the op with a token fee (path B) and its
+    /// signature in the half form, so that the op has one ID before a block and in it; the hash of the full encoding
+    /// of every other op (path C, and an op whose signature has no half form and verifies for no account).
     pub fn op_id(&self) -> Result<[u8; 32], CodecError> {
-        Ok(sha256(&self.encode()?))
+        let half = match self.fee {
+            FeeMode::Token { .. } if !self.sig.is_half() => self.sig.half(),
+            _ => None,
+        };
+        match half {
+            Some(sig) => {
+                let mut bytes = self.encode_unsigned()?;
+                sig.serialize(&mut bytes)
+                    .map_err(|e| CodecError::Encode(e.to_string()))?;
+                Ok(sha256(&bytes))
+            }
+            None => Ok(sha256(&self.encode()?)),
+        }
+    }
+
+    /// This op with its signature in the half form and the signature's second half (D-154); `None` when the
+    /// signature is half already or has no half form.
+    pub fn split(&self) -> Option<(VmOp, [u8; 32])> {
+        let (sig, s) = self.sig.split()?;
+        Some((
+            VmOp {
+                sig,
+                ..self.clone()
+            },
+            s,
+        ))
+    }
+
+    /// This op with the full signature made of its half and the second half `s` (D-154); `None` when the signature
+    /// is full already.
+    pub fn join(&self, s: &[u8; 32]) -> Option<VmOp> {
+        let sig = self.sig.join(s)?;
+        Some(VmOp {
+            sig,
+            ..self.clone()
+        })
     }
 }
 

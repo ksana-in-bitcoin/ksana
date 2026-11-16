@@ -5613,7 +5613,7 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
     (D-141) and the compact encoding (D-080) make the data smaller. Measured on the fifth run's 1 281 payload transactions, a KiB of its ops' encoded bytes took about 113 vB, the pairs'
     own bytes and the headers included: there the constant asks about 2.3 times the cost. With few ops per settlement the fixed part dominates (a pair without a body is about 337 vB)
     and the floor undercharges. No one constant is right at every load; an operator corrects for either by naming a lower or a higher price, and whether to lower the constant is
-    left with the project owner.
+    left with the project owner (D-154 set it to 128, from the bytes measured with half signatures).
   - **Clients built before this entry**: an SDK from before it refuses the answer of a node with a price (`path_b has unknown field "per_kib_data"`), and a wallet that computes an
     op's fee from `per_kib` and its cost alone can suggest less than such a node packs for. ksana-web and ksana-points compute fees that way and follow when they move to an SDK
     with `pathBFee`. No node has a price today.
@@ -5633,3 +5633,86 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   it when it falls, an op with 30 times the gas packed for the same amount, `ksana_estimateFee` beside it and its fields without a price; `ksana-mempool/tests/pool.rs`: a raised
   floor, and a floor by bytes against one by cost; `sdk/ts/test/rpc.test.ts`; `playground/src/chain/ops.test.ts`); SPEC (the version history, §8.2, §14); `docs/RPC.md`;
   `docs/SIGNET.md`; ARCHITECTURE; D-095, D-149, D-150.
+
+## D-154 The signatures of a block's path B ops are half-aggregated (2026-11-16, decided by the project owner; a consensus change after the freeze, before mainnet: devnet and the signet restart from genesis; revises SPEC §4.1, §4.4, §6.1, §6.3, §7.1, §9.6, §11.1, §17.3 and adds §4.5; M66)
+
+- **Problem**: measured on the fifth stress run (the compression evaluation: 1 281 payload transactions, 158 815 ops), 71% of the bytes the chain landed on BTC were 64-byte
+  signatures; what is left is near what the compact encoding (D-080) and zstd (D-141) reach. The data on BTC is what bounds the chain's throughput (about 68 ops/s with BTC blocks
+  full, 24.6 vB per op) and what an op costs its carrier (D-149, D-153).
+- **Decision** (the project owner's, 2026-11-16: "agreed, do the half-aggregation", after asking whether it keeps "the data on BTC is enough to rebuild and verify the whole chain
+  independently"; it does, see the rationale). The rules are SPEC §4.5; in short:
+  1. **Scope**: path B entries (`Entry::Sponsored`) only. A path C op is signed alone in its own BTC transaction and is untouched.
+  2. **Half forms**: `SigScheme` gains `HalfBip340`, `HalfBip322`, `HalfBip322All` (Borsh variants 2 to 4, 32 bytes each: the signature's R). A block holds every path B op in half
+     form. A `Bip322Simple` splits only when its bytes are exactly `01 40 ‖ sig` or `01 41 ‖ sig ‖ 01`, the two forms SPEC §4.2 accepts.
+  3. **One aggregate per block**, as an entry: `Entry::Aggregate { s }` (variant 3), exactly one and the last when the block has a path B entry, none otherwise. `s` is the draft
+     specification's aggregate of the second halves over the items `(account, message, R)` in the entries' order; the message is the VmOp sighash for BIP340 and the BIP341
+     sighash of BIP322's `to_sign` for the two BIP322 forms.
+  4. **The aggregate is the rule for every node**: "a valid signature" in the state-independent rules of SPEC §6.3 becomes "the block's aggregate verifies". A node that holds the
+     second halves still decides by the aggregate, never by the restored signatures one by one.
+  5. **`entries_root`** is over the entries as the block has them: ops in half form, the aggregate entry a leaf like any other. The header's layout and the block hash do not
+     change; the producer has every signature before the PoW.
+  6. **`op_id` of a path B op** is the hash of its encoding in half form, whichever form is held; path C's is unchanged.
+  7. **Payload**: the compact entries get the three signature tags (2, 3, 4; 32 bytes each) and the aggregate entry (tag 3, 32 bytes). `EntryData` gets `Aggregate`. D-100's bound
+     on a body is measured in this form.
+  8. **The second halves travel beside the block** (`Block::second_halves`, one per path B entry), uncommitted like `settlement`: by gossip and sync, stored with the block, not on
+     BTC. They only serve to restore whole signatures when a block leaves the main chain and its ops return to the entry pool, which checks each alone. A block with a list of the
+     wrong length is refused by P2P as a malformed message, without judging the block.
+  9. **Mempool, relay and RPC** hold and take whole signatures as before; only the producer aggregates (`seal_entries`). An op carrying half a signature is refused wherever a
+     single op is checked.
+- **Rationale**:
+  - **SPEC §1's requirement holds**: every op's content, every R and the aggregate are on BTC and under `entries_root`; verifying needs those bytes and the accounts written beside
+    them, no state and nothing off BTC. Half-aggregation does not drop the proof that the accounts signed, as trusting the producer would; it folds n proofs into one.
+  - **It fits the existing rule**: one invalid path B signature already made the whole block invalid, and a body on BTC is always a block's whole body, so "all or nothing per
+    block" is what was checked before.
+  - **Before mainnet**: now it costs a restart of devnet and the signet; after mainnet it would need the upgrade mechanism (SPEC §6.9) with both encodings kept.
+  - **Users and wallets sign as before**; nothing in a wallet, the CLI's signing or the SDK's signing changes.
+- **Where the implementation differs from the draft shown to the project owner** (the same rules, another encoding):
+  - The aggregate is an **entry variant**, not a field `agg_s` with a leaf `sha256(0x02 ‖ agg_s)` after the entries: `entries_root` then commits to it by its ordinary rule, the
+    types `Block`, `Body` and `Payload` and the Merkle code stay as they were, and the compiler's exhaustive matches name every place that handles entries. It costs 1 tag byte per
+    body.
+  - The half forms are **three variants appended to `SigScheme`** (compact tags 2 to 4) instead of a separate `HalfSig` type with tags 0 to 2: one decoder and one `VmOp` type
+    serve both forms, and the old tags keep their meaning.
+- **Verification speed, and the gate that was not met**: the draft set a gate, "a full block of path B ops verifies no slower than today's single checks". Measured on x86_64 (the
+  machine of D-148), per signature and for a block of 480: single checks 28.7 µs, 13.8 ms; the aggregate over libsecp256k1's public interface (the implementation taken) 59.9 µs,
+  28.7 ms; over `k256` with a multi-scalar multiplication written for it 27.9 µs, 13.4 ms at 480 but 36 µs at 64 and 69 µs at 8, while the fifth run averaged 23.5 ops per
+  non-empty block. **The gate failed** for the first and held for the second only in full blocks. The first was taken all the same and the project owner told: at the roughly 99
+  ops/s BTC's space allows, a second of chain data takes about 6 ms to verify; a node checks a block's signatures twice (when it accepts the block and when it executes it), so a
+  full block costs about 57 ms where it cost about 28 ms, against a block time of seconds; and the second way would put a curve library without an independent audit and a new
+  multi-scalar multiplication into consensus code. Changing the way the sum is computed later changes one function and no rule. aarch64 is not measured.
+- **Not chosen**:
+  - **One aggregate for a whole payload** (all bodies of a settlement): 32 bytes less per further body, but the aggregate would belong to no block, `entries_root` could not commit
+    to it, and a body landed by a republish could not be checked alone.
+  - **Aggregating the aggregates** of merged blocks: the draft specification does not define it.
+  - **The aggregate in the header**: 32 bytes more in every header a payload carries, for nothing `entries_root` does not give.
+  - **Checking restored signatures one by one where the second halves are held** (as fast as before, with the same verdict when the scalar sum is also compared): more code on the
+    consensus path, and a node would take two routes to one verdict. Not built; it stays an option if verification time ever matters.
+  - **Checking the second halves when a block arrives**: it would cost the single checks the aggregate replaced, and a valid block can have no valid second halves at all.
+  - **An account index**: decoding would depend on state (SPEC §17.3).
+- **Costs and limitations**:
+  - **A consensus change after the freeze**: devnet and the signet restart from genesis; `tests/vectors/` are regenerated; the SDK and the explorer follow the new encoding; the
+    ID of every path B op changes.
+  - **An op's signature in a block cannot be checked alone** from BTC data, only with its block's whole body. A node holding the second halves, and the signer, still can.
+  - **The scheme is not a BIP**: it has security proofs and a draft specification with test vectors, not BIP340's deployment. An aggregate can verify while a signature in it would
+    not verify alone; that is why rule 4 exists. It goes into the external audit's scope.
+  - **Ops of a block rebuilt from BTC do not return to the pool** when the block leaves the main chain; their senders submit them again. The same on a node that got a copy whose
+    second halves were garbled by a relayer: the first copy a node accepts is the one it keeps, and it forwards it.
+  - **The ID of a path B op no longer covers the second half of its signature**: two encodings of one op that differ only there share an ID. Only the valid one is admitted to a
+    pool, and nothing is remembered by ID before the signature is checked.
+  - **The floor that follows the BTC fee rate counts less than the data of ops that share no account**: see the measurement below.
+- **Measured bytes, and D-153's vB per KiB set to 128** (local policy; the project owner offered 128 when asked whether to lower the 256): the fifth stress run's 1 281 payload
+  transactions (158 815 ops in 7 935 bodies with path B ops) were decoded, sealed with `seal_entries`, every aggregate verified, and encoded, compressed and put into their reveal
+  again. Commits and reveals together went from 3 899 645 to 2 704 393 vB (30.7% less; 24.55 to 17.03 vB per op), the payloads from 18 333 989 to 13 513 764 bytes, the envelope
+  data from 14 271 692 to 9 518 087; a BTC block filled with such settlements carries about 98 ops/s where it carried about 68. A KiB of the ops' encoded bytes (whole signatures,
+  as the pool measures an op) took 78 vB, the pairs' own bytes and the headers included, where it took 113. That run's ops came from 49 accounts, which the compact encoding and
+  zstd shorten; KSA transfers that share no account (216 bytes each, built for the measurement) take 125 to 131 vB per KiB for their data alone in bodies of 20 to 480, and 177 for
+  one alone. `PATH_B_VB_PER_KIB` is therefore 128, an eighth of a vB per byte: about 1.6 times the cost of the fifth run's load, about the data of transfers between accounts seen
+  once, and less than the cost of a settlement with few ops, whose own bytes (about 337 vB without a body) the floor never counted. An operator corrects with the price it names.
+  This is the fifth run's traffic encoded again, not a load run on the new encoding.
+- **Impact**: `ksana-crypto` (`halfagg.rs`: `aggregate`, `verify_aggregate`, `HalfSigned`, `MAX_AGGREGATED`; `vmop.rs`: `half_signed`, `seal_entries`, `unseal_entries`,
+  `verify_vmops_aggregate`; `bip322.rs`: `account_sighash`), `ksana-primitives` (`SigScheme`'s half variants with `split`, `half`, `join`, `is_half`; `Entry::Aggregate`,
+  `EntryData::Aggregate`; `Block::second_halves`, `second_halves_fit`; `VmOp::op_id`, `split`, `join`; `compact_entries.rs`), `ksana-execution` (`check_aggregate`, the builder's
+  aggregate bookkeeping), `ksana-btc` (`bodies.rs`), `ksana-node` (`producer.rs` seals its entries; `ops.rs` restores ops for the pool; `net.rs` refuses a list of the wrong length;
+  `rpc.rs` measures an op of a block by its whole signature for `ksana_estimateFee`; `store.rs`), `ksana-mempool`; tests (`ksana-crypto`: `halfagg` unit tests against the draft's
+  vectors, `vmop_aggregate.rs`, `vectors.rs`; `ksana-execution/tests/aggregate.rs`; `ksana-node/tests/m66_aggregate.rs`, `m18_btc_rebuild.rs`, `adversarial_blocks.rs`); the shared
+  vectors (`codec.json`, `signing.json`'s `aggregate`, `merkle.json`); the fuzz workspace (`vmop_decode`, the differential generator); the TypeScript SDK; SPEC; `docs/RPC.md`;
+  ARCHITECTURE.

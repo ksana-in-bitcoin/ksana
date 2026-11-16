@@ -114,7 +114,8 @@ fn a_heavy_tip_outweighs_a_branch_with_more_blue_work() {
             b.mine()
         })
         .collect();
-    assert!(light.iter().all(|block| block.entries.len() == 1));
+    // One op each, and the aggregate of its block (D-154)
+    assert!(light.iter().all(|block| block.entries.len() == 2));
     assert_eq!(b.ksa(&bob), 2);
 
     let report = b.accept(&heavy).unwrap();

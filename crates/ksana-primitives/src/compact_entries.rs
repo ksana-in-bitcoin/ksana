@@ -5,14 +5,15 @@
 //!
 //! | Element | Encoding |
 //! | --- | --- |
-//! | entry | `u8` variant (0 forced inclusion, 1 path B, 2 unlock), followed by that variant's fields |
+//! | entry | `u8` variant (0 forced inclusion, 1 path B, 2 unlock, 3 aggregate), followed by that variant's fields |
 //! | forced inclusion | the 32-byte BTC transaction ID |
 //! | unlock | varint height, varint acceptance index (D-079) |
+//! | aggregate | the 32-byte scalar (D-154) |
 //! | path B | VmOp: `version: u8`, key `account`, varint `nonce`, fee, varint `max_gas`, action, signature; `chain_id` is not written and is taken from the network params when decoding |
 //! | fee | `u8` variant: 0 `Token` followed by the varint amount; 1 `BtcNative` |
 //! | action | `u8` variant: 0 `Deploy` (byte string `code`, byte string `init_args`, funds list); 1 `Call` (key `contract`, string `method`, byte string `args`, funds list); 2 `AssetTransfer` (key `asset`, key `to`, varint `amount`) |
 //! | funds list | varint count, each item a key `asset` and a varint `amount` |
-//! | signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string |
+//! | signature | `u8` variant: 0 `Bip340` followed by 64 bytes; 1 `Bip322Simple` followed by a byte string; 2 `HalfBip340`, 3 `HalfBip322`, 4 `HalfBip322All`, each followed by 32 bytes (D-154: the form of a path B op in a block) |
 //! | key | varint `r`: `r ≥ 1` is the `r`-th key in the dictionary; `r = 0` is followed by the 32 bytes, which are appended to the end of the dictionary |
 //! | byte string, string | varint length and content; a string must be valid UTF-8 |
 //! | entry list | varint count and the entries |
@@ -24,8 +25,8 @@
 //! dictionary must be referenced, a reference cannot be out of range, varints must be minimally encoded, so for any
 //! accepted input re-encoding yields the same bytes.
 //!
-//! A path B KSA transfer (BIP340 signature): about 143 bytes when both keys occur for the first time, about 79 bytes
-//! when both are already in the dictionary (Borsh is 217 bytes).
+//! A path B KSA transfer (half a BIP340 signature): about 111 bytes when both keys occur for the first time, about 47
+//! bytes when both are already in the dictionary (Borsh is 185 bytes), and 33 bytes once per block for the aggregate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Result, Write};
@@ -37,6 +38,7 @@ use crate::KSA_ASSET_ID;
 const FORCED: u8 = 0;
 const SPONSORED: u8 = 1;
 const UNLOCK: u8 = 2;
+const AGGREGATE: u8 = 3;
 const FEE_TOKEN: u8 = 0;
 const FEE_NATIVE: u8 = 1;
 const ACTION_DEPLOY: u8 = 0;
@@ -44,6 +46,9 @@ const ACTION_CALL: u8 = 1;
 const ACTION_TRANSFER: u8 = 2;
 const SIG_BIP340: u8 = 0;
 const SIG_BIP322: u8 = 1;
+const SIG_HALF_BIP340: u8 = 2;
+const SIG_HALF_BIP322: u8 = 3;
+const SIG_HALF_BIP322_ALL: u8 = 4;
 /// The maximum number of elements preallocated when decoding (the count prefix is untrusted).
 const PREALLOCATE: usize = 64;
 
@@ -284,6 +289,10 @@ impl EntryWriter<'_> {
                 write_varint(&mut self.out, *height)?;
                 write_varint(&mut self.out, u64::from(*index))
             }
+            EntryData::Aggregate { s } => {
+                write_u8(&mut self.out, AGGREGATE)?;
+                self.out.write_all(s)
+            }
         }
     }
 
@@ -313,6 +322,18 @@ impl EntryWriter<'_> {
             SigScheme::Bip322Simple(sig) => {
                 write_u8(&mut self.out, SIG_BIP322)?;
                 write_bytes(&mut self.out, sig)
+            }
+            SigScheme::HalfBip340(r) => {
+                write_u8(&mut self.out, SIG_HALF_BIP340)?;
+                self.out.write_all(r)
+            }
+            SigScheme::HalfBip322(r) => {
+                write_u8(&mut self.out, SIG_HALF_BIP322)?;
+                self.out.write_all(r)
+            }
+            SigScheme::HalfBip322All(r) => {
+                write_u8(&mut self.out, SIG_HALF_BIP322_ALL)?;
+                self.out.write_all(r)
             }
         }
     }
@@ -413,6 +434,9 @@ impl EntryDecoder {
                 height: read_varint(reader)?,
                 index: read_varint_u32(reader)?,
             }),
+            AGGREGATE => Ok(EntryData::Aggregate {
+                s: read_array(reader)?,
+            }),
             _ => Err(invalid("unknown entry variant")),
         }
     }
@@ -437,6 +461,9 @@ impl EntryDecoder {
                 SigScheme::Bip340(sig)
             }
             SIG_BIP322 => SigScheme::Bip322Simple(read_bytes(reader)?),
+            SIG_HALF_BIP340 => SigScheme::HalfBip340(read_array(reader)?),
+            SIG_HALF_BIP322 => SigScheme::HalfBip322(read_array(reader)?),
+            SIG_HALF_BIP322_ALL => SigScheme::HalfBip322All(read_array(reader)?),
             _ => return Err(invalid("unknown signature scheme")),
         };
         Ok(VmOp {
@@ -708,7 +735,7 @@ mod tests {
         long.splice(nonce_at..=nonce_at, [0x81, 0x00]);
         check(long, "varint is not minimally encoded");
         // Unknown entry variant and action
-        check(vec![1, 3], "unknown entry variant");
+        check(vec![1, 4], "unknown entry variant");
         let mut action = bytes.clone();
         action[second + 1 + 1 + 1 + 1 + 1 + 1 + 3] = 3;
         check(action, "unknown action");
@@ -748,6 +775,118 @@ mod tests {
         check(bytes, "method name is not valid UTF-8");
         // Truncated byte string
         check(vec![1, 1, 0], "");
+    }
+
+    fn half(sig: SigScheme, nonce: u64) -> EntryData {
+        let mut entry = transfer(1, 2, nonce);
+        if let EntryData::Sponsored { op } = &mut entry {
+            op.sig = sig;
+        }
+        entry
+    }
+
+    /// Half a signature is its variant and 32 bytes, 32 bytes less than a whole BIP340 signature, and the aggregate
+    /// entry its variant and 32 bytes (D-154).
+    #[test]
+    fn half_signatures_and_the_aggregate_roundtrip() {
+        let entries = vec![
+            half(SigScheme::HalfBip340([6; 32]), 0),
+            half(SigScheme::HalfBip322([6; 32]), 1),
+            half(SigScheme::HalfBip322All([6; 32]), 2),
+            EntryData::Aggregate { s: [9; 32] },
+        ];
+        let mut encoder = EntryEncoder::new(DEVNET.chain_id);
+        let lengths: Vec<usize> = entries
+            .iter()
+            .map(|entry| encoder.encode(entry).unwrap().len())
+            .collect();
+        assert_eq!(lengths, [143 - 32, 79 - 32, 79 - 32, 33]);
+        let bytes = EntryEncoder::new(DEVNET.chain_id)
+            .encode_entries(&entries)
+            .unwrap();
+        assert_eq!(bytes.len(), 1 + 111 + 47 + 47 + 33);
+        // The variants: 2, 3 and 4 of a signature, 3 of an entry
+        assert_eq!(
+            [
+                bytes[1 + 111 - 33],
+                bytes[1 + 111 + 47 - 33],
+                bytes[1 + 111 + 47 + 47 - 33],
+                bytes[bytes.len() - 33]
+            ],
+            [2, 3, 4, 3]
+        );
+        assert_eq!(decode_all(DEVNET.chain_id, &bytes).unwrap(), entries);
+        for entry in &entries {
+            let alone = EntryEncoder::new(DEVNET.chain_id).encode(entry).unwrap();
+            assert!(alone.len() <= max_entry_len(entry).unwrap());
+        }
+        let payload = Payload::Settlement {
+            headers: vec![],
+            entries,
+            bodies: vec![],
+        };
+        let encoded = payload.encode(&DEVNET).unwrap();
+        assert_eq!(Payload::decode(&encoded, &DEVNET).unwrap(), payload);
+    }
+
+    /// Entries with half signatures and an aggregate that are cut short, followed by a byte, or carry an unknown
+    /// variant are rejected (D-154).
+    #[test]
+    fn cut_or_altered_half_signatures_and_aggregates_are_rejected() {
+        let entries = vec![
+            half(SigScheme::HalfBip340([6; 32]), 0),
+            half(SigScheme::HalfBip322All([6; 32]), 1),
+            EntryData::Aggregate { s: [9; 32] },
+        ];
+        let bytes = EntryEncoder::new(DEVNET.chain_id)
+            .encode_entries(&entries)
+            .unwrap();
+        for len in 0..bytes.len() {
+            assert!(
+                decode_all(DEVNET.chain_id, &bytes[..len]).is_err(),
+                "the first {len} bytes"
+            );
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(decode_all(DEVNET.chain_id, &longer).is_err());
+        let payload = Payload::Settlement {
+            headers: vec![],
+            entries,
+            bodies: vec![],
+        }
+        .encode(&DEVNET)
+        .unwrap();
+        assert!(Payload::decode(&payload, &DEVNET).is_ok());
+        for len in 0..payload.len() {
+            assert!(
+                Payload::decode(&payload[..len], &DEVNET).is_err(),
+                "the first {len} bytes of the payload"
+            );
+        }
+        let mut longer = payload.clone();
+        longer.push(0);
+        assert!(Payload::decode(&longer, &DEVNET).is_err());
+
+        let (sig_at, aggregate_at) = (1 + 111 - 33, bytes.len() - 33);
+        assert_eq!((bytes[sig_at], bytes[aggregate_at]), (2, 3));
+        let changed = |at: usize, value: u8| {
+            let mut copy = bytes.clone();
+            copy[at] = value;
+            decode_all(DEVNET.chain_id, &copy).map_err(|e| e.to_string())
+        };
+        for value in [5, 0xff] {
+            assert!(changed(sig_at, value)
+                .unwrap_err()
+                .contains("unknown signature scheme"));
+        }
+        for value in [4, 0xff] {
+            assert!(changed(aggregate_at, value)
+                .unwrap_err()
+                .contains("unknown entry variant"));
+        }
+        // A whole BIP340 signature where half of one stood takes 32 bytes of what follows, which then does not read
+        assert!(changed(sig_at, 0).is_err());
     }
 
     /// A VmOp whose chain ID differs from the network's cannot be written into a payload (it would be restored with

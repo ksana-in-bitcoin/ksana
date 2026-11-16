@@ -100,7 +100,9 @@ fn contract_trap_and_out_of_gas_roll_back_state_but_keep_fee_and_nonce() {
             sponsored(&a, 3, 4, 200_000, call(spin_id)),
         ])
         .unwrap();
-    for r in &out.receipts {
+    // The two ops, and after them the block's aggregate entry (D-154)
+    assert_eq!(out.receipts.len(), 3);
+    for r in &out.receipts[..2] {
         assert!(failed(&r.status), "{r:?}");
     }
     assert!(format!("{:?}", out.receipts[1].status).contains("gas"));
@@ -375,17 +377,19 @@ fn oversized_forced_op_counts_only_native_max_gas() {
                     builder.push(&one_more),
                     Err(BlockError::Invalid(_))
                 ));
+                push_aggregate(builder, &[&huge, &fill])?;
                 Ok(())
             },
         )
         .unwrap();
-    assert_eq!(built.receipts.len(), 2);
+    // The two entries and their aggregate (D-154)
+    assert_eq!(built.receipts.len(), 3);
     let run = |entries: &[Entry]| {
         chain.exec.execute_block(
             Arc::new(chain.state.clone()),
             Arc::new(chain.btc.clone()),
             &env,
-            entries,
+            &sealed(entries.to_vec()),
         )
     };
     assert_eq!(run(&[huge.clone(), fill.clone()]).unwrap(), built);

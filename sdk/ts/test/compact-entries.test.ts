@@ -169,3 +169,76 @@ test('a VmOp whose chain ID differs from the network cannot be written into a pa
   const other = { ...DEVNET, chain_id: 7 };
   assert.deepEqual(decodePayload(encodePayload(payload, other), other), payload);
 });
+
+function half(kind: 'HalfBip340' | 'HalfBip322' | 'HalfBip322All', nonce: bigint): EntryData {
+  const entry = transfer(1, 2, nonce);
+  if (entry.kind === 'Sponsored') entry.op.sig = { kind, bytes: filled(6) };
+  return entry;
+}
+
+test('half a signature takes its variant and 32 bytes, and the aggregate entry its variant and 32 bytes (D-154)', () => {
+  const entries: EntryData[] = [
+    half('HalfBip340', 0n),
+    half('HalfBip322', 1n),
+    half('HalfBip322All', 2n),
+    { kind: 'Aggregate', s: filled(9) },
+  ];
+  const encoder = new EntryEncoder(DEVNET.chain_id);
+  // 32 bytes less than with the whole BIP340 signature, on the keys' first appearance and after it
+  assert.deepEqual(
+    entries.map((entry) => encoder.encode(entry).length),
+    [143 - 32, 79 - 32, 79 - 32, 33],
+  );
+  const bytes = new EntryEncoder(DEVNET.chain_id).encodeEntries(entries);
+  assert.equal(bytes.length, 1 + 111 + 47 + 47 + 33);
+  // the variants: 2, 3 and 4 of a signature, 3 of an entry
+  assert.deepEqual([bytes[1 + 111 - 33], bytes[1 + 111 + 47 - 33], bytes[1 + 111 + 47 + 47 - 33], bytes[bytes.length - 33]], [2, 3, 4, 3]);
+  assert.deepEqual(decodeEntries(bytes), entries);
+  const payload: Payload = { kind: 'Settlement', headers: [], entries, bodies: [] };
+  assert.deepEqual(decodePayload(encodePayload(payload, DEVNET), DEVNET), payload);
+});
+
+test('entries cut short, followed by a byte or with an unknown variant are rejected (D-154)', () => {
+  const entries: EntryData[] = [half('HalfBip340', 0n), half('HalfBip322All', 1n), { kind: 'Aggregate', s: filled(9) }];
+  const bytes = new EntryEncoder(DEVNET.chain_id).encodeEntries(entries);
+  const read = (input: Uint8Array) => new EntryDecoder(DEVNET.chain_id).entries(new ByteReader(input, 'entries'));
+  for (let length = 0; length < bytes.length; length++) {
+    assert.throws(() => read(bytes.subarray(0, length)), /truncated|exceeds the remaining/, `the first ${length} bytes`);
+  }
+  // the decoder of the entries leaves what follows them to its caller, and a payload has nothing after its last field
+  const payload = encodePayload({ kind: 'Settlement', headers: [], entries, bodies: [] }, DEVNET);
+  assert.deepEqual(decodePayload(payload, DEVNET).kind, 'Settlement');
+  assert.throws(() => decodePayload(Uint8Array.of(...payload, 0), DEVNET), CodecError);
+  for (let length = 1; length < payload.length; length++) {
+    assert.throws(() => decodePayload(payload.subarray(0, length), DEVNET), CodecError, `the first ${length} bytes of the payload`);
+  }
+  const changed = (at: number, value: number) => {
+    const copy = bytes.slice();
+    copy[at] = value;
+    return copy;
+  };
+  const sigAt = 1 + 111 - 33;
+  const aggregateAt = bytes.length - 33;
+  assert.equal(bytes[sigAt], 2);
+  assert.equal(bytes[aggregateAt], 3);
+  assert.throws(() => read(changed(sigAt, 5)), /unknown signature scheme/);
+  assert.throws(() => read(changed(sigAt, 0xff)), /unknown signature scheme/);
+  assert.throws(() => read(changed(aggregateAt, 4)), /unknown entry variant/);
+  assert.throws(() => read(changed(aggregateAt, 0xff)), /unknown entry variant/);
+  // a whole BIP340 signature where half of one stood takes 32 bytes of what follows, which then does not read
+  assert.throws(() => read(changed(sigAt, 0)), Error);
+});
+
+test('half a signature and an aggregate of another length than 32 bytes are not written (D-154)', () => {
+  for (const length of [0, 31, 33, 64]) {
+    for (const kind of ['HalfBip340', 'HalfBip322', 'HalfBip322All'] as const) {
+      const entry = half(kind, 0n);
+      if (entry.kind === 'Sponsored') entry.op.sig = { kind, bytes: filled(6, length) };
+      assert.throws(() => new EntryEncoder(DEVNET.chain_id).encode(entry), /half a signature must be 32 bytes/, `${kind} of ${length}`);
+    }
+    assert.throws(
+      () => new EntryEncoder(DEVNET.chain_id).encode({ kind: 'Aggregate', s: filled(9, length) }),
+      /an aggregate must be 32 bytes/,
+    );
+  }
+});

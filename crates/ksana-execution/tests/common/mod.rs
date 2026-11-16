@@ -8,7 +8,9 @@ pub mod probe;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ksana_crypto::{account_of, keypair_from_secret, sign_native_vmop, sign_vmop, Keypair};
+use ksana_crypto::{
+    account_of, keypair_from_secret, seal_entries, sign_native_vmop, sign_vmop, Keypair,
+};
 use ksana_execution::keys::{self, AccountState, LockedFee, UnlockCursor};
 use ksana_execution::{
     BlockEnv, BlockError, BlockOutcome, BtcView, Executor, GenesisConfig, MemState, MergedBlock,
@@ -90,6 +92,29 @@ pub fn forced(u: &User, nonce: u64, max_gas: u64, action: Action) -> Entry {
         btc_txid,
         op: native_op(u, nonce, btc_txid, max_gas, action),
     }
+}
+
+/// The entries as a block carries them (D-154): the path B ops with half their signatures and the aggregate entry
+/// after them, as the producer seals them. Entries that are sealed already, or that cannot be, are returned unchanged,
+/// so that a test may hand over a block's entries in either form.
+pub fn sealed(entries: Vec<Entry>) -> Vec<Entry> {
+    match seal_entries(&entries) {
+        Ok((sealed, _)) => sealed,
+        Err(_) => entries,
+    }
+}
+
+/// Pushes the aggregate entry of the entries a build accepted, as the producer ends a block with path B entries
+/// (D-154); nothing when there are none.
+pub fn push_aggregate(
+    builder: &mut ksana_execution::BlockBuilder<'_>,
+    accepted: &[&Entry],
+) -> Result<(), BlockError> {
+    let accepted: Vec<Entry> = accepted.iter().map(|entry| (*entry).clone()).collect();
+    if let Some(aggregate @ Entry::Aggregate { .. }) = sealed(accepted).last() {
+        builder.push(aggregate)?;
+    }
+    Ok(())
 }
 
 /// Unlock up to acceptance position `(height, index)` (D-079).
@@ -337,7 +362,14 @@ impl Chain {
         entries: Vec<Entry>,
     ) -> Result<BlockOutcome, BlockError> {
         let env = self.env();
-        let blocks: Vec<MergedBlock> = merged.iter().map(|(m, _)| m.clone()).collect();
+        let entries = sealed(entries);
+        let blocks: Vec<MergedBlock> = merged
+            .iter()
+            .map(|(m, _)| MergedBlock {
+                entries: sealed(m.entries.clone()),
+                ..m.clone()
+            })
+            .collect();
         let out = self.exec.execute_chain_block(
             Arc::new(self.state.clone()),
             Arc::new(self.btc.clone()),

@@ -418,13 +418,14 @@ test('ksana_getBlock: block header and entries are parsed strictly per D-007', a
   assert.equal(info.accepted_height, 7n);
   assert.deepEqual(info.merged, [fromHex(H('a1')), fromHex(H('a2'))]);
   assert.deepEqual(info.header, fromJson('BlockHeader', block.value.header));
-  assert.equal(info.entries.length, 4);
+  assert.equal(info.entries.length, 5);
+  assert.equal(info.entries[4]!.kind, 'Aggregate');
   assert.deepEqual(toJson('Entry', info.entries[1]!), block.value.entries[1]);
   assert.deepEqual(info.settlement, {
     commit: fromHex(block.value.settlement.commit),
     reveal: fromHex(block.value.settlement.reveal),
   });
-  assert.equal(info.receipts.length, 4);
+  assert.equal(info.receipts.length, 5);
   await client.getBlock();
   assert.deepEqual(calls[1]!.params, ['latest']);
   // An unknown field in the entries: rejected
