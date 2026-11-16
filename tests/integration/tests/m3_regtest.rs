@@ -224,6 +224,7 @@ impl Fast {
             net: None,
             pow_algorithm: None,
             pruning: ksana_node::chain::Pruning::default(),
+            vm: Default::default(),
         })
         .unwrap();
         let client = HttpClientBuilder::default()

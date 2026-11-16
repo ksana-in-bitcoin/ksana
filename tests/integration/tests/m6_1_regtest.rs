@@ -146,6 +146,7 @@ fn check_after_reorg(btc: &Btc, a: &Fast, left: &Block, last: u64) {
         net: None,
         pow_algorithm: None,
         pruning: ksana_node::chain::Pruning::default(),
+        vm: Default::default(),
     })
     .unwrap();
     let chain = b.chain();

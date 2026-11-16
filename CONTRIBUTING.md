@@ -61,6 +61,8 @@ Longer runs that CI does not start on every push:
 cargo test -p ksana-consensus --release --test reorg_race -- --ignored --nocapture       # payment reversal table (SPEC §10.4)
 cargo test -p ksana-consensus --release --test selfish_mining -- --ignored --nocapture   # withholding table (SPEC §17.4)
 cargo test -p ksana-indexer --release --test deep_reorg -- --ignored --nocapture        # Bitcoin reorgs of every depth around the anchor
+cargo test -p ksana-vm --release --test gas_calibration -- --ignored --nocapture --test-threads=1         # time per gas in the VM (D-148)
+cargo test -p ksana-execution --release --test gas_calibration -- --ignored --nocapture --test-threads=1  # time of whole blocks on the state store, about 4 minutes; KSANA_GAS_CALIBRATION_PLAIN=1 runs it without D-151's code cache and memory pool, which takes two to five times as long (D-148, D-151)
 KSANA_SOAK_SECONDS=3600 devnet/soak.sh   # random path B and C operations against a devnet, the indexer checked against the nodes
 ```
 

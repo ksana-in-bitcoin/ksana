@@ -50,4 +50,5 @@ pub use executor::{
 };
 pub use genesis::GenesisConfig;
 pub use genesis_file::{Allocation, GenesisError, GenesisFile, BLOCK_SHARE_ACCOUNT_PLACEHOLDER};
+pub use ksana_vm::{CodeCache, VmOptions};
 pub use state::{AssetChange, ChangeKind, Event, MemState, Overlay, StateSource, WriteSet};

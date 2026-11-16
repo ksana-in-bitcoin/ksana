@@ -5327,3 +5327,176 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `ROOMY_BLOCK_WEIGHT`, `ROOM_DISTRUST_BLOCKS`, `FeePolicy::room_reading`, `trusts_room`, `misjudged`, `with_cap`, `with_target`, the policy is no longer `Copy`; `rescue.rs`:
   `BUMP_GRACE`, `Rescuer::with_bump_grace`, `Rescuer::bump`); tests (`adversarial_liveness.rs`, `crates/ksana-btc/tests/mock.rs`, `tests/integration/tests/m3_client.rs`); SPEC (the
   version history, §7.2, §7.7, §14), `docs/ARCHITECTURE.md`, `docs/RPC.md`; ksana-site (the parameters page).
+
+## D-148 The gas table is measured: instructions and host functions fit the block time, fresh memory and code not yet compiled do not (2026-11-13, the calibration SPEC §13.1 and §14 left open; D-013, F-07; no value changes, M60)
+
+- **Problem**: D-013 set the gas table and `BLOCK_GAS_LIMIT` by order of magnitude and left the time a unit of gas takes on real hardware unmeasured; §13.1 marked the limit "unverified, to be
+  measured" and §14 kept the calibration as work before mainnet. The first audit's F-07 (D-098 h) asked for the cold compilation of adversarial modules to be measured with it. The question is how
+  long a node takes over a block that spends its gas, or fills its data, with the one thing that is slowest for its price, against the 5 seconds of `TARGET_BLOCK_TIME`.
+- **Decision**: the measurement is made and recorded; no gas value, no limit and no other consensus rule changes with this entry. Two test files hold it, both ignored by default and asserting
+  nothing about the times: `ksana-vm/tests/gas_calibration.rs` measures the VM alone on the in-memory host (instructions, host functions, instances, compilation), and
+  `ksana-execution/tests/gas_calibration.rs` executes whole blocks with the executor on the node's state store (`ksana-state`, RocksDB and the Merkle tree), timing the execution, the root a
+  node computes to check a block (`preview_root`) and the commit. What they found:
+  1. **Instructions and host functions are priced within the block time.** 100 000 000 gas of any one instruction took 0.01 to 0.04 s (0.12 to 0.45 ns per gas; `memory.fill` and
+     `memory.copy` of long ranges less). The slowest host functions for their price: `sha256` over 60 000 bytes 0.45 s, `call_funds` 0.27 s, `verify_schnorr` 0.08 s, the rest under 0.1 s.
+     A block's data full of transfers (377) executed in 20 ms, full of calls of a small contract (450) in 64 ms, and 76 ops of 63 contract instances each (99.0M gas) in 0.17 s.
+  2. **The state's writes take most of the block time and grow with the state.** 9 300 `storage_set` of new keys in one op (99.2M gas) on a state of 930 000 keys: execution 6 ms, the root
+     1.4 to 2.2 s, the commit 1.5 to 2.2 s, together 3.0 to 3.8 s for a node that checks the block and then commits it; overwriting 9 300 keys 3.1 s. The root alone took 0.49 s at 186 000
+     keys and 1.47 s at 930 000. 47 000 `storage_get` (98.7M gas) took 0.61 to 0.68 s, of missing keys 0.66 s; 149 values of 64 KiB 0.22 s.
+  3. **The first touch of an instance's memory is not priced.** An instance may have 16 MiB and an op 64 instances and 256 MiB (D-013); a store to each page of 16 MiB costs about 45 000
+     gas and took about 11 ms, the kernel mapping each page on its first touch. A block of 99 ops, each calling 15 instances that touch their 16 MiB (98.5M gas), executed in 16.4 to 17.6 s;
+     450 ops of one such instance each, all a block's data holds (29.2M gas), in 4.1 s. Measured beside the tests on the same machine: mapping, touching and unmapping 16 MiB 10.6 ms, the
+     same after `madvise(DONTNEED)` 10.2 ms, touching 16 MiB already resident 0.03 ms, clearing it 0.57 ms.
+  4. **Compiling code that is not in the cache is not priced, and the cache can be overrun.** A call pays 20 000 gas and 1 per byte of code whether or not the node has the code compiled,
+     about 80 000 gas for 60 KiB. Compiling one module of that size took 10 to 26 ms for plain shapes, 0.18 to 0.32 s for nested branches, 0.23 s for a long run of branches, 0.72 s for
+     branches over 1 000 locals and 1.04 s over 8 000. The cache holds the 256 codes compiled last and drops the oldest, so calls that go round 260 contracts never find one compiled: with
+     260 such contracts deployed, a block of 450 calls in turn (35 to 38M gas, the data's limit) executed in 55.2 s for the run of branches and in 342.9 s for the 1 000 locals; the same
+     calls over 200 of the contracts in 1.3 and 7.4 s while part was compiled and in 72 and 74 ms once all were. Deploying compiles as well: 0.14 and 0.76 s a deployment, of which a
+     block's data holds one.
+- **Rationale**: (1) says the table's instruction and host function prices need no change for the block time: nothing among them reaches a tenth of it. (2) to (4) are not prices that are
+  too low but costs the table does not see at all, and each has a remedy in the node that changes no rule, which is where D-098 h put F-07: for (4) keeping the compiled code of every
+  deployed contract instead of the last 256, so that only a deployment compiles and a block holds one; for (3) giving instances memory that is already resident; for (2) committing the tree
+  the check computed instead of computing it again, which takes about half of the time. Whether those are enough, or whether consensus must price memory by the page and code by what it
+  costs to compile, can only be answered by measuring them, and a price is a consensus change (§6.9, or before mainnet a restart from genesis) that is the project owner's to decide. So
+  this entry changes nothing and §14 lists what follows from it.
+- **Costs and limitations**: one machine, 8 virtual cores of an Intel Xeon under KVM with 31 GB of memory, Linux 6.8, x86_64, a release build with rustc 1.98.1 and wasmtime 49.0.1; no
+  aarch64, no machine of the size a node is expected to run on, and the times of a virtual machine are not those of hardware. The slow modules are the worst shapes found by hand, not a bound:
+  the compiler's time has no proven limit in the size of the code, and a slower shape may exist. The state was measured up to 930 000 keys with the node's memory bounds (D-103); the
+  growth beyond it is not measured. The block of 342.9 s needs 260 deployments first, one a block, and its 450 calls are ops someone signs and pays for at the local fee market's price
+  or a producer includes in its own block; what the attack costs is not worked out here. Until the remedies are in, a node of this release can be made to take minutes over a block by
+  whoever deploys such contracts; the public signet runs with that.
+- **Impact**: tests only (`crates/ksana-vm/tests/gas_calibration.rs`, `crates/ksana-execution/tests/gas_calibration.rs`); SPEC (the version history, §13.1's `BLOCK_GAS_LIMIT`, §14);
+  CONTRIBUTING (the two measurements); D-013, D-098 h (F-07).
+
+## D-149 The carrier reward is observed on the signet: no producer attaches a settlement to every block and the fixed part does not pay for doing so; bodies and early republishes are what it does not pay for (2026-11-15, D-095's "to be observed"; no value changes, M61)
+
+- **Problem**: D-095 left one thing to be observed on the signet: whether the fixed part of the carrier reward (`CARRIER_BPS` of each reward slot) tempts producers to attach their own
+  settlement to every block, in which case it would be counted by bytes instead; SPEC §13.1 marked the three values "unverified, to be measured" and §14 kept the observation as work before
+  mainnet.
+- **Decision**: the observation is made and recorded; no value and no rule changes with this entry. The data is the signet's fifth stress run (15 nodes besides the two seeds, 8 of them
+  with a funded wallet and their own bitcoind, v0.2.2): heights 10 629 to 17 400, 7 175 blocks (403 of them merged) with 9 911 reward slots, and the 1 278 KSN1 transactions that landed
+  their data in BTC blocks 330 607 to 330 656, at the signet's 2 sat/vB throughout. Each block's carrier was derived again from the payloads on BTC by D-095's rule and checked two ways: for
+  the 3 182 main-chain blocks and the merged blocks the node's RPC still answers for, it is the node's `carrier_account` without exception; and the credits it gives each producer account
+  equal the on-chain balances of the 15 accounts created for the run, 11 of them to within 10^-5 KSA (the rounding of fee halves) and the other four after one red block and three empty
+  blocks whose headers landed after the data ends (the amounts match; the cause is inferred). The two seed accounts hold earlier balances and are not checked this way.
+  1. **Attaching a settlement to every block** did not happen: the ten producers with a funded wallet attached one to 29.2% of their blocks (21% to 33% each), which is the node's batching
+     policy (D-077). Every node ran that policy under one operator, so the signet shows what the policy does, not what a producer who changes it would do. What the figures say about the
+     temptation: a batched settlement was 2 861 vB on average and earned its sender 2.88 KSA from other producers' blocks, about 2 000 sat per KSA; a settlement of one block alone is
+     estimated at about 840 vB (337 vB without bodies, the smallest seen, plus one block's body at the average, 505 vB; not measured as such) for the 0.495 KSA of its own slot, about
+     3 400 sat per KSA. The fixed part pays less per satoshi for the settlement of every block than for the batch, so it does not by itself make that the better policy.
+  2. **Where the reward went**: 3 497 KSA (7 065 slots) moved from producers to other carriers. The seven producers without a wallet gave 5.8% to 6.0% of their rewards; the ten with one
+     gave 2.3% to 4.2% and received 235 to 708 KSA each, a net of +0.5 to +550 KSA. 27.9% of what moved came from 95 empty blocks, whose weight is up to 120 slots (59.4 KSA for one
+     header): counting per slot is D-095's choice, and it makes a carrier's income uneven over a run of this length. Most of those empty blocks are from the idle hours after the load.
+  3. **What it cost**: 7 788 580 sat for those 3 497 KSA, 2 227 sat per KSA at 2 sat/vB and in proportion at other fee rates; the signet gives KSA no price, so whether the reward covers
+     the cost has no answer here. D-095 reckoned a settlement at 250 to 750 vB; under load about 88% of a settlement is bodies, which D-095 leaves to the proportional part, and the
+     sponsored fees of the whole run were 0.0019 KSA, so that part paid nothing. Payloads carried 8 039 headers of which 6 615 were the first to land (18% duplicates), and 73 of the 1 201
+     settlements earned nothing from other producers: within a BTC block the earliest transaction takes the reward, which on mainnet is a contest of fee rates.
+  4. **Republishes** were paid for and mostly not rewarded: 80 of them cost 927 910 sat (12% of the BTC spent) and earned 34.65 KSA (1%). Of the 523 blocks a republish landed first, 433
+     landed exactly `ANCHOR_DEPTH + CARRIER_REPOST_DELAY` BTC blocks after their anchor, one short of the wait that makes the payee eligible, and the 5% stayed with their producers. The
+     node republishes after `REPUBLISH_PATIENCE` (2) BTC blocks (D-143), so its republish lands at that height: it is sent to keep the settled prefix moving (D-046), not for the reward.
+  The run used 82 857 vB of each BTC block on average (8.3%) and 240 101 vB (24%) of the block after a gap of 26 minutes, in 27 and 77 KSN1 transactions.
+- **Limitations and what stays open**: one run, one operator, one policy, nobody adversarial; no fee market on BTC's side and no price on KSA's. The two ratios and the counting per slot
+  stay as they are: nothing here shows they must change, and a change is a consensus change through the upgrade schedule. Who pays for bodies when sponsored fees are near zero, and the
+  contest for the first place in a BTC block, go to the fee-market simulation (SPEC §14, D-101, D-102). Whether the node waits one BTC block longer before a republish, to be paid for it at
+  the price of landing data a block later, is local policy and the project owner's to decide; it is not changed here.
+- **Impact**: documents only: SPEC (the version history, §13.1's carrier reward row, §14, §17's row); D-095.
+
+## D-150 The node's fee policy is replayed over mainnet's fee history: the cap holds in a quiet market and pauses path B in the two busiest months, a pair without room is never raised past the estimate, and a race pays the estimate, not the cap (2026-11-15, the simulation D-101 and D-102 left to SPEC §14; D-117, D-147, D-149; no value changes, M62)
+
+- **Problem**: D-101 and D-102 left one thing to SPEC §14: a simulation of BTC's fee market against the landing race of §6.5, since the signet has no fee market (2 sat/vB throughout). D-147
+  added that the room rule's two thresholds come from the signet, and D-149 handed over two questions: who pays for bodies while sponsored fees are near zero, and the contest of fee rates
+  for the first place in a BTC block.
+- **Decision**: the simulation is made and recorded; no value and no rule changes with this entry. The node's policy (the estimate for 3 BTC blocks within the floor 2 and the cap
+  100 sat/vB, D-102; the room rule and its doubling, D-117; the one-block bump and its memory, D-147; CPFP after `BUMP_AFTER` blocks) is replayed block by block over three stretches of
+  mainnet, 4 501 blocks each, from each block's weight and fee-rate percentiles (mempool.space): heights 971 446 to 975 946 (the 32 days to 2026-11-15, the median of the blocks' median
+  rates 1 sat/vB), 838 000 to 842 500 (April 2024, 37 sat/vB) and 787 500 to 791 500 (May 2023, 53 sat/vB), the last two chosen as the busiest months on record. A settlement started at
+  every block; path B counts as paused at a BTC tip when a block's data has not landed four BTC blocks after it was produced (`SETTLEMENT_TIMEOUT` 6 less `ANCHOR_DEPTH` 2, D-046). Each
+  figure is given for two readings of the rate a full block takes, its tenth percentile and its minimum, the second being the kinder one.
+  1. **The cap**: in the recent stretch no block asked more than 100 sat/vB, the node paid 2.2 sat/vB on average and path B was paused at 1.3% (0.3%) of the tips. In April 2024 18.9% of
+     the blocks asked more than the cap, for 144 blocks in a row at the longest, and path B was paused at 19.6% (15.7%) of the tips; in May 2023 19.6% of the blocks, 80 in a row, and
+     19.3% (2.8%). With a cap of 500 the pauses are 7.3% and 8.2% (tenth percentile): what remains is the estimate lagging, item 2.
+  2. **No raise without room** (read from the code, `rescue.rs`): a waiting pair is bumped to the current estimate; it is doubled per BTC block only while the mempool shows room (D-117),
+     and to the next-block estimate once the room was misjudged (D-147). A pair that pays an estimate that turned out too low, with no room, waits for the estimate to rise. With the
+     doubling applied whether or not there is room, the simulation's pauses fall to none in the recent stretch and, with a cap of 500, to 1.7% and 0.4% in the two busy months; with the cap
+     of 100 they stay at 16.8% and 14.7%. How often the estimate lags depends on Bitcoin Core's estimator, which is replaced here by a stand-in (limitations).
+  3. **A race pays the estimate** (read from the code, D-102 item b): while a competing chain is on BTC the node pays the next-block estimate within the cap. What it costs to keep honest
+     data out of `BTC_FINALITY_CONFS` blocks in a row, filling them above the rate the honest pair pays: a median of 5.8 BTC in the recent stretch when the pair pays the cap, and 0.14 BTC
+     when it pays an estimate that does not follow the six stuffed blocks. The second figure is a lower bound resting on that assumption, which was not tested against Bitcoin Core. In
+     April 2024 the cost was nothing in 10.2% of the six-block windows: the market alone asked more than the cap.
+  4. **The room rule** (D-117, D-147) rarely applies on mainnet: 2.1%, 0.3% and 0.35% of the blocks were at most half full. The floor of 2 sat/vB is twice the recent median.
+  5. **What data costs**: the fifth run's load (about 7 ops per second, 82 857 vB per BTC block, D-149) costs 0.27 BTC a day at the recent rates and 7.9 and 9.1 BTC a day in the two busy
+     months, while a node's default path B floor is one base unit and no rate per byte (SPEC §8.2) and `ksana_estimateFee` suggests the lowest rate lately accepted. That answers D-149's
+     first question as it stands: the reward pays for bodies, and nothing ties the price of path B to the BTC a producer spends. Its second question, the contest for the first place in a
+     BTC block, is not answered: block-level data does not show the order within a block.
+- **Limitations and what stays open**: `estimatesmartfee` has no history and is stood in for by the rate at which 95% of the starts in the last 144 blocks landed within the target; there
+  is no mempool history, so room is read from the previous block's weight alone, which overstates it; Ksana's own transactions do not move the market, although the load is 8.3% of a
+  block; package limits, replacement and relay are not modelled. The figures show direction and size, not a guarantee. Three changes follow for the node's local policy and are not made
+  here: a raise per BTC block as the pause comes nearer, with or without room, up to the cap; the cap paid at once in a race; and a default path B floor that follows the node's BTC rate and
+  an operator's KSA price. The default of the cap, and whether `SETTLEMENT_TIMEOUT` should change (a consensus change), are the project owner's to decide.
+- **Impact**: documents only: SPEC (the version history, §14); D-101, D-102, D-117, D-147, D-149.
+
+## D-151 Three remedies in the node for the costs D-148 found: compiled code is kept on disk, instances take their memory from a pool, and the tree computed for a block's check is the one committed (2026-11-15, follows D-148; D-013, D-098 h's F-07; local to the node, no consensus change and no gas value changed, M63)
+
+- **Problem**: D-148 measured three costs the gas table does not see, each of which took a block near or past `TARGET_BLOCK_TIME` on the machine measured: calls that go round more
+  contracts than the 256 whose compiled code a node keeps in memory (55 and 343 s a block), instances that touch memory the kernel maps anew for each of them (16 to 18 s), and the Merkle
+  tree computed once to check a block and again to commit it (3 to 4 s on a state of 930 000 keys). It named a remedy in the node for each and left the question of prices, which are
+  consensus, until the remedies were measured.
+- **Decision**: the three remedies are made; none changes what a block computes, the gas it spends or any rule. A node with them and a node without them accept the same blocks.
+  1. **Compiled code is kept on disk** (`ksana-vm`: `VmOptions::code_cache`, wasmtime's cache of compiled code). The node compiles a contract's code once, at the latest when it executes
+     the deployment, and writes the result under `vm-cache` in its data directory, one file per code and compiler configuration; a later call whose code has left the 256 kept in memory
+     reads the file instead of compiling, and so does the first call after a restart. `--vm-code-cache-mib` (node and indexer; 16 384 by default, 0 keeps none) bounds the directory: past
+     it wasmtime's worker deletes the files used least recently, at most once an hour, and those codes are compiled again when called. A file that cannot be read back is compiled again.
+  2. **Instances take their memory from a pool** (`VmOptions::pooled_calls`, wasmtime's pooling allocator with `linear_memory_keep_resident` at `MAX_WASM_MEMORY`). An instance's memory
+     comes from a slot the node keeps mapped and resident and clears between uses, with the kernel's dirty-page scan where there is one (Linux 6.7 and later) and by clearing all of it
+     otherwise. The pool has `MAX_INSTANCES_PER_OP` (64) slots for each call it serves at once, and its other limits are the ones code validation already keeps (one memory of at most
+     `MAX_WASM_MEMORY`, at most one table of at most 4 096 elements), so it refuses nothing the allocator on demand accepts; a top-level call takes one of `pooled_calls` places before it
+     creates its store and returns it when the store is gone, and a further call waits, so the pool cannot run out: an instance refused for want of a slot would be a failure only this
+     node sees. `--vm-pooled-calls` (node and indexer) is 1 by default and 0 turns the pool off. The read-only calls of the RPC (`ksana_call`) run on a second VM
+     without a pool that shares the files of (1), so they never hold a place a block waits for. When the pool cannot be set up (it reserves address space), the node logs the reason and
+     runs without it.
+  3. **The tree of the check is the tree committed** (`ksana-state`: `StateDb::preview_root` keeps what it computed, and `commit` uses it when the version and the whole write set are
+     the ones previewed, comparing every key and value; otherwise it computes as before). A rollback, a pruning, a reset and the commit itself drop what was kept. Both the node's check of
+     a block and a producer's own block preview the root first, so each computes the tree once.
+  Measured again with the same blocks on the same machine as D-148 (`KSANA_GAS_CALIBRATION_PLAIN=1` runs the measurement without (1) and (2); (3) has no switch):
+
+  | A block of | D-148 | Same day, without (1) and (2) | With the remedies |
+  |---|---|---|---|
+  | 450 calls going round 260 contracts (a long run of branches) | 55.2 s | 32.7 s | 0.69 s |
+  | the same, branches over 1 000 locals | 342.9 s | 193.0 s | 0.86 s |
+  | 99 ops of 15 instances each touching 16 MiB (98.5M gas) | 16.4 to 17.6 s | 9.1 to 9.2 s | 0.94 to 0.99 s |
+  | 450 ops of one instance touching 16 MiB (a block's data) | 4.1 s | 2.5 s | 0.30 s |
+  | 304 ops of 15 instances of 16 MiB left untouched (99.0M gas) | not measured | 0.15 s | 0.07 s |
+  | 76 ops of 63 instances of a small contract (99.0M gas) | 0.17 s | 0.13 s | 0.06 s |
+  | 9 300 `storage_set` of new keys on 930 000 keys, check and commit | 3.0 to 3.8 s | 0.93 to 0.97 s | 0.93 to 0.96 s (root 0.88 to 0.90 s, commit 0.05 to 0.06 s) |
+  | 9 300 `storage_set` over existing keys, check and commit | 3.1 s | 1.00 to 1.03 s | 0.99 to 1.00 s |
+
+  The runs of the same day without (1) and (2) were about 1.7 times faster than D-148's on the same machine (a virtual machine; every figure of that run is
+  lower, `storage_get` included, and the cause was not looked for), so the remedies are to be read against the middle column: 47 and 224 times for the two rotations, 9 to 10 times for touched memory. For (3) the middle column already has
+  the remedy; its measure is the commit, 0.05 s after a preview where computing the tree takes 0.9 s. The root alone took 1.4 to 2.2 s in D-148 and 0.9 s here: that difference is the
+  day's, not the remedy's.
+- **Rationale**: each remedy removes work a node repeated, not work a block asks for, so none needs a rule: the same code was compiled again, the same pages were mapped again, the same
+  tree was computed again. Kept on disk rather than in memory, compiled code costs no memory that grows with the number of contracts, survives a restart, and its key (the code and the
+  compiler's configuration and version) is wasmtime's own, so a node that upgrades compiles again instead of loading code of another compiler. The places are per top-level call and not
+  per block because that is the unit whose instances are bounded (64); a holder runs only the contract and its host functions, which read a snapshot of the state and of BTC and take no
+  lock of the chain, so waiting for a place cannot deadlock. One place is the default because a place can pin 1 GiB (below) and the node's executions (the check of a block, a
+  producer's own block, the verdict on a candidate chain) rarely coincide; with one place they take turns call by call. The preview is matched on the whole write set and not on a
+  digest or on the block, so that no path, a retry, a reorganization to a sibling or a different block at the same height, can commit a tree computed for other writes.
+- **Costs and limitations**:
+  - Measured on the one machine of D-148 (x86_64, Linux 6.8, 8 virtual cores); no aarch64, no other operating system, no kernel before 6.7. Without the dirty-page scan a slot is cleared
+    whole on each use: a prototype of that mode on the same machine took 1.6 to 1.8 s for the block of 99 ops (1.1 to 1.2 s with the scan) and 2.8 to 2.9 s for the block of 304 ops of
+    untouched memory, which the allocator on demand executes in 0.15 s; the pool is still the better worst case there, and `--vm-pooled-calls 0` is the way back.
+  - **Memory**: each place may keep up to 64 × 16 MiB = 1 GiB resident for as long as the node runs once contracts have used that much, and whoever pays for such calls can make it so.
+    The node's other bounds (D-103) do not count it. The pool also reserves address space for its slots, which a machine with a limit on it may refuse (the node then runs without).
+  - **Disk and trust**: the files are loaded as machine code without a check of their own, so `vm-cache` must be writable by the node alone, as its binary is. The limit is soft
+    (checked at most hourly), and beyond it the behaviour before this entry returns for the codes deleted: calls that go round more code than the limit holds compile again. The size of
+    compiled code per byte of contract code is not bounded here; the 520 contracts of the measurement took 14 MB.
+  - **Deployment still compiles**, 0.08 and 0.44 s a deployment of the two shapes measured, and a block's data holds one; the compiler's time has no proven bound (D-148). The files
+    read back were in the page cache; a read from a cold disk was not measured.
+  - **The tree still grows with the state**: the root of 9 300 writes took 0.26 s at 186 000 keys and 0.89 s at 930 000, and larger states are not measured.
+  - Whether memory is priced by the page and code by what it costs to compile stays the project owner's decision (SPEC §14); with the remedies, no block measured takes more than a
+    second on this machine, against the 5 seconds of `TARGET_BLOCK_TIME`.
+- **Impact**: `ksana-vm` (`VmOptions`, `CodeCache`, `Vm::with_options`, the places; wasmtime's `cache` and `pooling-allocator` features), `ksana-state` (`StateDb::preview_root`,
+  `commit`), `ksana-execution` (`Executor::with_options`, the VM of read-only calls; the block measurement runs as a node does), `ksana-node` and `ksana-indexer` (`ChainOptions::vm`,
+  `NodeConfig::vm`, `IndexerConfig::vm`, `--vm-code-cache-mib`, `--vm-pooled-calls`); tests (`ksana-vm/tests/options.rs`, the state store's preview tests, the determinism and
+  random-sequence tests run a third engine configuration, every other node of the multi-node tests runs with the options); SPEC (the version history, §9.1, §13.1's `BLOCK_GAS_LIMIT`, §14);
+  ARCHITECTURE; CONTRIBUTING; D-148.

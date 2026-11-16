@@ -454,6 +454,105 @@ fn preview_root_writes_nothing() {
     assert_eq!(state.commit(1, &more).unwrap(), preview);
 }
 
+/// D-151: a commit that follows a preview of the same writes writes exactly what a commit alone writes, and a preview
+/// is not used for other writes, another version or a state that changed since.
+#[test]
+fn a_commit_after_a_preview_writes_what_a_commit_alone_writes() {
+    let genesis = ws(&[(b"a", Some(b"1")), (b"b", Some(b"2")), (b"c", Some(b"3"))]);
+    // a no-op write, a deletion of a missing key, a change, a deletion and a new key
+    let block = ws(&[
+        (b"a", Some(b"1")),
+        (b"x", None),
+        (b"b", Some(b"20")),
+        (b"c", None),
+        (b"d", Some(b"4")),
+    ]);
+    let other = ws(&[(b"a", Some(b"9")), (b"e", Some(b"5"))]);
+
+    let (_plain_dir, mut plain) = open();
+    plain.commit(0, &genesis).unwrap();
+    let root = plain.commit(1, &block).unwrap();
+    let after_block = snapshot_all(&plain);
+    let other_root = plain.commit(2, &other).unwrap();
+    let after_other = snapshot_all(&plain);
+
+    // previewed twice, then committed
+    let (_dir, mut state) = open();
+    state.commit(0, &genesis).unwrap();
+    assert_eq!(state.preview_root(&block).unwrap(), root);
+    assert_eq!(state.preview_root(&block).unwrap(), root);
+    assert_eq!(state.commit(1, &block).unwrap(), root);
+    assert_eq!(snapshot_all(&state), after_block);
+    // the preview does not outlive its commit: the same writes are previewed on the new state
+    assert_eq!(state.preview_root(&block).unwrap(), root);
+    assert_eq!(state.commit(2, &other).unwrap(), other_root);
+    assert_eq!(snapshot_all(&state), after_other);
+
+    // a preview of other writes is not what gets committed
+    let (_dir, mut state) = open();
+    state.commit(0, &genesis).unwrap();
+    assert_ne!(state.preview_root(&other).unwrap(), root);
+    assert_eq!(state.commit(1, &block).unwrap(), root);
+    assert_eq!(snapshot_all(&state), after_block);
+
+    // a preview made before a rollback is not used after it: version 2 is previewed on one state and committed, under
+    // the same number, on another
+    let alternative = ws(&[(b"b", Some(b"20")), (b"f", Some(b"6"))]);
+    let (_plain_dir, mut plain) = open();
+    plain.commit(0, &genesis).unwrap();
+    plain.commit(1, &alternative).unwrap();
+    let on_alternative = plain.commit(2, &block).unwrap();
+    let expected = snapshot_all(&plain);
+    let (_dir, mut state) = open();
+    state.commit(0, &genesis).unwrap();
+    state.commit(1, &other).unwrap();
+    assert_ne!(state.preview_root(&block).unwrap(), on_alternative);
+    state.rollback_to(0).unwrap();
+    state.commit(1, &alternative).unwrap();
+    assert_eq!(state.commit(2, &block).unwrap(), on_alternative);
+    assert_eq!(snapshot_all(&state), expected);
+
+    // a preview on an empty database is made for version 0 and not used for a genesis at another version
+    let (_plain_dir, mut plain) = open();
+    plain.commit(7, &genesis).unwrap();
+    let (_dir, mut state) = open();
+    let genesis_root = state.preview_root(&genesis).unwrap();
+    assert_eq!(state.commit(7, &genesis).unwrap(), genesis_root);
+    assert_eq!(snapshot_all(&state), snapshot_all(&plain));
+}
+
+/// D-151: a preview made before a pruning or a reset is not used after it.
+#[test]
+fn a_preview_does_not_outlive_a_pruning_or_a_reset() {
+    let genesis = ws(&[(b"a", Some(b"1")), (b"b", Some(b"2"))]);
+    let first = ws(&[(b"a", Some(b"10"))]);
+    let block = ws(&[(b"b", None), (b"c", Some(b"3"))]);
+
+    let (_plain_dir, mut plain) = open();
+    plain.commit(0, &genesis).unwrap();
+    plain.commit(1, &first).unwrap();
+    plain.prune(1).unwrap();
+    let root = plain.commit(2, &block).unwrap();
+    let expected = snapshot_all(&plain);
+
+    let (_dir, mut state) = open();
+    state.commit(0, &genesis).unwrap();
+    state.commit(1, &first).unwrap();
+    assert_eq!(state.preview_root(&block).unwrap(), root);
+    state.prune(1).unwrap();
+    assert_eq!(state.commit(2, &block).unwrap(), root);
+    assert_eq!(snapshot_all(&state), expected);
+    consistency::check(&state);
+
+    let (_plain_dir, mut plain) = open();
+    let root = plain.commit(3, &block).unwrap();
+    let expected = snapshot_all(&plain);
+    state.preview_root(&genesis).unwrap();
+    state.reset().unwrap();
+    assert_eq!(state.commit(3, &block).unwrap(), root);
+    assert_eq!(snapshot_all(&state), expected);
+}
+
 /// D-101: the root of committing on top of an older version equals the root of committing after rolling back to it,
 /// with nothing written and the newer versions left as they are.
 #[test]

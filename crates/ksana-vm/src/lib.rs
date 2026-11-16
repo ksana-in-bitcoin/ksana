@@ -29,7 +29,7 @@ mod instrument;
 pub mod limits;
 mod validate;
 
-pub use engine::{Vm, INIT_METHOD, MAX_CALL_INPUT_BYTES};
+pub use engine::{CodeCache, Vm, VmOptions, INIT_METHOD, MAX_CALL_INPUT_BYTES};
 pub use host::{
     AssetMetaInput, AssetPolicy, CallOutcome, CallRequest, ContractCode, FailureReason, Host,
     HostError, NativeOutput, NativeTxInfo, VmError,

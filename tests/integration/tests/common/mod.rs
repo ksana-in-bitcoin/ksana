@@ -393,6 +393,9 @@ impl Fast {
             net: None,
             pow_algorithm: pow_algorithm.clone(),
             pruning: ksana_node::chain::Pruning::default(),
+            // the node keeps compiled code on disk and pools memory (D-151), the indexers beside it do neither: the
+            // two must agree
+            vm: ksana_execution::VmOptions::in_data_dir(&dir.path().join("data"), 64, 1),
         })
         .unwrap();
         let client = HttpClientBuilder::default()
@@ -766,6 +769,12 @@ impl Net {
                 }),
                 pow_algorithm: None,
                 pruning: ksana_node::chain::Pruning::default(),
+                // every other node keeps compiled code on disk and pools memory (D-151)
+                vm: if i % 2 == 1 {
+                    ksana_execution::VmOptions::in_data_dir(&dir.path().join("data"), 64, 1)
+                } else {
+                    ksana_execution::VmOptions::default()
+                },
             })
             .unwrap();
             node.set_paused(true);
@@ -887,6 +896,7 @@ pub fn indexer(fast: &Fast) -> (Indexer, tempfile::TempDir) {
         btc: Arc::new(RpcClient::new(&url, &rpc_user, &rpc_pass).unwrap()),
         pow_algorithm: fast.pow_algorithm.clone(),
         pruning: ksana_btc::prune::Pruning::default(),
+        vm: Default::default(),
     })
     .unwrap();
     (indexer, dir)

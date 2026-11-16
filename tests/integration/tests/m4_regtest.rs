@@ -404,6 +404,7 @@ impl Net {
                 }),
                 pow_algorithm: None,
                 pruning: ksana_node::chain::Pruning::default(),
+                vm: Default::default(),
             })
             .unwrap();
             node.set_paused(true);

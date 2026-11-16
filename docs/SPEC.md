@@ -17,6 +17,24 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-15, three remedies in the node for the costs the gas measurement found (M63, D-151)**: no consensus change and no value changed. The node keeps the compiled code of every
+  contract on disk (`--vm-code-cache-mib`), gives contract instances memory from a pool it keeps resident (`--vm-pooled-calls`), and commits the Merkle tree it computed to check a block
+  instead of computing it again. On the machine of D-148 the blocks that took 55 and 343 seconds (calls going round 260 contracts), 16 to 18 seconds (instances touching fresh memory)
+  and 3 to 4 seconds (storage writes on 930 000 keys) now take under a second each (33, 193 and 9 seconds without the first two remedies on the day of this measurement). Not measured: aarch64, a kernel without the dirty-page scan (before Linux 6.7), a larger state. The
+  pool may keep up to 1 GiB resident, and beyond the cache's size limit code is compiled again as before. Whether memory and compilation get a price in consensus stays open (§14).
+- **2026-11-15, the node's fee policy is replayed over mainnet's fee history (M62, D-150)**: no consensus change and no value changed. Over the last 32 days the cap of 100 sat/vB was never
+  reached and path B would have been paused at about 1% of the BTC tips; in the two busiest months on record (April 2024, May 2023) at up to a fifth of them. A waiting pair is raised past
+  the estimate only while the mempool shows room, which on mainnet is rare, and in a race the node pays the next-block estimate, not the cap. Bitcoin Core's estimator is stood in for, so
+  the figures show direction and size. Three changes of local policy follow and are not made here (§14).
+- **2026-11-15, the carrier reward is observed on the signet (M61, D-149)**: no consensus change and no value changed. In the fifth stress run no producer attached a settlement to every
+  block (29.2% of the blocks of producers with a wallet carried one, the batching policy), and the fixed part pays less per satoshi for doing so than for the batch; 3 497 KSA moved to
+  carriers for 7 788 580 sat of BTC fees at 2 sat/vB. Two things differ from what D-095 reckoned: a settlement under load is about 2 900 vB, most of it bodies the proportional part does
+  not pay for while sponsored fees are near zero, and a node's republish lands one BTC block before its payee is eligible. Both go to the fee-market simulation and the owner's decision (§14).
+- **2026-11-13, the gas table is measured (M60, D-148)**: no consensus change and no value changed. On the machine measured, a block that spends `BLOCK_GAS_LIMIT` on any one instruction
+  or host function executes in under half a second, and a block's data full of transfers or calls in under a tenth; a block of storage writes takes 3 to 4 seconds on a state of 930 000
+  keys, most of it in the Merkle tree, computed once to check the block and once to commit it. Two costs are not priced at all: the first touch of an instance's memory (a block of calls
+  that touch 16 MiB in each instance took 16 to 18 seconds) and the compilation of code the node's cache of 256 no longer holds (a block of 450 calls going round 260 slow-compiling
+  contracts took 55 to 343 seconds). What follows is in §14: the node's remedies, and the question of pricing in consensus (§13.1, §14).
 - **2026-11-13, the room for the floor fee rate is read from the last BTC block as well, and a pair it misjudged is bumped after one BTC block and remembered (M59, D-147)**: no
   consensus change; the three items §14 kept from the review of D-117. The next BTC block has room only while bitcoind's mempool holds at most half a block and bitcoind's best block took
   at most half a block's weight (`getblockstats`). A pair that waited while that room showed and that a BTC block found two minutes or more later leaves out is bumped at once to the
@@ -1254,7 +1272,9 @@ The interface between contracts and the VM (exports, calling convention, host fu
   objects and `core::fmt` can all be used. At run time, wasmtime's `max_wasm_stack` is additionally set to 32 MiB and blocks are executed on a dedicated thread with a 64 MiB stack, so the native stack limit is never
   hit before the metering.
 - The inter-contract call depth limit is `MAX_CALL_DEPTH` (the top level is level 1); a single op has at most 64 instances, and the linear memories of all instances total at most 256 MiB.
-- Compilation results are cached by code hash; whether or not they are cached does not affect consensus.
+- Compilation results are cached by code hash; whether or not they are cached does not affect consensus. A node may keep them on disk as well
+  (`--vm-code-cache-mib`, under `vm-cache` in its data directory, trusted as its binary is) and may give instances memory from a pool it keeps resident (`--vm-pooled-calls`); both are local to the node and neither
+  changes what a block computes (D-151).
 
 ### 9.2 Contract lifecycle
 
@@ -1754,7 +1774,7 @@ and confirming it changes no code; the project owner confirmed all six such valu
 | `BTC_QUERY_DEPTH` | 6 | Contracts can only read BTC block headers with 6 or more confirmations (§9.4), the BTC 6-confirmation convention | Settled |
 | `BTC_FINALITY_CONFS` | 6 | D-082 (the project owner's decision): taking back a BTC-final block requires reorging 6 BTC blocks, the BTC 6-confirmation convention. A determination rests on no heavier chain having appeared by the BTC block that made it, so a reorg of that block alone with a heavier chain revokes it; since D-114 a block is reported BTC-final only once that BTC block has 6 confirmations too (without a heavier chain, a reported block leaves the finalized chain only when a reorg of 11 BTC blocks removes its data; BTC-final after about 110 minutes instead of 60) | Settled |
 | `MIN_SETTLEMENT_FEERATE` | 1 sat/vB | Consensus floor = BTC's minimum relay fee rate; the actual fee rate is local policy (default 2 sat/vB) | Settled |
-| `BLOCK_GAS_LIMIT` | 100 000 000 | The order-of-magnitude design of D-013: a storage write is about 10^4 gas, so the number of storage writes per block is bounded (≤ 10^4); the execution time per unit of gas has not been calibrated on real hardware; adjustable via the upgrade schedule (D-076) | Settled; unverified, to be measured (gas table calibration) |
+| `BLOCK_GAS_LIMIT` | 100 000 000 | The order-of-magnitude design of D-013: a storage write is about 10^4 gas, so the number of storage writes per block is bounded (≤ 10^4); measured on one x86_64 machine (D-148): a block spending the limit on any one instruction or host function executes in under 0.5 s, on storage writes in 3 to 4 s with the root and the commit on a state of 930 000 keys, while fresh instance memory and code the compilation cache does not hold are not priced and took a block past the block time until the node kept compiled code on disk and pooled instance memory (D-151: under 1 s for every block measured; §14); adjustable via the upgrade schedule (D-076) | Settled; measured (D-148, D-151): holds for instructions and host functions and, with the node's remedies, for the blocks measured; open for the price of memory and compilation and for a larger state |
 | `NATIVE_MAX_GAS` | 1 000 000 | D-036: a forced-inclusion entry counts `min(max_gas, NATIVE_MAX_GAS)` toward the block's gas, limiting how much of the fast lane path C can crowd out; adjustable via the upgrade schedule | Settled; unverified, to be measured |
 | `MAX_OP_BYTES` | 64 KiB | D-005: the limit of a single VmOp (including contract code); the example contracts (token, amm, amm-factory, ksa-exchange) are all far below it | Settled |
 | `MAX_BLOCK_DATA_BYTES` | 80 KiB | D-005: below the roughly 100 kvB limit of a BTC standard transaction; since D-081 the payload is in the witness, and 80 KiB is roughly 20 kvB | Settled |
@@ -1772,7 +1792,7 @@ and confirming it changes no code; the project owner confirmed all six such valu
 | `MERGE_DEPTH` | 720 (blue score) | D-063: about 1 hour at 5-second blocks, the same as Kaspa's 1 hour; since D-097 it also places the merge-depth root, and with `GHOSTDAG_K` sets the pruning depth (2 209 blue score); the pruning tests run with small values (random DAGs with `GHOSTDAG_K` 3 and `MERGE_DEPTH` 20; the node and indexer tests with 2 and 4), the bound itself holds for any values | Settled |
 | `BLOCK_REWARD` / `REWARD_HALVING_INTERVAL` / `REWARD_INTERVAL_DOUBLINGS` / `KSA_MAX_SUPPLY` | 4.2 KSA / 12 500 000 / 2 / 210 million KSA | D-089 and D-105 (the project owner's decisions): halving periods of 12 500 000, 25 000 000 and then 50 000 000 DAA score (about 2, 4 and then 8 years at one block per 5 seconds), so the subsidy that pays for landing data on BTC lasts decades longer; the upper bound of total rewards is exactly the max supply, no genesis allocation; the tests in `params.rs` sum exactly (exactly 4 KSA short of the cap, 0 from period 29, about year 220) | Settled; verified (summation test) |
 | `BLOCK_SHARE_BPS` / `BLOCK_SHARE_END` | Not published (placeholders 0 / 0) | D-089: a part of each slot below the end point is credited to the block share account, splitting only the block reward and not the sponsored fees; the two values are not published yet, and a mainnet node does not start until they are filled in (D-134); the receiving wallet is the only open item (§17.1) | Settled; not published |
-| `CARRIER_BPS` / `CARRIER_FEE_BPS` / `CARRIER_REPOST_DELAY` | 500 (5%) / 5 000 (50%) / 2 | D-095 (the project owner's decision); D-095 "to be observed": whether the fixed part tempts producers to attach their own settlement to every block, and the two ratios are retuned via the upgrade schedule from signet observations | Settled; unverified, to be measured (signet observation) |
+| `CARRIER_BPS` / `CARRIER_FEE_BPS` / `CARRIER_REPOST_DELAY` | 500 (5%) / 5 000 (50%) / 2 | D-095 (the project owner's decision); D-095 "to be observed": whether the fixed part tempts producers to attach their own settlement to every block, and the two ratios are retuned via the upgrade schedule from signet observations | Settled; observed on the signet (D-149): producers do not attach a settlement to every block; whether the reward covers the BTC cost has no answer without a price |
 | `MAX_UNLOCK_BATCH` | 1 024 | D-074: the maximum number of positions one unlock entry unlocks, bounding the unlock writes of a single block | Settled |
 | `EMPTY_BLOCK_DIFFICULTY` / `MAX_EMPTY_BLOCK_WEIGHT` | 12 / 120 | D-084 (N = 12) and D-090 (cap 120, the project owner's decision): the idle header interval doubles from about 60 seconds to about 10 minutes, while the time per unit of DAA score still converges to 5 seconds; node and consensus tests cover weight, work, DAA score and reward slots | Settled; verified (tests) |
 | `UPGRADES` | empty | No scheduled upgrade (D-076) | Settled |
@@ -1837,8 +1857,17 @@ merge-depth root rule, a consensus change the project owner approved, D-097):
 - The block share: its values published in `MAINNET` (D-134) and its receiving wallet (the only open item, §17.1); the mainnet genesis config: timestamp, anchor, genesis `bits` by expected
   hashrate (`mainnet/README.md`).
 - Run paths B and C end to end with real wallets (Unisat / Xverse) on the public signet (`docs/SIGNET.md`, M32).
-- The measurements marked "unverified, to be measured" in §13.1: the GPU advantage of Argon2id (the retuning path of D-094), the propagation delay of a real network (`GHOSTDAG_K`), the calibration of the gas table
-  (`BLOCK_GAS_LIMIT`), and the observation of `SETTLEMENT_TIMEOUT` and the carrier reward on signet; a simulation of the BTC fee market against the landing race of §6.5 (D-101, D-102).
+- The measurements marked "unverified, to be measured" in §13.1: the GPU advantage of Argon2id (the retuning path of D-094), the propagation delay of a real network (`GHOSTDAG_K`), and the observation
+  of `SETTLEMENT_TIMEOUT` on signet. The carrier reward is observed (M61, D-149): its values stay; whether a node's republish waits one BTC block longer, to be eligible for the reward,
+  is the project owner's decision (local policy).
+- The node's BTC fees: the policy is replayed over mainnet's fee history (M62, D-150; the simulation D-101 and D-102 asked for). In the node, without a consensus change: raise a waiting
+  pair per BTC block as the pause of §6.4 comes nearer, whether or not the mempool shows room; pay the cap at once while a competing chain is on BTC; let the default path B floor follow
+  the node's BTC rate and an operator's KSA price (§8.2). The default of `--max-settlement-feerate` is the project owner's decision; the contest of fee rates for the first place in a BTC
+  block is not answered by block-level data and stays to be observed; the estimate's lag is to be measured against Bitcoin Core itself.
+- The gas table: it is measured (M60, D-148), and the three costs it does not price have a remedy in the node each (M63, D-151: compiled code kept on disk, instance memory from a pool,
+  the tree of a block's check committed), with which no block measured takes more than a second on the one machine measured. Still to do: measure on aarch64, on a machine of a node's
+  expected size, on a kernel before Linux 6.7 and with a larger state; measure a deployment's compilation, which the remedies leave as it was, and the calls that go round more code than
+  the disk limit holds. In consensus, the project owner's decision: whether memory is priced by the page and a deployment or a call by what its code costs to compile.
 - The node's fee policy (local policy): for the floor paid while the mempool has room (D-117's limitations), a bump after one missed BTC block to the next-block estimate, a memory of a pair the room
   misjudged, and a reading of the room that is not biased low (`getblockstats`) are done (M59, D-147); their constants come from the signet and are to be looked at again against mainnet's blocks (D-147's
   limitations). P2A pinning (D-102's limitations) is closed (M48, D-131).
@@ -2022,7 +2051,7 @@ by the measured GPU advantage (the retuning path of D-094, a work item before ma
 | Forced-inclusion entries carrying the VmOp | Not carried (the indexer derives it from the BTC transaction per §7.4) | The derivation already covers anchor-invalid blocks (D-056, D-093), and since D-104 a block whose native transaction a deep BTC reorg moved or double-spent leaves the main chain instead of being executed again; to be reconsidered only with a change of the payload format |
 | Querying ops dropped from the entry pool (D-068) | The web page marks an op "dropped" after two consecutive queries return `-32004` | Having the node keep the reason an op was dropped (`dropped`) is an RPC improvement, not a consensus change |
 | Settlement funding pool | None; producers bring their own BTC, obtained with KSA at the exchange contract | To be reconsidered when small miners lack BTC; first watch how carrying goes on signet after D-095 |
-| Carrier reward ratios and wait | 500 / 5 000 / 2 (D-095) | The two ratios are retuned via the upgrade schedule after observation on signet; if the fixed part tempts producers to attach their own settlement to every block, switch to counting by bytes (D-095 "to be observed"); `CARRIER_REPOST_DELAY` is fixed per network |
+| Carrier reward ratios and wait | 500 / 5 000 / 2 (D-095) | The two ratios are retuned via the upgrade schedule after observation on signet; if the fixed part tempts producers to attach their own settlement to every block, switch to counting by bytes (D-095 "to be observed"); `CARRIER_REPOST_DELAY` is fixed per network; observed on the signet (D-149): no producer did, and the fixed part does not pay for it |
 | Sell-pressure hedging for the token | No fee burning, no token-holding threshold for producers (contracts can burn their own assets) | To be decided from fee-market data once mainnet is running |
 | Inclusion lists | None; producers choose entries freely | If producers become highly concentrated and censorship appears, wire in inclusion lists similar to Ethereum's FOCIL via the upgrade schedule |
 | Further compression | None | Signature half-aggregation, a global dictionary by account index (the latter makes decoding depend on state): to be re-evaluated when BTC fees become the main cost |

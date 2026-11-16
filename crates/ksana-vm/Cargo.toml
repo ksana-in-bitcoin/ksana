@@ -20,6 +20,7 @@ thiserror.workspace = true
 wat.workspace = true
 ksana-test-contracts.workspace = true
 hex.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

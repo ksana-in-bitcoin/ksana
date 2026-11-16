@@ -435,6 +435,7 @@ pub fn open_indexer_with_algorithm(
         btc: mock.clone(),
         pow_algorithm: Some(algorithm),
         pruning: ksana_btc::prune::Pruning::default(),
+        vm: Default::default(),
     })
     .unwrap()
 }
@@ -453,6 +454,7 @@ pub fn open_indexer_with(
         btc: mock.clone(),
         pow_algorithm: None,
         pruning: ksana_btc::prune::Pruning::default(),
+        vm: Default::default(),
     })
     .unwrap()
 }
