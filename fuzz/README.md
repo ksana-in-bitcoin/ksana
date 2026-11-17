@@ -51,4 +51,8 @@ cargo run --release --manifest-path fuzz/Cargo.toml --example differential -- --
 `KSANA_DIFF_NODE` names the Node.js program (default `node`). A divergence that libFuzzer finds is a panic printing the
 request and both descriptions, and the input is kept in `artifacts/ts_differential/`. Left out on purpose: a BTC
 transaction without inputs (no block can hold one, and rust-bitcoin reads a segwit-marked one that Bitcoin Core and the
-SDK refuse) and an event longer than a contract can emit (`MAX_EVENT_BYTES`).
+SDK refuse) and an event longer than a contract can emit (`MAX_EVENT_BYTES`). One difference is accepted and not
+reported (D-141): a BTC transaction whose envelope data is a zstd frame whose blocks the node's decoder refuses (matches
+reaching before the frame's start, a compressed block writing past the content the frame states) and from which the
+SDK's decoder (`fzstd`) reads a payload; the rest of the two descriptions must still be equal, and so must every other
+frame.
