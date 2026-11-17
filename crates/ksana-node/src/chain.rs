@@ -5088,13 +5088,13 @@ impl Chain {
         }
         let tip = load_tip(&*self.dag()?, &self.params, &fork_hash)?;
         let mut inner = self.write()?;
+        self.store.forget_holdings_below(fork_height)?;
         self.store.rewind_main(
             &fork_hash,
             fork_height.saturating_add(1)..=old_height,
             &disconnected,
         )?;
         inner.state.rollback_to(fork_height)?;
-        cover_holdings(&self.store, &inner.state, fork_height)?;
         inner.tip = tip;
         {
             let mut main = self.main.write().map_err(poisoned)?;
@@ -5104,6 +5104,7 @@ impl Chain {
         }
         let mut open = self.open.lock().map_err(poisoned)?;
         self.drop_records(&mut open, &disconnected)?;
+        cover_holdings(&self.store, &inner.state, fork_height)?;
         Ok(disconnected)
     }
 
@@ -5198,6 +5199,7 @@ impl Chain {
         {
             let mut inner = self.write()?;
             // Change the store first: the batch above the fork point, then those below it in batches (to limit memory)
+            self.store.forget_holdings_below(0)?;
             self.store.rewind_main(
                 &fork_hash,
                 fork_height.saturating_add(1)..=old_height,
@@ -5205,7 +5207,6 @@ impl Chain {
             )?;
             rewind_store(&self.store, &*self.dag()?, 0, fork_height)?;
             reset_state_to_genesis(&mut inner.state, &self.genesis, &self.genesis_writes)?;
-            cover_holdings(&self.store, &inner.state, 0)?;
             inner.tip = tip;
             let history: Arc<dyn MainHistory> = Arc::new(StoreHistory(Arc::clone(&self.store)));
             *self.main.write().map_err(poisoned)? = Arc::new(
@@ -5215,6 +5216,7 @@ impl Chain {
             self.drop_records(&mut open, &disconnected)?;
             // The settlement records below the fork point are rebuilt during re-execution
             open.clear();
+            cover_holdings(&self.store, &inner.state, 0)?;
         }
         for hash in &prefix {
             self.connect_chain_block(hash)?;

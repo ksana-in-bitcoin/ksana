@@ -5725,7 +5725,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   big-endian. It is a superset of built-in assets whose balance key has existed for the account in state on the main chain from that base onward. Entries are never removed: a transfer to
   zero deletes the state balance key (D-019), but its index entry stays, and rollback can restore it. At startup, the node scans state balances and covers the index when it is absent or the
   recovered state is below its base; a rollback below the base does the same from the rolled-back state. A main-chain connection adds the balance keys it credits in the same store batch as
-  the new tip. The RPCs look up only that account's indexed asset IDs, read each actual balance from state and skip absent keys; their answers and cursor format do not change.
+  the new tip. On rollback below the base, the node first removes the marker and covers after the tip and main chain are rolled back. The RPCs look up only that account's indexed asset IDs,
+  read each actual balance from state and skip absent keys; their answers and cursor format do not change.
 - **Rationale**: the account prefix narrows work to assets the account has held, without changing either RPC or relying on historical values as present balances. A superset avoids an undo log
   on every reorg: the state remains authoritative, and stale entries are cheap to skip.
 - **Alternatives**:

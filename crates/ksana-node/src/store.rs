@@ -35,7 +35,8 @@
 //!
 //! The holdings index (`holdings`, D-155) is a local superset: entries are added in the batch that connects a block
 //! with the new tip and are not removed when a balance key disappears. Startup builds it from state when absent or
-//! when recovery has rolled below its base; the same coverage is done after a rollback below the base.
+//! when recovery has rolled below its base; a rollback below the base first removes the marker, then covers after the
+//! tip and main chain are rolled back.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -540,6 +541,16 @@ impl ChainStore {
                 Ok(u64::from_be_bytes(bytes))
             })
             .transpose()
+    }
+
+    /// Marks the index unbuilt so a failed cover is retried at next start rather than leaving a base that claims coverage (D-155).
+    pub fn forget_holdings_below(&self, height: u64) -> Result<(), NodeError> {
+        if self.holdings_base()?.is_some_and(|base| base > height) {
+            let mut batch = WriteBatch::default();
+            batch.delete_cf(self.cf(CF_META)?, META_HOLDINGS);
+            self.write(batch)?;
+        }
+        Ok(())
     }
 
     /// Adds holdings to the index and marks it as covering `base`. Entries are only added, never removed.
@@ -1593,6 +1604,18 @@ mod tests {
             store.holdings(&account, None).unwrap(),
             [[0x01; 32], [0x02; 32], [0x03; 32]]
         );
+    }
+
+    #[test]
+    fn forget_holdings_below_only_removes_a_higher_base() {
+        let (_dir, store) = open();
+        store.cover_holdings(&[], 10).unwrap();
+
+        store.forget_holdings_below(12).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(10));
+
+        store.forget_holdings_below(5).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), None);
     }
 
     #[test]
