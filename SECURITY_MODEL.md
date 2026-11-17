@@ -13,7 +13,8 @@ and nothing on them holds value.
 - **Settlement**: each block's headers and body are written to Bitcoin as settlement and republish payloads.
 - **Indexer**: runs on its own, reads only bitcoind, rebuilds the state and checks every state root.
 - **Wallet signatures**: Taproot keys sign with BIP340 and BIP322; path B pays fees in KSA, path C carries the
-  operation in the user's own BTC transaction.
+  operation in the user's own BTC transaction. A block holds half of each path B signature and one aggregate for the
+  block (BIP340 half-aggregation, D-154).
 
 ## Components
 
@@ -28,17 +29,21 @@ and nothing on them holds value.
 | Points | ksana-points (service `server/`, page `src/`) | Public `/points` API: BIP322 sign-in, X links; holds the top-up seller's key |
 | Signet infra | `signet/` (Compose, Caddyfile, faucet, btc-proxy, `deploy.sh`), `devnet/`, each `wrangler.jsonc` | The internet, through Caddy |
 
+`fuzz/` and `tests/` are test code: a finding there belongs to the component they test.
+
 ## Entry points
 
-- **P2P and BTC data**: the P2P port (`node1:9000`) is public; anyone can publish payloads on Bitcoin, and both the
-  nodes and the indexer read them.
+- **P2P and BTC data**: the P2P port (`node1:9000`, and `node2` on 9001) is public; anyone can publish payloads on
+  Bitcoin, and both the nodes and the indexer read them. bitcoind's P2P port (38333) is public; its RPC port is not
+  published outside the Compose network.
 - **RPC**: the node's JSON-RPC and WebSocket at `/rpc`, with `--rpc-cors '*'`; the indexer's RPC at `/indexer`.
 - **Contracts**: deployed and called through path B or path C.
 - **Public services** (`signet/Caddyfile`):
-  - `/btc`: the btc-proxy, which passes four bitcoind methods and two Esplora paths, rate-limited per address;
-  - `/faucet`: a cooldown per address;
-  - `/compile`;
-  - `/points`: CORS for the page's origin only, a bearer token after BIP322 sign-in.
+  - `/btc`: the btc-proxy, which passes four bitcoind methods and two Esplora paths, rate-limited per address
+    (request bodies up to 1 MB);
+  - `/faucet`: a cooldown per address (4 KB);
+  - `/compile`: a source of up to 128 KiB (300 KB);
+  - `/points`: CORS for the page's origin only, a bearer token after BIP322 sign-in (16 KB).
 - **Static pages**: Cloudflare Workers (the points page, the playground, the site).
 
 ## Assets, in priority order
@@ -48,7 +53,7 @@ and nothing on them holds value.
    - the KSA supply cap, rewards, fees and unlocks;
    - funds held by contracts;
    - the VM's isolation and determinism;
-   - signature verification.
+   - signature verification, including the aggregate of path B's half signatures.
 2. **Everything else**, at normal priority, since nothing is out of scope:
    - the hosted signet's keys (faucet, seller, keeper, operator) and the bitcoind RPC credentials;
    - the points ledger, which feeds the airdrop snapshot;
@@ -73,7 +78,7 @@ but they are not excluded either: findings about them keep the severity the scan
   metering (D-073); the gas table is in `docs/ABI.md`.
 - **Storage**: bounded RocksDB memory (D-103).
 - **Caddy**: request body limits; sets `X-Forwarded-For` itself rather than trusting the incoming value; pages carry
-  `frame-ancestors 'none'`.
+  `frame-ancestors 'none'` and `X-Frame-Options DENY`.
 - **Compile service container** (`signet/docker-compose.yml`): only on the internal `compile` network, with no way
   out; `cap_drop: ALL`, `no-new-privileges`; `pids_limit` 512, `mem_limit` 2g, one CPU, tmpfs `/tmp`.
 - **btc-proxy**: refuses `scantxoutset`; rate limits per address.
@@ -85,6 +90,12 @@ but they are not excluded either: findings about them keep the severity the scan
 
 None. Every finding is reported; signet assets have no value, but findings that only affect the hosted signet are not
 ignored for that reason.
+
+## How findings are prioritized
+
+A finding keeps the severity the scanner gives it, since nothing is ruled out above. It is raised only when the scanner
+has confirmed a path by which one of the two attackers that matter reaches an asset of the first group; a finding the
+scanner calls hard to exploit or unverified is never raised.
 
 ## Open questions
 
