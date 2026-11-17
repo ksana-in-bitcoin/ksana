@@ -63,9 +63,10 @@ const CF_OP_SEQ: &str = "op_seq";
 const CF_ACCOUNT_OPS: &str = "account_ops";
 const CF_STANDARDS: &str = "standards";
 const CF_STANDARDS_UNDO: &str = "standards_undo";
+const CF_HOLDINGS: &str = "holdings";
 const CF_META: &str = "meta";
 
-const COLUMN_FAMILIES: [&str; 15] = [
+const COLUMN_FAMILIES: [&str; 16] = [
     CF_BLOCKS,
     CF_DAG,
     CF_DAG_SEQ,
@@ -80,12 +81,14 @@ const COLUMN_FAMILIES: [&str; 15] = [
     CF_ACCOUNT_OPS,
     CF_STANDARDS,
     CF_STANDARDS_UNDO,
+    CF_HOLDINGS,
     CF_META,
 ];
 const META_TIP: &[u8] = b"tip";
 const META_GENESIS: &[u8] = b"genesis";
 const META_CONFIG: &[u8] = b"config";
 const META_INDEX: &[u8] = b"index";
+const META_HOLDINGS: &[u8] = b"holdings";
 /// The marker of the operation index of a version without the standards index (D-111): a data directory that has it
 /// gets both indexes built again.
 const META_LEGACY_OP_INDEX: &[u8] = b"op_index";
@@ -520,6 +523,81 @@ impl ChainStore {
         self.get(CF_META, META_CONFIG)?
             .map(|b| hash32(&b))
             .transpose()
+    }
+
+    /// The lowest main-chain height the holdings index covers, or `None` when it has not been built.
+    pub fn holdings_base(&self) -> Result<Option<u64>, NodeError> {
+        self.get(CF_META, META_HOLDINGS)?
+            .map(|bytes| {
+                let bytes: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| NodeError::Storage("holdings index base is not 8 bytes".into()))?;
+                Ok(u64::from_be_bytes(bytes))
+            })
+            .transpose()
+    }
+
+    /// Adds holdings to the index and marks it as covering `base`. Entries are only added, never removed.
+    pub fn cover_holdings(
+        &self,
+        pairs: &[([u8; 32], [u8; 32])],
+        base: u64,
+    ) -> Result<(), NodeError> {
+        const UPDATES_PER_BATCH: usize = 16_384;
+        let cf = self.cf(CF_HOLDINGS)?;
+        let meta = self.cf(CF_META)?;
+        let mut chunks = pairs.chunks(UPDATES_PER_BATCH).peekable();
+        while let Some(chunk) = chunks.next() {
+            let mut batch = WriteBatch::default();
+            for (account, asset) in chunk {
+                batch.put_cf(cf, holdings_key(account, asset), []);
+            }
+            if chunks.peek().is_none() {
+                batch.put_cf(meta, META_HOLDINGS, base.to_be_bytes());
+            }
+            self.write(batch)?;
+        }
+        if pairs.is_empty() {
+            let mut batch = WriteBatch::default();
+            batch.put_cf(meta, META_HOLDINGS, base.to_be_bytes());
+            self.write(batch)?;
+        }
+        Ok(())
+    }
+
+    /// The account's indexed assets in asset-ID order, strictly after `after`.
+    pub fn holdings(
+        &self,
+        account: &[u8; 32],
+        after: Option<&[u8; 32]>,
+    ) -> Result<Vec<[u8; 32]>, NodeError> {
+        if self.holdings_base()?.is_none() {
+            return Err(NodeError::Storage("holdings index not built".into()));
+        }
+        let cf = self.cf(CF_HOLDINGS)?;
+        let mut seek = account.to_vec();
+        if let Some(after) = after {
+            seek.extend_from_slice(after);
+        }
+        let mut assets = Vec::new();
+        for item in self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&seek, Direction::Forward))
+        {
+            let (key, _) = item?;
+            if !key.starts_with(account) {
+                break;
+            }
+            let asset: [u8; 32] = key
+                .get(32..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| NodeError::Storage("holdings index key is corrupt".into()))?;
+            if after.is_some_and(|after| asset <= *after) {
+                continue;
+            }
+            assets.push(asset);
+        }
+        Ok(assets)
     }
 
     /// A block.
@@ -1260,6 +1338,7 @@ impl ChainStore {
         entry: &MainEntry,
         accepted: &[AcceptedBlock<'_>],
         settlements: &[([u8; 32], SettlementRecord)],
+        credited: &[([u8; 32], [u8; 32])],
     ) -> Result<(), NodeError> {
         let height = chain.header.height;
         let chain_hash = chain.header.hash();
@@ -1302,6 +1381,10 @@ impl ChainStore {
         }
         for (hash, record) in settlements {
             batch.put_cf(self.cf(CF_SETTLEMENTS)?, hash, encode(record)?);
+        }
+        let holdings = self.cf(CF_HOLDINGS)?;
+        for (account, asset) in credited {
+            batch.put_cf(holdings, holdings_key(account, asset), []);
         }
         // The operation index and the standards index, while they describe the main chain this block extends (D-111,
         // D-120): the slots follow the summary's acceptance order, the order a rebuild reads
@@ -1346,6 +1429,13 @@ impl ChainStore {
         opts.set_sync(true);
         Ok(self.db.write_opt(batch, &opts)?)
     }
+}
+
+fn holdings_key(account: &[u8; 32], asset: &[u8; 32]) -> [u8; 64] {
+    let mut key = [0; 64];
+    key[..32].copy_from_slice(account);
+    key[32..].copy_from_slice(asset);
+    key
 }
 
 #[cfg(test)]
@@ -1456,6 +1546,99 @@ mod tests {
             "the marker holds the tip and its height"
         );
         assert!(marker_of(&[0; 39]).is_err());
+    }
+
+    #[test]
+    fn holdings_are_ordered_and_page_after_the_asset_cursor() {
+        let (_dir, store) = open();
+        let account = [0xa1; 32];
+        let other = [0xa2; 32];
+        let assets = [[0x03; 32], [0x01; 32], [0x02; 32]];
+        assert!(matches!(
+            store.holdings(&account, None),
+            Err(NodeError::Storage(message)) if message == "holdings index not built"
+        ));
+        store
+            .cover_holdings(
+                &[
+                    (account, assets[0]),
+                    (other, assets[1]),
+                    (account, assets[1]),
+                    (account, assets[2]),
+                ],
+                12,
+            )
+            .unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(12));
+        assert_eq!(
+            store.holdings(&account, None).unwrap(),
+            [[0x01; 32], [0x02; 32], [0x03; 32]]
+        );
+        assert_eq!(
+            store.holdings(&account, Some(&[0x01; 32])).unwrap(),
+            [[0x02; 32], [0x03; 32]]
+        );
+        assert!(store
+            .holdings(&account, Some(&[0xff; 32]))
+            .unwrap()
+            .is_empty());
+        store.cover_holdings(&[(other, [0x04; 32])], 10).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(10));
+        assert_eq!(
+            store.holdings(&account, None).unwrap(),
+            [[0x01; 32], [0x02; 32], [0x03; 32]]
+        );
+    }
+
+    #[test]
+    fn connect_main_writes_credited_holdings_with_the_tip() {
+        let (_dir, store) = open();
+        let block = Block {
+            header: ksana_primitives::BlockHeader {
+                version: ksana_primitives::BLOCK_VERSION,
+                height: 1,
+                parents: vec![TIP],
+                btc_anchor: ksana_primitives::BtcAnchor {
+                    height: 0,
+                    hash: [0; 32],
+                },
+                entries_root: [0; 32],
+                state_root: [0; 32],
+                producer: [0; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            entries: Vec::new(),
+            settlement: None,
+            second_halves: Vec::new(),
+        };
+        let hash = block.header.hash();
+        let entry = MainEntry {
+            hash,
+            settles: false,
+            anchor_height: 0,
+            producer: [0; 32],
+            daa_score: 0,
+            weight: 0,
+            merged: Vec::new(),
+        };
+        let account = [0xa1; 32];
+        let asset = [0xb2; 32];
+        store
+            .connect_main(&block, &entry, &[], &[], &[(account, asset)])
+            .unwrap();
+        assert_eq!(store.tip().unwrap(), Some(hash));
+        assert_eq!(
+            store
+                .db
+                .get_cf(
+                    store.cf(CF_HOLDINGS).unwrap(),
+                    holdings_key(&account, &asset)
+                )
+                .unwrap(),
+            Some(Vec::new())
+        );
     }
 
     #[test]

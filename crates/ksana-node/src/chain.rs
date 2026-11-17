@@ -1250,6 +1250,7 @@ impl Chain {
             &genesis_writes,
         )?;
         let tip = load_tip(&dag, &params, &tip_hash)?;
+        cover_holdings(&store, &state, tip.header.height)?;
         let (base, base_prefix) = restored
             .as_ref()
             .map_or((0, 0), |r| (r.main_base, r.main_base_prefix));
@@ -4994,10 +4995,13 @@ impl Chain {
                 "state_root after the commit does not match the header".into(),
             ));
         }
-        if let Err(e) = self
-            .store
-            .connect_main(block, &entry, &accepted_blocks, &records)
-        {
+        if let Err(e) = self.store.connect_main(
+            block,
+            &entry,
+            &accepted_blocks,
+            &records,
+            &credited(&outcome.writes),
+        ) {
             inner.state.rollback_to(parent_height)?;
             return Err(e);
         }
@@ -5090,6 +5094,7 @@ impl Chain {
             &disconnected,
         )?;
         inner.state.rollback_to(fork_height)?;
+        cover_holdings(&self.store, &inner.state, fork_height)?;
         inner.tip = tip;
         {
             let mut main = self.main.write().map_err(poisoned)?;
@@ -5200,6 +5205,7 @@ impl Chain {
             )?;
             rewind_store(&self.store, &*self.dag()?, 0, fork_height)?;
             reset_state_to_genesis(&mut inner.state, &self.genesis, &self.genesis_writes)?;
+            cover_holdings(&self.store, &inner.state, 0)?;
             inner.tip = tip;
             let history: Arc<dyn MainHistory> = Arc::new(StoreHistory(Arc::clone(&self.store)));
             *self.main.write().map_err(poisoned)? = Arc::new(
@@ -5668,6 +5674,48 @@ fn reset_state_to_genesis(
             "rebuilt genesis state does not match the genesis block's state_root".into(),
         ));
     }
+    Ok(())
+}
+
+fn credited(writes: &WriteSet) -> Vec<([u8; 32], [u8; 32])> {
+    writes
+        .iter()
+        .filter_map(|(key, value)| {
+            if value.is_none()
+                || key.len() != 65
+                || key.first() != Some(&ksana_execution::keys::PREFIX_BALANCE)
+            {
+                return None;
+            }
+            let asset = key.get(1..33)?.try_into().ok()?;
+            let account = key.get(33..65)?.try_into().ok()?;
+            Some((account, asset))
+        })
+        .collect()
+}
+
+/// Builds the holdings index from the state when it is absent or the state has rolled below its recorded base (D-155).
+fn cover_holdings(store: &ChainStore, state: &StateDb, height: u64) -> Result<(), NodeError> {
+    let existing = store.holdings_base()?;
+    if existing.is_some_and(|base| base <= height) {
+        return Ok(());
+    }
+    let base = existing.map_or(height, |base| base.min(height));
+    eprintln!("[ksana-node] building the holdings index from state at height {height} (D-155)");
+    let pairs = state
+        .scan_prefix(&[ksana_execution::keys::PREFIX_BALANCE])?
+        .into_iter()
+        .filter_map(|(key, _)| {
+            if key.len() != 65 || key.first() != Some(&ksana_execution::keys::PREFIX_BALANCE) {
+                return None;
+            }
+            let asset = key.get(1..33)?.try_into().ok()?;
+            let account = key.get(33..65)?.try_into().ok()?;
+            Some((account, asset))
+        })
+        .collect::<Vec<_>>();
+    store.cover_holdings(&pairs, base)?;
+    eprintln!("[ksana-node] holdings index built from height {base} (D-155)");
     Ok(())
 }
 
