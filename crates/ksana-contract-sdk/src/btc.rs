@@ -6,13 +6,26 @@
 //!
 //! Typical usage (in a contract):
 //!
-//! ```ignore
-//! let header = btc::BlockHeader::parse(&ksana_contract_sdk::btc_header(height)).ok_or(..)?;
-//! // coinbase_tx / coinbase_branch: the coinbase transaction of the same block and its branch, used to pin the
-//! // Merkle tree depth
-//! let txid = btc::verify_tx_inclusion(&header, &raw_tx, tx_index, &branch, &coinbase_tx, &coinbase_branch)
-//!     .ok_or(..)?;
-//! let outputs = btc::parse_outputs(&raw_tx).ok_or(..)?;
+//! ```no_run
+//! use ksana_contract_sdk::{btc, btc_header};
+//!
+//! /// The value of output `vout` of a transaction proven to be in the BTC block at `height`.
+//! fn paid(
+//!     height: u32,
+//!     raw_tx: &[u8],
+//!     tx_index: u32,
+//!     branch: &[[u8; 32]],
+//!     // The coinbase transaction of the same block and its branch, which pin the depth of the Merkle tree
+//!     coinbase_tx: &[u8],
+//!     coinbase_branch: &[[u8; 32]],
+//!     vout: usize,
+//! ) -> Option<([u8; 32], u64)> {
+//!     let header = btc::BlockHeader::parse(&btc_header(height))?;
+//!     let txid =
+//!         btc::verify_tx_inclusion(&header, raw_tx, tx_index, branch, coinbase_tx, coinbase_branch)?;
+//!     let outputs = btc::parse_outputs(raw_tx)?;
+//!     Some((txid, outputs.get(vout)?.value))
+//! }
 //! ```
 
 use alloc::vec::Vec;
