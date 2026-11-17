@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  checkExchangeCode,
   DEFAULT_EXPIRY_MARGIN,
   DEVNET,
   type ExchangeLock,
@@ -34,6 +35,7 @@ import {
   verifyVmop,
   xOnlyPublicKey,
 } from '../src/index.js';
+import type { KsanaRpcClient } from '../src/index.js';
 import { pseudoRandomBytes, testKey } from './helpers.js';
 
 function u128le(value: bigint): Uint8Array {
@@ -254,4 +256,13 @@ test('payment outputs of a native transaction: standard script, not below the du
   const tight = buildNativeTx({ params: DEVNET, op, utxos, changeScript: script, feeRate: 1, payments: [{ value: 4_400n, script: SCRIPT }] });
   assert.equal(tight.change, null);
   assert.equal(tight.fee, 600n);
+});
+
+test('the exchange contract must run the code hash the caller reviewed (F-15)', async () => {
+  const reviewed = new Uint8Array(32).fill(7);
+  const exchange = new Uint8Array(32).fill(1);
+  const node = (code_hash: Uint8Array) => ({ getContract: async () => ({ code_hash }) }) as unknown as KsanaRpcClient;
+  await checkExchangeCode(node(Uint8Array.from(reviewed)), exchange, reviewed);
+  await assert.rejects(checkExchangeCode(node(new Uint8Array(32).fill(8)), exchange, reviewed), /expected code/);
+  await assert.rejects(checkExchangeCode(node(reviewed), exchange, reviewed.subarray(1)), /exchange code hash/);
 });

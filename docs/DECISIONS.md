@@ -5736,3 +5736,57 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   start and after a rollback below the base.
 - **Impact**: `crates/ksana-node` (`store.rs`: the `holdings` column family, base marker, batches and reads; `chain.rs`: credit extraction, startup / rollback coverage; `rpc.rs`: account balance
   reads); tests (`store.rs`, new `tests/m67_holdings.rs`); D-120, D-132, ARCHITECTURE and SPEC's version history.
+
+## D-156 Findings of the earlier audits that a review of v0.3.0 found still open: five are closed, one is accepted, and the SDK reads one more kind of frame the node refuses (2026-11-17; adds to D-141, D-072 and D-085; no consensus change, M68)
+
+- **Problem**: a review of v0.3.0 went through the findings of the two earlier audits again and found these still open, and two fuzz targets that no longer ran: they had not
+  followed D-141.
+  - **F-27**: `GhostdagError::Corrupt`, which says this node's own GHOSTDAG data does not hold together, became `Reject::Invalid`: a fault of the local store was reported as an
+    invalid BTC header.
+  - **A2-22**: the indexer wrote its metadata file and renamed it into place without syncing the file or the directory, so after a power loss the name was not sure to hold what was
+    written.
+  - **F-20**: `merkle_root_from_branch` of the contract SDK took any `index` below `2^depth`. Bitcoin pairs the last node of an odd level with a copy of itself, so the last of 3
+    transactions verified at index 2 and at index 3 (CVE-2012-2459); a contract that keyed anything on the index could be told two positions for one transaction.
+  - **F-22**: the CLI funded a BTC transaction at whatever `--btc-fee-rate` said, and its top-up did not say by which BTC height the payment had to confirm, which the SDK does
+    (`payBy`).
+  - **F-15**: a top-up pays BTC into a lock that a contract reports, and neither the SDK nor the CLI could check which code runs under the contract ID they were given.
+  - **F-17**: `ksana_getOpStatus` reads one position per op.
+  - **The fuzz targets**: `payload_decode` expected envelope data to be a payload as it is, and `ts_differential` reported the frame D-141 already names as a difference.
+- **Decision**:
+  1. **F-27**: `Corrupt` is `Reject::Unavailable`, the local fault a PoW value that cannot be computed already is (D-094); the header is not judged invalid (`headers.rs`).
+  2. **A2-22**: the temporary file is synced before the rename and the directory after it (`ksana-indexer`, `meta.rs`).
+  3. **F-20**: `merkle_root_from_branch` returns `None` when the node at some level is a right child equal to its sibling. Such a pair is the copy of an odd level; a block with two
+     equal nodes side by side for another reason is not valid in Bitcoin. A transaction verifies at its own index only, and so does the coinbase proof that pins the depth (D-072).
+     A contract gets the check when it is built against this SDK; contracts already deployed keep the code they were built with.
+  4. **F-22**: `--max-btc-fee-rate` (default 1 000 sat/vB, the node's own cap of D-152) on the commands of the CLI that fund a BTC transaction (the top-up and a path C op): a `--btc-fee-rate` above it is
+     refused before anything is funded or signed. The top-up's result has `pay_by`, `lock.expiry + RELEASE_DELAY − native_confirmations − 1`, the SDK's `payBy`.
+  5. **F-15**: `checkExchangeCode(rpc, exchange, codeHash)` in the SDK and `--exchange-code-hash` on the CLI's top-up refuse an exchange contract for which the node's
+     `ksana_getContract` gives another code hash than the one the caller reviewed. Both are opt-in: the library and the CLI do not know which exchange code a network's users
+     reviewed.
+  6. **F-17 is accepted as it stands**: when an op is included more than once, the first executed position is kept and a skipped record gives way to a later executed one, so a
+     copy does not hide the op that executed. What stays: after a reorg disconnects the block the record points to, the record is deleted, and if another inclusion of the op
+     is still on the main chain (it can only be an earlier skipped one) the node answers "unknown op" for it until the op is included again.
+  7. **D-141, a second kind of frame**: the fuzzer found a frame the node refuses and the SDK reads that is not one of matches before the start: a compressed block whose
+     sequences write past the content the frame states. libzstd refuses it; `fzstd` drops what is written past the stated size and gives exactly that many bytes, which the SDK's
+     own check of the content size then accepts. It is the limitation D-141 accepted, of the same decoder, and is recorded the same way: the shared vector
+     `compressed-block-longer-than-the-content`, read by the SDK and refused by the node.
+  8. **The fuzz targets**: `payload_decode` expects of envelope data what a node reads from it. `ts_differential` and the `differential` example do not report a BTC transaction
+     whose envelope data is a frame laid out as the node asks whose blocks libzstd refuses while the SDK reads a payload, when everything not read from the data is equal on both
+     sides; every other difference is reported as before, in both directions. The compress vectors are seeds of the differential generator, and `payload_decode` has the seeds
+     of a frame a node reads and of one it refuses.
+- **Rationale**: items 1 to 5 are local to a node, a library or a tool and change no rule of the chain. F-17's remainder needs a record of every position of an op, a new column
+  of the store written for every op of every block, to answer a question about a skipped copy after a reorg; the op index of D-111 is keyed by position and cannot answer it. The
+  frames of item 7 change nothing a node or an indexer decides: whether a settlement counts was never taken from the SDK's reading (D-141).
+- **Not chosen**:
+  - **Making the SDK refuse what the node refuses**: for matches before the start it means decoding the sequences in the SDK, a second zstd decoder to keep equal to libzstd. For
+    the frame of item 7 alone, decoding without the stated content size and comparing the length would do, but it leaves the first kind open; not done here.
+  - **A pinned code hash per network inside the SDK**: the exchange contract is an example contract, anyone may deploy another, and no deployment of it is an official one.
+  - **Estimating the BTC fee rate in the CLI**: the wallet's bitcoind already estimates when asked; the CLI keeps an explicit rate and bounds it.
+- **Costs and limitations**: `checkExchangeCode` and `--exchange-code-hash` guard against a wrong contract ID, not against a node that lies: the code hash is the node's answer,
+  like the lock itself. A contract that relied on a transaction verifying at the copy's index no longer does once rebuilt; none in this repository did. The accepted difference of
+  item 8 is decided by libzstd's error (corrupt data, or a destination too small at any size), so a frame the node refuses for another reason and the SDK reads would still be
+  reported. The finding F-07 (the gas a first compilation is charged) is a consensus value and is not changed here.
+- **Impact**: `ksana-btc` (`headers.rs`; the example `gen_compress_vectors`), `ksana-indexer` (`meta.rs`), `ksana-contract-sdk` (`btc.rs`: `merkle_root_from_branch`,
+  `verify_tx_inclusion`; its module example compiles as a doctest), `ksana-cli` (`--max-btc-fee-rate`, `--exchange-code-hash`, `pay_by`; `tests/chain.rs`), the TS SDK
+  (`topUp.ts`: `checkExchangeCode`; `compress.ts`), `tests/vectors/compress.json`, the fuzz workspace (`payload_decode`, `differential`, the seeds), the playground's contract
+  notes, SPEC §11.

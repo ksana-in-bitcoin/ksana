@@ -13,12 +13,12 @@ const vectors = loadVectors('compress.json');
 
 /**
  * Frames the node rejects and the SDK reads all the same: `fzstd` does not check that a match stays within the frame's own
- * content (see `src/compress.ts`).
+ * content, nor that a compressed block's sequences stay within the content the frame states (see `src/compress.ts`).
  */
-const READ_ALL_THE_SAME = new Set(['matches-before-the-start']);
+const READ_ALL_THE_SAME = new Set(['matches-before-the-start', 'compressed-block-longer-than-the-content']);
 
 test('the shared vectors compress.json match case by case (D-141)', () => {
-  assert.ok(vectors.cases.length >= 39);
+  assert.ok(vectors.cases.length >= 40);
   const read: string[] = [];
   for (const { name, max, data, payload } of vectors.cases) {
     const found = unpackEnvelopeData(fromHex(data), max);

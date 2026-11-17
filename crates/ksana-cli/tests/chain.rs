@@ -14,8 +14,9 @@ use jsonrpsee::types::ErrorObjectOwned;
 use ksana_primitives::{Network, VmOp, SIGNET};
 use ksana_rpc::{
     codes, error, start_server, AccountJson, AssetJson, AssetStatusJson, Backend, BlockId,
-    BlockJson, BlockRef, BlockSummary, CallRequestJson, ChainInfoJson, Cors, EstimateFeeJson,
-    OpListJson, OpPosition, OpStatusJson, ReceiptJson, SettlementJson, SubmitResult,
+    BlockJson, BlockRef, BlockSummary, CallRequestJson, ChainInfoJson, ContractJson, Cors,
+    EstimateFeeJson, OpListJson, OpPosition, OpStatusJson, ReceiptJson, SettlementJson,
+    SubmitResult,
 };
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -23,6 +24,8 @@ use tokio::sync::broadcast;
 /// The buyer's secret key in the top-up case, and the signer's elsewhere (any valid secret key).
 const KEY: &str = "0101010101010101010101010101010101010101010101010101010101010101";
 const EXCHANGE: &str = "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1";
+/// The code hash the node gives for any contract.
+const EXCHANGE_CODE_HASH: [u8; 32] = [0xc0; 32];
 
 /// A node on chain ID `chain_id` that records the ops submitted to it and has one open lock (`get_lock` of any
 /// exchange contract), whose beneficiary is `beneficiary`.
@@ -93,6 +96,16 @@ impl Backend for MockNode {
             output: lock,
             events: Vec::new(),
             asset_changes: Some(Vec::new()),
+        })
+    }
+    fn contract(&self, contract: [u8; 32]) -> RpcResult<ContractJson> {
+        Ok(ContractJson {
+            contract,
+            code_hash: EXCHANGE_CODE_HASH,
+            deployer: [0; 32],
+            standards: Vec::new(),
+            declared: None,
+            at: genesis(),
         })
     }
     fn settlement(&self, _: BlockId) -> RpcResult<SettlementJson> {
@@ -457,4 +470,64 @@ fn a_bitcoind_on_the_nodes_btc_network_goes_on_to_funding() {
             "fundrawtransaction"
         ]
     );
+}
+
+/// The arguments of a top-up of 30 000 sats into lock 0 on devnet, with `more` after them.
+fn top_up_args<'a>(beneficiary: &'a str, more: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "top-up",
+        "--exchange",
+        EXCHANGE,
+        "--lock",
+        "0",
+        "--beneficiary",
+        beneficiary,
+        "--sats",
+        "30000",
+        "--btc-rpc-url",
+        "<btc>",
+    ];
+    args.extend(more);
+    args
+}
+
+/// F-22: a fee rate above `--max-btc-fee-rate` (1 000 sat/vB by default) is refused before the wallet funds anything,
+/// and a raised cap lets it through.
+#[test]
+fn a_btc_fee_rate_above_the_cap_is_refused_before_funding() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = key_file(dir.path());
+    let services = start(Network::Devnet.params().chain_id, "regtest");
+    let beneficiary = address(bitcoin::Network::Regtest);
+    let args = top_up_args(&beneficiary, &["--btc-fee-rate", "1001"]);
+    let stderr = refused(&services.cli(&key, &args));
+    assert!(stderr.contains("--max-btc-fee-rate 1000"), "{stderr}");
+    assert!(!services.btc_calls().contains(&"fundrawtransaction"));
+
+    let args = top_up_args(
+        &beneficiary,
+        &["--btc-fee-rate", "1001", "--max-btc-fee-rate", "1001"],
+    );
+    let stderr = refused(&services.cli(&key, &args));
+    assert!(stderr.contains("fundrawtransaction"), "{stderr}");
+}
+
+/// F-15: with `--exchange-code-hash`, an exchange contract whose code the node gives another hash for is refused
+/// before bitcoind is asked anything; with the hash the node gives, the top-up goes on to funding.
+#[test]
+fn top_up_refuses_an_exchange_contract_that_runs_other_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = key_file(dir.path());
+    let services = start(Network::Devnet.params().chain_id, "regtest");
+    let beneficiary = address(bitcoin::Network::Regtest);
+    let other = hex::encode([0xc1; 32]);
+    let args = top_up_args(&beneficiary, &["--exchange-code-hash", &other]);
+    let stderr = refused(&services.cli(&key, &args));
+    assert!(stderr.contains("--exchange-code-hash"), "{stderr}");
+    assert!(services.btc_calls().is_empty(), "bitcoind is not asked");
+
+    let reviewed = hex::encode(EXCHANGE_CODE_HASH);
+    let args = top_up_args(&beneficiary, &["--exchange-code-hash", &reviewed]);
+    let stderr = refused(&services.cli(&key, &args));
+    assert!(stderr.contains("fundrawtransaction"), "{stderr}");
 }

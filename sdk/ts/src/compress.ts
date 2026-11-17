@@ -5,7 +5,8 @@
  *
  * The frame's layout (its header, the extent of its blocks, its content size and checksum) is checked here by the node's rules;
  * the blocks are decoded by `fzstd`, with the output bounded. `fzstd` does not check that a match stays within the frame's own
- * content, so it reads a payload from some frames the node rejects: a reader of the chain takes whether a settlement counts from
+ * content, nor that a compressed block's sequences stay within the content the frame states (it drops what they write past it),
+ * so it reads a payload from some frames the node rejects: a reader of the chain takes whether a settlement counts from
  * the node or the indexer, and uses this module only to read what it carries.
  */
 

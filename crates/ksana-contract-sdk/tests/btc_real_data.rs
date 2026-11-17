@@ -442,7 +442,12 @@ mod properties {
             branch in proptest::collection::vec(any::<[u8; 32]>(), 0..40),
         ) {
             let root = merkle_root_from_branch(&leaf, index, &branch);
-            prop_assert_eq!(root.is_some(), branch.len() <= 32 && (branch.len() == 32 || index >> branch.len() == 0));
+            let fits = branch.len() <= 32 && (branch.len() == 32 || index >> branch.len() == 0);
+            // A right child equal to its sibling is refused too (the copy of an odd level), which random nodes are not
+            prop_assert!(fits || root.is_none());
+            if branch.iter().all(|sibling| sibling != &leaf) {
+                prop_assert_eq!(root.is_some(), fits);
+            }
         }
     }
 }

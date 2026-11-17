@@ -4,11 +4,13 @@
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::{Script, Transaction, Witness, XOnlyPublicKey};
+use ksana_btc::compress::ZSTD_MAGIC;
 use ksana_btc::data::{
     data_script, is_ksn1_output, parse_data_script, tx_data, tx_payload, Carrier, TxData,
 };
 use ksana_btc::envelope::{envelope_script, is_ksn1_envelope, parse_envelope, witness_leaf};
 use ksana_btc::native::{first_input, native_op};
+use ksana_btc::settlement::MAX_SETTLEMENT_TX_BYTES;
 use ksana_consensus::{check_pow, effective_target, target_from_bits, Argon2id, ConsensusError};
 use ksana_contract_sdk::{ks20, ks721};
 use ksana_crypto::bip322::{verify_for_account, verify_simple};
@@ -193,6 +195,77 @@ fn carrier_json(carrier: Carrier) -> Value {
         Carrier::Input(index) => json!({ "kind": "Input", "index": index }),
     }
 }
+
+/// Whether the two descriptions of a BTC transaction differ only by the one difference D-141 accepts: the transaction's
+/// envelope data is a zstd frame laid out as the node asks whose blocks the node's decoder refuses, and the SDK reads
+/// a payload from it (`fzstd` does not check that a match stays within the frame's own content, nor that a compressed
+/// block's sequences stay within the content the frame states). Whether a settlement counts is taken from the node or
+/// the indexer, so the two sides are not held to agree on such a frame. Everything not read from the data must still
+/// be equal, and so must every other frame: one the SDK refuses and the node reads, and one the node refuses for its
+/// layout, its checksum, its dictionary or its window.
+pub fn sdk_reads_refused_blocks(request: &Request, rust: &Value, ts: &Value) -> bool {
+    let Request::Tx { network, bytes } = request else {
+        return false;
+    };
+    if rust["data"] != "invalid" || !ts["data"].is_object() {
+        return false;
+    }
+    if rust["tx"] != ts["tx"] || rust["first_input"] != ts["first_input"] {
+        return false;
+    }
+    deserialize::<Transaction>(bytes)
+        .is_ok_and(|tx| refused_blocks_of(&network.params().magic, &tx))
+}
+
+/// Whether the transaction's only KSN1 carrier is an envelope whose data is a frame of [`refused_blocks`].
+fn refused_blocks_of(magic: &[u8; 4], tx: &Transaction) -> bool {
+    if tx
+        .output
+        .iter()
+        .any(|out| is_ksn1_output(magic, &out.script_pubkey))
+    {
+        return false;
+    }
+    let mut envelopes = tx
+        .input
+        .iter()
+        .filter_map(|input| witness_leaf(&input.witness))
+        .filter(|leaf| is_ksn1_envelope(magic, leaf));
+    let (Some(leaf), None) = (envelopes.next(), envelopes.next()) else {
+        return false;
+    };
+    parse_envelope(magic, leaf).is_some_and(|(_, data)| refused_blocks(&data))
+}
+
+/// Whether `data` is one zstd frame followed by `0x00` bytes only, and the decoder refuses its blocks: as corrupt data,
+/// or as writing past what the frame lets a block hold (libzstd reports that as a destination too small, whatever
+/// the destination's size; a frame of more than the bound is reported so too, and the SDK refuses that one itself).
+/// Not for its checksum, its dictionary or its window.
+fn refused_blocks(data: &[u8]) -> bool {
+    if !data.starts_with(&ZSTD_MAGIC) {
+        return false;
+    }
+    let Ok(len) = zstd::zstd_safe::find_frame_compressed_size(data) else {
+        return false;
+    };
+    let (Some(frame), Some(padding)) = (data.get(..len), data.get(len..)) else {
+        return false;
+    };
+    if padding.iter().any(|&b| b != 0) {
+        return false;
+    }
+    let mut out = Vec::with_capacity(MAX_SETTLEMENT_TX_BYTES);
+    match zstd::zstd_safe::decompress(&mut out, frame) {
+        Ok(_) => false,
+        Err(code) => BLOCKS_REFUSED.contains(&zstd::zstd_safe::get_error_name(code)),
+    }
+}
+
+/// libzstd's names for `ZSTD_error_corruption_detected` and `ZSTD_error_dstSize_tooSmall`.
+const BLOCKS_REFUSED: [&str; 2] = [
+    "Data corruption detected",
+    "Destination buffer is too small",
+];
 
 fn tx(network: Network, bytes: &[u8]) -> Option<Value> {
     let Ok(tx) = deserialize::<Transaction>(bytes) else {
@@ -490,4 +563,96 @@ fn params(network: Network) -> Value {
         "carrier_repost_delay": p.carrier_repost_delay.to_string(),
         "upgrades": upgrades,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Of the frames of the shared vectors the node refuses, the decoder refuses the blocks of these. The SDK reads a
+    /// payload from the first two, which are left out of the comparison (D-141); it checks the stated content size and
+    /// the bound itself and refuses the others, which stay compared.
+    #[test]
+    fn of_the_refused_vectors_these_are_refused_for_their_blocks() {
+        let vectors: Value =
+            serde_json::from_str(include_str!("../../../tests/vectors/compress.json")).unwrap();
+        let refused: Vec<&str> = vectors["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["payload"].is_null())
+            .filter(|case| refused_blocks(&hex::decode(case["data"].as_str().unwrap()).unwrap()))
+            .map(|case| case["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                "matches-before-the-start",
+                "compressed-block-longer-than-the-content",
+                "content-size-8-bytes-huge",
+                "content-size-above",
+                "content-size-below",
+                "blocks-beyond-the-bound",
+            ]
+        );
+    }
+
+    /// The accepted difference is the node refusing and the SDK reading, of a frame whose blocks the node refuses, with the
+    /// rest of the two descriptions equal.
+    #[test]
+    fn the_accepted_difference_is_one_way_and_of_the_data_only() {
+        let key = XOnlyPublicKey::from_slice(&WRITE_KEY).unwrap();
+        let frame = |name: &str| {
+            let vectors: Value =
+                serde_json::from_str(include_str!("../../../tests/vectors/compress.json")).unwrap();
+            let case = vectors["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == name)
+                .unwrap()
+                .clone();
+            hex::decode(case["data"].as_str().unwrap()).unwrap()
+        };
+        let request = |data: &[u8]| {
+            let leaf = envelope_script(&key, &DEVNET.magic, data).unwrap();
+            let tx = Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    witness: Witness::from_slice(&[vec![1; 64], leaf.to_bytes(), vec![0xc0; 33]]),
+                    ..Default::default()
+                }],
+                output: Vec::new(),
+            };
+            Request::Tx {
+                network: Network::Devnet,
+                bytes: serialize(&tx),
+            }
+        };
+        let longer = request(&frame("compressed-block-longer-than-the-content"));
+        let rust = describe(&longer).unwrap();
+        let mut ts = rust.clone();
+        ts["data"] = json!({ "carrier": { "input": 0 }, "payload": "00" });
+        assert!(sdk_reads_refused_blocks(&longer, &rust, &ts));
+        let corrupt = request(&frame("matches-before-the-start"));
+        let rust = describe(&corrupt).unwrap();
+        assert_eq!(rust["data"], "invalid");
+        let mut ts = rust.clone();
+        ts["data"] = json!({ "carrier": { "input": 0 }, "payload": "00" });
+        ts["payload"] = json!({ "carrier": { "input": 0 }, "payload": {} });
+        assert!(sdk_reads_refused_blocks(&corrupt, &rust, &ts));
+        // The other way round, and with something else differing too
+        assert!(!sdk_reads_refused_blocks(&corrupt, &ts, &rust));
+        let mut other = ts.clone();
+        other["tx"]["version"] = json!(3);
+        assert!(!sdk_reads_refused_blocks(&corrupt, &rust, &other));
+        // A frame refused for something else than its blocks
+        let checksum = request(&frame("checksum-wrong"));
+        let rust = describe(&checksum).unwrap();
+        assert_eq!(rust["data"], "invalid");
+        let mut ts = rust.clone();
+        ts["data"] = json!({ "carrier": { "input": 0 }, "payload": "00" });
+        assert!(!sdk_reads_refused_blocks(&checksum, &rust, &ts));
+    }
 }

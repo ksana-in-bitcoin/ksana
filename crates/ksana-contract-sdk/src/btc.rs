@@ -6,13 +6,26 @@
 //!
 //! Typical usage (in a contract):
 //!
-//! ```ignore
-//! let header = btc::BlockHeader::parse(&ksana_contract_sdk::btc_header(height)).ok_or(..)?;
-//! // coinbase_tx / coinbase_branch: the coinbase transaction of the same block and its branch, used to pin the
-//! // Merkle tree depth
-//! let txid = btc::verify_tx_inclusion(&header, &raw_tx, tx_index, &branch, &coinbase_tx, &coinbase_branch)
-//!     .ok_or(..)?;
-//! let outputs = btc::parse_outputs(&raw_tx).ok_or(..)?;
+//! ```no_run
+//! use ksana_contract_sdk::{btc, btc_header};
+//!
+//! /// The value of output `vout` of a transaction proven to be in the BTC block at `height`.
+//! fn paid(
+//!     height: u32,
+//!     raw_tx: &[u8],
+//!     tx_index: u32,
+//!     branch: &[[u8; 32]],
+//!     // The coinbase transaction of the same block and its branch, which pin the depth of the Merkle tree
+//!     coinbase_tx: &[u8],
+//!     coinbase_branch: &[[u8; 32]],
+//!     vout: usize,
+//! ) -> Option<([u8; 32], u64)> {
+//!     let header = btc::BlockHeader::parse(&btc_header(height))?;
+//!     let txid =
+//!         btc::verify_tx_inclusion(&header, raw_tx, tx_index, branch, coinbase_tx, coinbase_branch)?;
+//!     let outputs = btc::parse_outputs(raw_tx)?;
+//!     Some((txid, outputs.get(vout)?.value))
+//! }
 //! ```
 
 use alloc::vec::Vec;
@@ -175,7 +188,9 @@ fn concat64(left: &[u8; 32], right: &[u8; 32]) -> [u8; 64] {
 /// Level i: when bit i of `index` is 1 the current node is the right child (`sha256d(sibling ‖ current)`), otherwise
 /// the left child (`sha256d(current ‖ sibling)`). Returns `None` when the branch is longer than [`MAX_MERKLE_DEPTH`]
 /// or `index` has non-zero bits beyond the branch length (only one position representation is accepted for the same
-/// transaction).
+/// transaction), and when the node at some level is a right child equal to its sibling: Bitcoin pairs the last node of
+/// an odd level with a copy of itself, and that copy is a position that holds no transaction (CVE-2012-2459; a block
+/// with two equal nodes side by side for any other reason is invalid in Bitcoin).
 pub fn merkle_root_from_branch(
     leaf: &[u8; 32],
     index: u32,
@@ -192,6 +207,9 @@ pub fn merkle_root_from_branch(
     let mut position = index;
     for sibling in branch {
         node = if position & 1 == 1 {
+            if *sibling == node {
+                return None;
+            }
             sha256d(&concat64(sibling, &node))
         } else {
             sha256d(&concat64(&node, sibling))
@@ -242,10 +260,10 @@ pub fn is_coinbase(raw_tx: &[u8]) -> bool {
 ///
 /// The coinbase must satisfy [`is_coinbase`].
 ///
-/// `index` does not identify the transaction uniquely (CVE-2012-2459): because the last node of an odd level is paired
-/// with itself, a transaction at the end of the block can also verify at a higher index that holds no transaction (for
-/// example the last of 3 transactions at index 3 as well as 2). Key replay protection on the returned transaction ID (or
-/// on its outputs), never on `index`.
+/// A transaction verifies at its own `index` only (CVE-2012-2459): the last node of an odd level is paired with a copy
+/// of itself, and a position below such a copy holds no transaction and is rejected ([`merkle_root_from_branch`]; for
+/// example the last of 3 transactions verifies at index 2 and not at 3). Replay protection is still best keyed on the
+/// returned transaction ID (or on its outputs), which is what the proof is about.
 pub fn verify_tx_inclusion(
     header: &BlockHeader,
     raw_tx: &[u8],
@@ -405,6 +423,68 @@ mod tests {
         assert_eq!(
             verify_tx_inclusion(&header, &t, 1, &cb_branch, &cb, &cb_branch),
             None
+        );
+    }
+
+    /// The last node of an odd level is paired with a copy of itself (CVE-2012-2459): the copy is no position of the
+    /// block, at the leaves or above them, and a transaction is proven at its own position only (F-20).
+    #[test]
+    fn a_position_below_the_copy_of_an_odd_level_is_rejected() {
+        let cb = coinbase();
+        let txs: Vec<Vec<u8>> = (0x41u8..0x45)
+            .map(|i| simple_tx([i; 36], &[], &[0x51]))
+            .collect();
+        let ids: Vec<[u8; 32]> = txs.iter().map(|tx| txid(tx)).collect();
+        let cb_id = txid(&cb);
+
+        // 3 transactions [coinbase, 0, 1]: the leaf level is odd
+        let right = node(&ids[1], &ids[1]);
+        let left = node(&cb_id, &ids[0]);
+        let header = header_with_root(node(&left, &right));
+        let cb_branch = [ids[0], right];
+        assert_eq!(
+            verify_tx_inclusion(&header, &txs[1], 2, &[ids[1], left], &cb, &cb_branch),
+            Some(ids[1])
+        );
+        assert_eq!(
+            verify_tx_inclusion(&header, &txs[1], 3, &[ids[1], left], &cb, &cb_branch),
+            None
+        );
+        assert_eq!(merkle_root_from_branch(&ids[1], 3, &[ids[1], left]), None);
+
+        // 5 transactions [coinbase, 0, 1, 2, 3]: the level above the leaves is odd too, so the last transaction would
+        // verify at positions 5, 6 and 7 as well as 4
+        let pairs = [
+            node(&cb_id, &ids[0]),
+            node(&ids[1], &ids[2]),
+            node(&ids[3], &ids[3]),
+        ];
+        let upper = [node(&pairs[0], &pairs[1]), node(&pairs[2], &pairs[2])];
+        let header = header_with_root(node(&upper[0], &upper[1]));
+        let cb_branch = [ids[0], pairs[1], upper[1]];
+        let last_branch = [ids[3], pairs[2], upper[0]];
+        assert_eq!(
+            verify_tx_inclusion(&header, &txs[3], 4, &last_branch, &cb, &cb_branch),
+            Some(ids[3])
+        );
+        for copy in 5..8 {
+            assert_eq!(
+                verify_tx_inclusion(&header, &txs[3], copy, &last_branch, &cb, &cb_branch),
+                None,
+                "position {copy}"
+            );
+        }
+        // The transactions of the full pairs are untouched
+        assert_eq!(
+            verify_tx_inclusion(
+                &header,
+                &txs[2],
+                3,
+                &[ids[1], pairs[0], upper[1]],
+                &cb,
+                &cb_branch
+            ),
+            Some(ids[2])
         );
     }
 

@@ -711,7 +711,7 @@ pub fn merkle_root_from_branch(leaf: &[u8; 32], index: u32, branch: &[[u8; 32]])
 pub fn verify_merkle_branch(leaf: &[u8; 32], index: u32, branch: &[[u8; 32]], root: &[u8; 32]) -> bool;
 pub fn is_coinbase(raw_tx: &[u8]) -> bool;
 /// Proves `raw_tx` is transaction `index` of the block `header` and returns its ID; the same block's coinbase and its
-/// branch pin the tree's depth. Guard replays by the returned ID, never by `index`.
+/// branch pin the tree's depth. A transaction is proven at its own `index` only. Guard replays by the returned ID.
 pub fn verify_tx_inclusion(header: &BlockHeader, raw_tx: &[u8], index: u32, branch: &[[u8; 32]], coinbase_tx: &[u8], coinbase_branch: &[[u8; 32]]) -> Option<[u8; 32]>;
 ```
 

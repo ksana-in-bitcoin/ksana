@@ -1094,10 +1094,12 @@ impl Backend for NodeRpc {
     }
 }
 
-/// The built-in assets `account` holds, by asset ID (D-155): the local holdings index bounds the scan to assets the
-/// account has had a balance in; each current balance is read from state and absent keys are skipped.
+/// What [`builtin_balances`] gives: the balances by asset ID, and whether the account holds more past the limit.
 type BuiltinBalances = (Vec<([u8; 32], u128)>, bool);
 
+/// The built-in assets `account` holds, by asset ID (D-155): the local holdings index bounds the scan to assets the
+/// account has had a balance in; each current balance is read from state and absent keys are skipped. At most `limit`
+/// of those after the asset `after` are given.
 fn builtin_balances(
     state: &ksana_state::StateDb,
     store: &crate::store::ChainStore,

@@ -17,6 +17,10 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-17, findings of the earlier audits still open in v0.3.0 (M68, D-156)**: no consensus change. A fault of the node's own GHOSTDAG data is no longer reported as an
+  invalid BTC header; the indexer syncs its metadata file; the contract SDK's Merkle proof verifies a transaction at its own index only (CVE-2012-2459); the CLI refuses a BTC fee
+  rate above `--max-btc-fee-rate` (default 1 000 sat/vB), its top-up gives `pay_by` and takes `--exchange-code-hash`, and the SDK has `checkExchangeCode`. A second kind of frame
+  the node refuses and the SDK reads is recorded as a shared vector (D-141).
 - **2026-11-17, a local holdings index bounds built-in account balance reads (M67, D-155)**: local policy, no consensus change; the answers of `ksana_getAccount` and
   `ksana_getAccountAssets` do not change. A block-store index by account lists built-in assets whose balance keys have existed since its base; RPCs read current balances from state and skip
   absent keys. It is covered from state at startup or after a rollback below the base.
@@ -1707,7 +1711,7 @@ chars, the same as `ksana-keytool`), `account` (with the address) / `asset` / `o
 `transfer` / `deploy` / `call` (`--fee-token <amount>` for path B, or `--native --btc-wallet <wallet>` for path C, funded, signed and broadcast by the bitcoind wallet;
 `--sig bip340|bip322` selects the VmOp signature scheme, default BIP340;
 `--fund [<asset ID>:]<amount>` attaches funds; `--wait` polls until the op is included, continuing to wait on `skipped`), `top-up` (`--exchange --lock --sats --btc-wallet`,
-`--allow-overpay`, `--expiry-margin` default 3), `exchange deposit / withdraw / lock / release / show / balance`. The nonce defaults to the account's next
+`--allow-overpay`, `--expiry-margin` default 3, `--exchange-code-hash` refuses an exchange contract whose code hash is another; the result gives `pay_by`, the latest BTC height at which the payment should confirm, and a `--btc-fee-rate` above `--max-btc-fee-rate`, default 1 000 sat/vB, is refused by the commands that fund a BTC transaction), `exchange deposit / withdraw / lock / release / show / balance`. The nonce defaults to the account's next
 nonce on the node; results are always printed as JSON. There is also `ksana-keytool` (generates a private key and prints the account, the internal key and the funding address: the funding address is the account's address).
 
 ## 12. Tech stack and repository layout

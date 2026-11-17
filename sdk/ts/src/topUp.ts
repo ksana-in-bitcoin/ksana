@@ -181,6 +181,20 @@ export function claimArgs(lockId: bigint): Uint8Array {
   return u64le(lockId);
 }
 
+/**
+ * Checks that the contract `exchange` runs the code the caller reviewed: the node's `ksana_getContract` must give `codeHash` (the
+ * SHA-256 of the contract's code) for it, otherwise this throws. Call it before paying into a lock of an exchange contract whose
+ * ID came from somewhere else (a link, a page, a user's input): a contract with other code under that ID can report any lock and
+ * keep the payment (F-15). It guards against a wrong contract, not against a node that lies: the answer is the node's.
+ */
+export async function checkExchangeCode(rpc: KsanaRpcClient, exchange: Uint8Array, codeHash: Uint8Array): Promise<void> {
+  const expected = assertBytes(codeHash, 32, 'exchange code hash');
+  const found = (await rpc.getContract(exchange)).code_hash;
+  if (!equalBytes(found, expected)) {
+    throw new Error('the exchange contract does not run the expected code');
+  }
+}
+
 /** Reads a lock with the node's read-only call (`ksana_call`). */
 export async function getLock(rpc: KsanaRpcClient, exchange: Uint8Array, lockId: bigint): Promise<ExchangeLock> {
   const receipt = await rpc.call({ contract: exchange, method: 'get_lock', args: u64le(lockId) });

@@ -407,6 +407,14 @@ impl Seeds {
                 }
             }
         }
+        // Envelope data in its compressed form (D-141), each case as the one envelope of a transaction
+        if let Some(compress) = read_json(&vectors.join("compress.json")) {
+            for case in compress["cases"].as_array().into_iter().flatten() {
+                if let Some(tx) = hex_field(case, "data").and_then(|data| envelope_tx(&data)) {
+                    seeds.txs.push(tx);
+                }
+            }
+        }
         let bip322 = root.join("sdk/ts/test/data/bip322");
         for file in ["basic-test-vectors.json", "generated-test-vectors.json"] {
             let Some(data) = read_json(&bip322.join(file)) else {
@@ -1003,6 +1011,25 @@ fn envelope_witness(rng: &mut Rng, leaf: Vec<u8>) -> Witness {
         items.push([vec![0x50], rng.some_bytes(10)].concat());
     }
     Witness::from_slice(&items)
+}
+
+/// A transaction whose one input reveals an envelope of `data` (the magic is the same on every network).
+fn envelope_tx(data: &[u8]) -> Option<Vec<u8>> {
+    let leaf = envelope_script(&write_key()?, &DEVNET.magic, data).ok()?;
+    let tx = Transaction {
+        version: Version(2),
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            witness: Witness::from_slice(&[
+                vec![1; 64],
+                leaf.to_bytes(),
+                [vec![0xc0], WRITE_KEY.to_vec()].concat(),
+            ]),
+            ..TxIn::default()
+        }],
+        output: Vec::new(),
+    };
+    Some(serialize(&tx))
 }
 
 fn gen_witness(rng: &mut Rng, params: &Params) -> Witness {

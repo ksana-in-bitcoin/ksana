@@ -16,6 +16,11 @@
 //! A few inputs are outside what the two sides must agree on, and [`describe`] leaves them out (returns `None`):
 //! a BTC transaction without inputs (consensus forbids it in a block, and rust-bitcoin reads a segwit-marked one that
 //! Bitcoin Core and the SDK refuse), and an event longer than the VM lets a contract emit (`MAX_EVENT_BYTES`).
+//!
+//! One difference is accepted (D-141), and counts as outside too: a BTC transaction whose envelope data is a zstd frame
+//! whose blocks the node's decoder refuses (matches reaching before the frame's start, a compressed block writing past
+//! the content the frame states) and from which the SDK's decoder reads a payload
+//! ([`rust::sdk_reads_refused_blocks`]). Whether a settlement counts is taken from the node or the indexer.
 
 mod abi;
 pub mod gen;
@@ -103,7 +108,7 @@ pub fn check(
         return Ok(Ok(false));
     };
     let ts = oracle.ask(&request.to_json())?;
-    Ok(divergence(request, rust, ts).map_or(Ok(true), Err))
+    Ok(divergence(request, rust, ts).map_err(|d| *d))
 }
 
 /// Runs a batch of requests through both sides; the result of each in order, as [`check`] gives it.
@@ -128,16 +133,23 @@ pub fn check_all(
         let ts = answers.next().ok_or(OracleError::Protocol(
             "the oracle answered fewer requests than it was asked".into(),
         ))?;
-        out.push(divergence(request, rust, ts).map_or(Ok(true), Err));
+        out.push(divergence(request, rust, ts).map_err(|d| *d));
     }
     Ok(out)
 }
 
-/// The [`Divergence`] of the two descriptions, `None` when they are equal.
-fn divergence(request: &Request, rust: Value, ts: Value) -> Option<Divergence> {
-    (rust != ts).then(|| Divergence {
+/// What the two descriptions come to: `Ok(true)` when they are equal, `Ok(false)` when they differ only by the
+/// difference D-141 accepts, their [`Divergence`] otherwise.
+fn divergence(request: &Request, rust: Value, ts: Value) -> Result<bool, Box<Divergence>> {
+    if rust == ts {
+        return Ok(true);
+    }
+    if rust::sdk_reads_refused_blocks(request, &rust, &ts) {
+        return Ok(false);
+    }
+    Err(Box::new(Divergence {
         request: request.clone(),
         rust,
         ts,
-    })
+    }))
 }
