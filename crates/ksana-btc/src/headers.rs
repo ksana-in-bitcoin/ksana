@@ -90,6 +90,8 @@ impl From<GhostdagError> for Reject {
     fn from(e: GhostdagError) -> Self {
         match e {
             GhostdagError::Pruned(_) => Reject::Pruned,
+            // This DAG's own data does not hold together: a local fault, which says nothing of the header (F-27)
+            GhostdagError::Corrupt(_) => Reject::Unavailable(e.to_string()),
             other => Reject::Invalid(other.to_string()),
         }
     }
@@ -728,6 +730,24 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use ksana_primitives::DEVNET;
+
+    /// F-27: GHOSTDAG data that does not hold together is this node's fault, not the header's; a header the rules
+    /// refuse stays invalid, and one that needs a pruned block is dropped without a judgment.
+    #[test]
+    fn corrupt_ghostdag_data_is_a_local_fault_and_not_an_invalid_header() {
+        assert!(matches!(
+            Reject::from(GhostdagError::Corrupt("a block without its data")),
+            Reject::Unavailable(reason) if reason.contains("a block without its data")
+        ));
+        assert!(matches!(
+            Reject::from(GhostdagError::DuplicateParent),
+            Reject::Invalid(_)
+        ));
+        assert!(matches!(
+            Reject::from(GhostdagError::Pruned([7; 32])),
+            Reject::Pruned
+        ));
+    }
 
     #[test]
     fn heavier_tip_wins_and_ties_go_to_the_larger_hash() {
