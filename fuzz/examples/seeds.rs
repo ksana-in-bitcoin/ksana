@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use bitcoin::consensus::encode::serialize;
 use btc_common::{settle, settlement_payload};
+use ksana_btc::compress::{pack, ZSTD_MAGIC};
 use ksana_btc::data::data_script;
 use ksana_btc::envelope::envelope_script;
 use ksana_fuzz::differential::gen::{generate, kinds, Rng, Seeds};
@@ -265,6 +266,11 @@ fn main() {
     // Payloads: settlement (2 path-B entries), native transaction, header republish
     let settlement = settlement_payload(2, 1);
     write("payload_decode", "settlement", &settlement);
+    // Envelope data that starts with the zstd magic (D-141): a frame a node reads, and one it refuses
+    write("payload_decode", "settlement-zstd", &pack(&settlement));
+    let mut refused = ZSTD_MAGIC.to_vec();
+    refused.extend_from_slice(&settlement);
+    write("payload_decode", "zstd-magic-no-frame", &refused);
     let native = sample_ops()
         .into_iter()
         .find(|op| op.fee == FeeMode::BtcNative)
