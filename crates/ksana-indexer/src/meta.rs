@@ -9,10 +9,11 @@
 //! - the most recently verified block (height, hash, state root): the status shown after a restart, before re-verifying
 //!   against the BTC data.
 //!
-//! Writes go to a temporary file first and then rename it, so after a crash the content is either the old or the new
-//! one. The state store is always written before the metadata: when the block in the metadata lags behind the latest
+//! Writes go to a temporary file first, which is synced and then renamed, and the directory is synced after it, so
+//! after a crash the content is either the old or the new one. The state store is always written before the metadata: when the block in the metadata lags behind the latest
 //! version of the state store, it is re-verified by state root against the BTC data after a restart (D-048).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ksana_primitives::json::{dec_u64, hex_array};
@@ -75,15 +76,25 @@ impl Meta {
             .map_err(|e| IndexerError::Storage(format!("parsing {}: {e}", file.display())))
     }
 
-    /// Saves (temporary file + rename).
+    /// Saves (temporary file, fsync, rename, fsync of the directory).
     pub fn save(&self, data_dir: &Path) -> Result<(), IndexerError> {
         let file = path(data_dir);
         let tmp = data_dir.join(format!("{FILE}.tmp"));
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| IndexerError::Internal(format!("encoding indexer metadata: {e}")))?;
-        std::fs::write(&tmp, text)
-            .map_err(|e| IndexerError::Storage(format!("writing {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, &file)
-            .map_err(|e| IndexerError::Storage(format!("writing {}: {e}", file.display())))
+        let storage = |at: &Path, e: std::io::Error| {
+            IndexerError::Storage(format!("writing {}: {e}", at.display()))
+        };
+        // Synced before the rename and the directory after it, so that a crash leaves the old file or the whole new
+        // one, never a name pointing at bytes that did not reach the disk (A2-22)
+        let mut out = std::fs::File::create(&tmp).map_err(|e| storage(&tmp, e))?;
+        out.write_all(text.as_bytes())
+            .and_then(|()| out.sync_all())
+            .map_err(|e| storage(&tmp, e))?;
+        drop(out);
+        std::fs::rename(&tmp, &file).map_err(|e| storage(&file, e))?;
+        std::fs::File::open(data_dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| storage(data_dir, e))
     }
 }
