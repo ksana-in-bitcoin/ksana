@@ -130,6 +130,15 @@ fn main() {
             data: needs_content,
         },
         Case {
+            name: "compressed-block-longer-than-the-content",
+            note: "single segment, content size 197, one compressed block whose sequences write past it (found by the differential fuzzer)",
+            max: 1024,
+            data: hex::decode(
+                "28b52ffd20c5a50100a402000100000000010000000701000164c5a50100a40200010000000006ffff7f20efbeadddfd00000000000514001c3878a604",
+            )
+            .expect("hex"),
+        },
+        Case {
             name: "raw-block",
             note: "single segment, content size 4, one raw block",
             max: 64,
