@@ -4108,8 +4108,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   bind only contracts that keep them: a declaration is a claim, and a contract can emit false events about itself. Built-in assets' issuer capabilities came with D-121, and
   receipts that record built-in assets' movements and management actions with D-122; the wallet's single list of assets follows in a later change. The node's index (the third
   change) costs every connected block a read of its successful ops' events and a few writes per standard event, an undo log kept for good, as the operation index is, and a data
-  directory from an earlier version one pass over its stored receipts at its first start. `ksana_getAccountAssets` reads the built-in balances as `ksana_getAccount` does, by a scan
-  of every balance in the state; an index of them by account is left for later. Pages read at different tips can miss or repeat an item that moved between them.
+  directory from an earlier version one pass over its stored receipts at its first start. `ksana_getAccountAssets` reads the built-in balances as `ksana_getAccount` does, by the
+  local holdings index of D-155 rather than a scan of every asset. Pages read at different tips can miss or repeat an item that moved between them.
 - **Impact**: `docs/STANDARDS.md`; `crates/ksana-contract-sdk` (`standard.rs`, `ks20.rs`, `ks721.rs`, `conformance.rs`, `lib.rs`, the `standards` feature in its manifest);
   `contracts/examples/token` (rewritten on `ks20`, its tests on the conformance kit); `contracts/testing/receiver` and `contracts/testing/collection` (new) and `contracts/Cargo.lock`; `crates/ksana-test-contracts`
   (`RECEIVER`, `COLLECTION`); `crates/ksana-execution/tests/contracts.rs`; SPEC §9.5; `docs/ABI.md` (a pointer); CLAUDE.md; PROGRESS M41. The second change: the contract
@@ -4775,8 +4775,8 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   7. **RPC** (`ksana_rpc::server_config`, the same for the node and the indexer): a batch holds at most 64 calls, and a longer one is refused as a whole with jsonrpsee's `-32010` and `id`
      null; a request body, or a WebSocket message, at most 1 MiB, eight times the hex of the longest op (`-32007`, HTTP 413, the body unread); a response at most 10 MiB (`-32008` for a call,
      `-32011` for a batch) and 100 connections at once (HTTP 429 beyond), both jsonrpsee's defaults, now stated; a WebSocket connection at most 16 subscriptions (`-32006`).
-  8. **`ksana_getAccount`** reads the account's balance in each asset, one read per asset key (0x03), instead of scanning every balance (0x02), and so does `ksana_getAccountAssets`, which
-     lists the same balances first. `ksana_getAccount` finds the carriers of the blocks after the unlock cursor in an index of the main chain built once per call from the cursor's height
+  8. **`ksana_getAccount` and `ksana_getAccountAssets`** read built-in assets from the local holdings index by account, then read the actual state balance for each indexed asset, skipping
+     absent keys (D-155), rather than scanning every asset or balance. `ksana_getAccount` finds the carriers of the blocks after the unlock cursor in an index of the main chain built once per call from the cursor's height
      on, extended to the whole window at the first block it lacks, and below the window in the main chain's history on disk, once per block (`btc::Carriers`): `carrier_of`'s answers with
      no landing limit, for one walk of the window. `ksana_getSettlement`, which asks about one block, keeps
      `carrier_of`.
@@ -5716,3 +5716,22 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   vectors, `vmop_aggregate.rs`, `vectors.rs`; `ksana-execution/tests/aggregate.rs`; `ksana-node/tests/m66_aggregate.rs`, `m18_btc_rebuild.rs`, `adversarial_blocks.rs`); the shared
   vectors (`codec.json`, `signing.json`'s `aggregate`, `merkle.json`); the fuzz workspace (`vmop_decode`, the differential generator); the TypeScript SDK; SPEC; `docs/RPC.md`;
   ARCHITECTURE.
+
+## D-155 A local holdings index bounds built-in account balance reads (a code scan's finding, 2026-11-17; revises D-120 and D-132 item 8; local policy, no consensus change, M67)
+
+- **Problem**: `ksana_getAccount` and `ksana_getAccountAssets` scanned every asset on chain to find the built-in balances of one account, under the chain state's read lock. Any contract can
+  grow the asset set, so even an account holding only KSA paid work proportional to all assets.
+- **Decision**: the block store has a local `holdings` column family keyed by account ‖ asset ID, with an empty value, and a `meta` `"holdings"` marker holding the base height as 8 bytes
+  big-endian. It is a superset of built-in assets whose balance key has existed for the account in state on the main chain from that base onward. Entries are never removed: a transfer to
+  zero deletes the state balance key (D-019), but its index entry stays, and rollback can restore it. At startup, the node scans state balances and covers the index when it is absent or the
+  recovered state is below its base; a rollback below the base does the same from the rolled-back state. A main-chain connection adds the balance keys it credits in the same store batch as
+  the new tip. The RPCs look up only that account's indexed asset IDs, read each actual balance from state and skip absent keys; their answers and cursor format do not change.
+- **Rationale**: the account prefix narrows work to assets the account has held, without changing either RPC or relying on historical values as present balances. A superset avoids an undo log
+  on every reorg: the state remains authoritative, and stale entries are cheap to skip.
+- **Alternatives**:
+  - `ksana_getAccount` returning only KSA, with `ksana_getAccountAssets` paging over all assets: changes the RPC, and a full listing still costs every asset.
+  - An exact index with an undo log: stored receipts cannot rebuild it because they do not record KSA fees, rewards or genesis allocations.
+- **Costs and limitations**: a query reads once per built-in asset the account has ever had a balance in since the base; entries are not removed. Covering scans every balance once at the first
+  start and after a rollback below the base.
+- **Impact**: `crates/ksana-node` (`store.rs`: the `holdings` column family, base marker, batches and reads; `chain.rs`: credit extraction, startup / rollback coverage; `rpc.rs`: account balance
+  reads); tests (`store.rs`, new `tests/m67_holdings.rs`); D-120, D-132, ARCHITECTURE and SPEC's version history.

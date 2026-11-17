@@ -15,9 +15,10 @@
 //! | `account_ops` | account ‖ position | empty: the positions of the ops listed under the account in `op_seq` (D-111) |
 //! | `standards` | see `crate::standards` | the index of the token standards' events (D-120): declared contracts, balances and holders, NFTs, approvals |
 //! | `standards_undo` | height (8 bytes big-endian) ‖ number (4 bytes big-endian) | Borsh(`(Vec<u8>, Option<Vec<u8>>)`): a key of `standards` that height changed, and its value before (D-120) |
+//! | `holdings` | account ‖ asset ID (32 bytes each) | empty: a superset of the built-in assets whose balance key the account has had in state since the base in `meta` (D-155) |
 //! | `settlements` | block hash | Borsh(`SettlementRecord`): the settlement transactions carried by blocks accepted on the main chain (D-037) |
 //! | `verdicts` | block hash | the version of the verdict rules (1 byte, `ksana_btc::verdict::VERDICT_VERSION`), then Borsh(`(bool, [u8; 32])`): the verdict of executing the block on top of its selected parent (valid or not) and the BTC block hash it was given on (D-101; a cache, written without waiting for the disk: a lost one, or one kept under another version, is judged again) |
-//! | `meta` | `"tip"` / `"genesis"` / `"config"` / `"index"` | main-chain tip hash / genesis block hash / genesis config fingerprint / the tip the operation index and the standards index describe, and its height (D-111, D-120) |
+//! | `meta` | `"tip"` / `"genesis"` / `"config"` / `"index"` / `"holdings"` | main-chain tip hash / genesis block hash / genesis config fingerprint / the tip the operation index and standards index describe and its height (D-111, D-120) / holdings index base height (8 bytes big-endian, D-155) |
 //!
 //! Connecting a block to the main chain (together with the receipts, op index, acceptance index and settlement records
 //! of the blocks it merges, and its summary) and the new tip are written in one synchronous write batch; when the
@@ -31,6 +32,10 @@
 //! `standards` had before, and rolling back restores them. Otherwise (a data directory from a version without them,
 //! which has the operation index's marker `"op_index"` of D-111 or none, or a build that did not finish) both are left
 //! alone until [`ChainStore::rebuild_index`] builds them again at the next start.
+//!
+//! The holdings index (`holdings`, D-155) is a local superset: entries are added in the batch that connects a block
+//! with the new tip and are not removed when a balance key disappears. Startup builds it from state when absent or
+//! when recovery has rolled below its base; the same coverage is done after a rollback below the base.
 
 use std::collections::BTreeMap;
 use std::path::Path;
