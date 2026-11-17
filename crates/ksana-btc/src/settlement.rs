@@ -14,7 +14,7 @@
 //!
 //! | Position | Content |
 //! | --- | --- |
-//! | Input | Exactly one: output 1 of the commit transaction, empty scriptSig, witness exactly `[signature, envelope leaf, control block]` (signature `SIGHASH_DEFAULT` or `SIGHASH_ALL`) |
+//! | Input | Exactly one: output 0 ([`COMMITMENT_OUTPUT`]) of the commit transaction, empty scriptSig, witness exactly `[signature, envelope leaf, control block]` (signature `SIGHASH_DEFAULT` or `SIGHASH_ALL`) |
 //! | Output 0 | The only one: producer change (P2PKH, P2SH, P2WPKH, P2WSH or P2TR, not below the dust floor, not a KSN1 output); only the producer can spend it, so only the producer can CPFP the pair ([`cpfp_child`], D-140) |
 //!
 //! Both are v2 with `nLockTime = 0` and every input's `nSequence` [`PRODUCER_SEQUENCE`] (no relative time lock,
@@ -96,7 +96,7 @@ pub struct ProducerUtxo {
 /// The settlement transactions a block carries (D-081): the commit transaction and the reveal transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlementPair {
-    /// The commit transaction: the producer's funding inputs, with the change and the commitment output as outputs.
+    /// The commit transaction: the producer's funding inputs, with the commitment output as its only output (D-140).
     pub commit: Transaction,
     /// The reveal transaction: spends the commitment output and carries the payload out in its witness.
     pub reveal: Transaction,
@@ -372,8 +372,8 @@ pub fn redraft(
 /// the length), so the weight and fee of both transactions are unchanged. The commitment output is recomputed from the
 /// x-only public key of `key` and the final payload; the previous output of every input of the commit transaction must
 /// be the [`producer_script`] of `key`, signed with the BIP86-tweaked key using `SIGHASH_DEFAULT` (the sighash covers
-/// all previous outputs); then the reveal transaction points at output 1 of the commit transaction and is signed by
-/// the script path with `key` itself using `SIGHASH_DEFAULT`.
+/// all previous outputs); then the reveal transaction points at output 0 ([`COMMITMENT_OUTPUT`]) of the commit
+/// transaction and is signed by the script path with `key` itself using `SIGHASH_DEFAULT`.
 pub fn finalize(
     params: &Params,
     draft: Draft,
@@ -673,10 +673,10 @@ pub fn decode_tx(bytes: &[u8]) -> Result<Transaction, SettlementError> {
 ///   signatures are verified against all previous outputs; all inputs are distinct, and all previous outputs can be
 ///   obtained from `source` (`None` means not confirmed before the anchor height, judged invalid); exactly one
 ///   output, the commitment (see the module docs);
-/// - Reveal transaction: exactly one input, spending output 1 of the commit transaction, empty scriptSig, the witness
-///   is exactly `[signature, envelope leaf, control block]`: the leaf is the canonical envelope of its data,
-///   the control block and the commitment output are both derived from the key in the leaf (the internal key) and
-///   this leaf, and the signature is verified by the script path; the envelope's data decompresses (D-141) to
+/// - Reveal transaction: exactly one input, spending output 0 ([`COMMITMENT_OUTPUT`]) of the commit transaction, empty
+///   scriptSig, the witness is exactly `[signature, envelope leaf, control block]`: the leaf is the canonical envelope
+///   of its data, the control block and the commitment output are both derived from the key in the leaf (the internal
+///   key) and this leaf, and the signature is verified by the script path; the envelope's data decompresses (D-141) to
 ///   `expected_payload`; exactly one output, the change (D-140);
 /// - Each transaction's own fee is ≥ `vsize × MIN_SETTLEMENT_FEERATE`.
 ///
