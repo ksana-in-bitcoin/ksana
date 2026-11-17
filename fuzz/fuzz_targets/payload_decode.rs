@@ -14,9 +14,11 @@ use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+use ksana_btc::compress::{unpack, ZSTD_MAGIC};
 use ksana_btc::data::{data_script, parse_data_script, tx_data, tx_payload, Carrier, TxData};
 use ksana_btc::envelope::{envelope_script, parse_envelope};
 use ksana_btc::payload::envelope_payload;
+use ksana_btc::settlement::MAX_SETTLEMENT_TX_BYTES;
 use ksana_primitives::{Payload, DEVNET};
 use libfuzzer_sys::fuzz_target;
 
@@ -120,26 +122,42 @@ fuzz_target!(|data: &[u8]| {
     );
     assert_eq!(
         tx_payload(&DEVNET, &out_tx).map(|(_, p)| p),
-        decoded.clone().ok().filter(|_| kind_native),
+        decoded.ok().filter(|_| kind_native),
         "payload in OP_RETURN does not agree with direct decoding"
     );
 
-    // 4. As a payload placed in an envelope: tx_data recovers the original bytes; only settlement and republish
-    //    payloads are recognized.
+    // 4. As data placed in an envelope: tx_data recovers the payload the data stands for, which is the data itself
+    //    unless it starts with the zstd magic, and then the frame decompressed, or nothing where the frame is not one
+    //    a node reads (D-141); only settlement and republish payloads are recognized.
     let leaf = envelope_script(&key, magic, data)
         .expect("a non-empty payload must be writable as an envelope");
     let env_tx = tx_with(vec![Witness::new(), envelope_witness(&leaf)], vec![]);
+    let carried = unpack(data, MAX_SETTLEMENT_TX_BYTES);
+    if !data.starts_with(&ZSTD_MAGIC) {
+        assert_eq!(
+            carried.as_deref(),
+            Some(data),
+            "plain data must stand for itself"
+        );
+    }
     assert_eq!(
         tx_data(magic, &env_tx),
-        TxData::One {
-            carrier: Carrier::Input(1),
-            payload: data.to_vec()
+        match &carried {
+            Some(payload) => TxData::One {
+                carrier: Carrier::Input(1),
+                payload: payload.clone()
+            },
+            None => TxData::Invalid,
         }
     );
-    assert_eq!(envelope_payload(&DEVNET, &env_tx), Some(data.to_vec()));
+    assert_eq!(envelope_payload(&DEVNET, &env_tx), carried);
+    let carried_decoded = carried
+        .as_deref()
+        .and_then(|payload| Payload::decode(payload, &DEVNET).ok())
+        .filter(|payload| !matches!(payload, Payload::NativeOp { .. }));
     assert_eq!(
         tx_payload(&DEVNET, &env_tx).map(|(_, p)| p),
-        decoded.ok().filter(|_| !kind_native),
+        carried_decoded,
         "payload in the envelope does not agree with direct decoding"
     );
 });
