@@ -1250,6 +1250,7 @@ impl Chain {
             &genesis_writes,
         )?;
         let tip = load_tip(&dag, &params, &tip_hash)?;
+        cover_holdings(&store, &state, tip.header.height)?;
         let (base, base_prefix) = restored
             .as_ref()
             .map_or((0, 0), |r| (r.main_base, r.main_base_prefix));
@@ -4994,10 +4995,13 @@ impl Chain {
                 "state_root after the commit does not match the header".into(),
             ));
         }
-        if let Err(e) = self
-            .store
-            .connect_main(block, &entry, &accepted_blocks, &records)
-        {
+        if let Err(e) = self.store.connect_main(
+            block,
+            &entry,
+            &accepted_blocks,
+            &records,
+            &credited(&outcome.writes),
+        ) {
             inner.state.rollback_to(parent_height)?;
             return Err(e);
         }
@@ -5084,6 +5088,7 @@ impl Chain {
         }
         let tip = load_tip(&*self.dag()?, &self.params, &fork_hash)?;
         let mut inner = self.write()?;
+        self.store.forget_holdings_below(fork_height)?;
         self.store.rewind_main(
             &fork_hash,
             fork_height.saturating_add(1)..=old_height,
@@ -5099,6 +5104,7 @@ impl Chain {
         }
         let mut open = self.open.lock().map_err(poisoned)?;
         self.drop_records(&mut open, &disconnected)?;
+        cover_holdings(&self.store, &inner.state, fork_height)?;
         Ok(disconnected)
     }
 
@@ -5193,6 +5199,7 @@ impl Chain {
         {
             let mut inner = self.write()?;
             // Change the store first: the batch above the fork point, then those below it in batches (to limit memory)
+            self.store.forget_holdings_below(0)?;
             self.store.rewind_main(
                 &fork_hash,
                 fork_height.saturating_add(1)..=old_height,
@@ -5209,6 +5216,7 @@ impl Chain {
             self.drop_records(&mut open, &disconnected)?;
             // The settlement records below the fork point are rebuilt during re-execution
             open.clear();
+            cover_holdings(&self.store, &inner.state, 0)?;
         }
         for hash in &prefix {
             self.connect_chain_block(hash)?;
@@ -5668,6 +5676,48 @@ fn reset_state_to_genesis(
             "rebuilt genesis state does not match the genesis block's state_root".into(),
         ));
     }
+    Ok(())
+}
+
+fn credited(writes: &WriteSet) -> Vec<([u8; 32], [u8; 32])> {
+    writes
+        .iter()
+        .filter_map(|(key, value)| {
+            if value.is_none()
+                || key.len() != 65
+                || key.first() != Some(&ksana_execution::keys::PREFIX_BALANCE)
+            {
+                return None;
+            }
+            let asset = key.get(1..33)?.try_into().ok()?;
+            let account = key.get(33..65)?.try_into().ok()?;
+            Some((account, asset))
+        })
+        .collect()
+}
+
+/// Builds the holdings index from the state when it is absent or the state has rolled below its recorded base (D-155).
+fn cover_holdings(store: &ChainStore, state: &StateDb, height: u64) -> Result<(), NodeError> {
+    let existing = store.holdings_base()?;
+    if existing.is_some_and(|base| base <= height) {
+        return Ok(());
+    }
+    let base = existing.map_or(height, |base| base.min(height));
+    eprintln!("[ksana-node] building the holdings index from state at height {height} (D-155)");
+    let pairs = state
+        .scan_prefix(&[ksana_execution::keys::PREFIX_BALANCE])?
+        .into_iter()
+        .filter_map(|(key, _)| {
+            if key.len() != 65 || key.first() != Some(&ksana_execution::keys::PREFIX_BALANCE) {
+                return None;
+            }
+            let asset = key.get(1..33)?.try_into().ok()?;
+            let account = key.get(33..65)?.try_into().ok()?;
+            Some((account, asset))
+        })
+        .collect::<Vec<_>>();
+    store.cover_holdings(&pairs, base)?;
+    eprintln!("[ksana-node] holdings index built from height {base} (D-155)");
     Ok(())
 }
 

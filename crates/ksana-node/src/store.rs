@@ -15,9 +15,10 @@
 //! | `account_ops` | account ‖ position | empty: the positions of the ops listed under the account in `op_seq` (D-111) |
 //! | `standards` | see `crate::standards` | the index of the token standards' events (D-120): declared contracts, balances and holders, NFTs, approvals |
 //! | `standards_undo` | height (8 bytes big-endian) ‖ number (4 bytes big-endian) | Borsh(`(Vec<u8>, Option<Vec<u8>>)`): a key of `standards` that height changed, and its value before (D-120) |
+//! | `holdings` | account ‖ asset ID (32 bytes each) | empty: a superset of the built-in assets whose balance key the account has had in state since the base in `meta` (D-155) |
 //! | `settlements` | block hash | Borsh(`SettlementRecord`): the settlement transactions carried by blocks accepted on the main chain (D-037) |
 //! | `verdicts` | block hash | the version of the verdict rules (1 byte, `ksana_btc::verdict::VERDICT_VERSION`), then Borsh(`(bool, [u8; 32])`): the verdict of executing the block on top of its selected parent (valid or not) and the BTC block hash it was given on (D-101; a cache, written without waiting for the disk: a lost one, or one kept under another version, is judged again) |
-//! | `meta` | `"tip"` / `"genesis"` / `"config"` / `"index"` | main-chain tip hash / genesis block hash / genesis config fingerprint / the tip the operation index and the standards index describe, and its height (D-111, D-120) |
+//! | `meta` | `"tip"` / `"genesis"` / `"config"` / `"index"` / `"holdings"` | main-chain tip hash / genesis block hash / genesis config fingerprint / the tip the operation index and standards index describe and its height (D-111, D-120) / holdings index base height (8 bytes big-endian, D-155) |
 //!
 //! Connecting a block to the main chain (together with the receipts, op index, acceptance index and settlement records
 //! of the blocks it merges, and its summary) and the new tip are written in one synchronous write batch; when the
@@ -31,6 +32,11 @@
 //! `standards` had before, and rolling back restores them. Otherwise (a data directory from a version without them,
 //! which has the operation index's marker `"op_index"` of D-111 or none, or a build that did not finish) both are left
 //! alone until [`ChainStore::rebuild_index`] builds them again at the next start.
+//!
+//! The holdings index (`holdings`, D-155) is a local superset: entries are added in the batch that connects a block
+//! with the new tip and are not removed when a balance key disappears. Startup builds it from state when absent or
+//! when recovery has rolled below its base; a rollback below the base first removes the marker, then covers after the
+//! tip and main chain are rolled back.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -63,9 +69,10 @@ const CF_OP_SEQ: &str = "op_seq";
 const CF_ACCOUNT_OPS: &str = "account_ops";
 const CF_STANDARDS: &str = "standards";
 const CF_STANDARDS_UNDO: &str = "standards_undo";
+const CF_HOLDINGS: &str = "holdings";
 const CF_META: &str = "meta";
 
-const COLUMN_FAMILIES: [&str; 15] = [
+const COLUMN_FAMILIES: [&str; 16] = [
     CF_BLOCKS,
     CF_DAG,
     CF_DAG_SEQ,
@@ -80,12 +87,14 @@ const COLUMN_FAMILIES: [&str; 15] = [
     CF_ACCOUNT_OPS,
     CF_STANDARDS,
     CF_STANDARDS_UNDO,
+    CF_HOLDINGS,
     CF_META,
 ];
 const META_TIP: &[u8] = b"tip";
 const META_GENESIS: &[u8] = b"genesis";
 const META_CONFIG: &[u8] = b"config";
 const META_INDEX: &[u8] = b"index";
+const META_HOLDINGS: &[u8] = b"holdings";
 /// The marker of the operation index of a version without the standards index (D-111): a data directory that has it
 /// gets both indexes built again.
 const META_LEGACY_OP_INDEX: &[u8] = b"op_index";
@@ -520,6 +529,91 @@ impl ChainStore {
         self.get(CF_META, META_CONFIG)?
             .map(|b| hash32(&b))
             .transpose()
+    }
+
+    /// The lowest main-chain height the holdings index covers, or `None` when it has not been built.
+    pub fn holdings_base(&self) -> Result<Option<u64>, NodeError> {
+        self.get(CF_META, META_HOLDINGS)?
+            .map(|bytes| {
+                let bytes: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| NodeError::Storage("holdings index base is not 8 bytes".into()))?;
+                Ok(u64::from_be_bytes(bytes))
+            })
+            .transpose()
+    }
+
+    /// Marks the index unbuilt so a failed cover is retried at next start rather than leaving a base that claims coverage (D-155).
+    pub fn forget_holdings_below(&self, height: u64) -> Result<(), NodeError> {
+        if self.holdings_base()?.is_some_and(|base| base > height) {
+            let mut batch = WriteBatch::default();
+            batch.delete_cf(self.cf(CF_META)?, META_HOLDINGS);
+            self.write(batch)?;
+        }
+        Ok(())
+    }
+
+    /// Adds holdings to the index and marks it as covering `base`. Entries are only added, never removed.
+    pub fn cover_holdings(
+        &self,
+        pairs: &[([u8; 32], [u8; 32])],
+        base: u64,
+    ) -> Result<(), NodeError> {
+        const UPDATES_PER_BATCH: usize = 16_384;
+        let cf = self.cf(CF_HOLDINGS)?;
+        let meta = self.cf(CF_META)?;
+        let mut chunks = pairs.chunks(UPDATES_PER_BATCH).peekable();
+        while let Some(chunk) = chunks.next() {
+            let mut batch = WriteBatch::default();
+            for (account, asset) in chunk {
+                batch.put_cf(cf, holdings_key(account, asset), []);
+            }
+            if chunks.peek().is_none() {
+                batch.put_cf(meta, META_HOLDINGS, base.to_be_bytes());
+            }
+            self.write(batch)?;
+        }
+        if pairs.is_empty() {
+            let mut batch = WriteBatch::default();
+            batch.put_cf(meta, META_HOLDINGS, base.to_be_bytes());
+            self.write(batch)?;
+        }
+        Ok(())
+    }
+
+    /// The account's indexed assets in asset-ID order, strictly after `after`.
+    pub fn holdings(
+        &self,
+        account: &[u8; 32],
+        after: Option<&[u8; 32]>,
+    ) -> Result<Vec<[u8; 32]>, NodeError> {
+        if self.holdings_base()?.is_none() {
+            return Err(NodeError::Storage("holdings index not built".into()));
+        }
+        let cf = self.cf(CF_HOLDINGS)?;
+        let mut seek = account.to_vec();
+        if let Some(after) = after {
+            seek.extend_from_slice(after);
+        }
+        let mut assets = Vec::new();
+        for item in self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&seek, Direction::Forward))
+        {
+            let (key, _) = item?;
+            if !key.starts_with(account) {
+                break;
+            }
+            let asset: [u8; 32] = key
+                .get(32..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| NodeError::Storage("holdings index key is corrupt".into()))?;
+            if after.is_some_and(|after| asset <= *after) {
+                continue;
+            }
+            assets.push(asset);
+        }
+        Ok(assets)
     }
 
     /// A block.
@@ -1260,6 +1354,7 @@ impl ChainStore {
         entry: &MainEntry,
         accepted: &[AcceptedBlock<'_>],
         settlements: &[([u8; 32], SettlementRecord)],
+        credited: &[([u8; 32], [u8; 32])],
     ) -> Result<(), NodeError> {
         let height = chain.header.height;
         let chain_hash = chain.header.hash();
@@ -1302,6 +1397,10 @@ impl ChainStore {
         }
         for (hash, record) in settlements {
             batch.put_cf(self.cf(CF_SETTLEMENTS)?, hash, encode(record)?);
+        }
+        let holdings = self.cf(CF_HOLDINGS)?;
+        for (account, asset) in credited {
+            batch.put_cf(holdings, holdings_key(account, asset), []);
         }
         // The operation index and the standards index, while they describe the main chain this block extends (D-111,
         // D-120): the slots follow the summary's acceptance order, the order a rebuild reads
@@ -1346,6 +1445,13 @@ impl ChainStore {
         opts.set_sync(true);
         Ok(self.db.write_opt(batch, &opts)?)
     }
+}
+
+fn holdings_key(account: &[u8; 32], asset: &[u8; 32]) -> [u8; 64] {
+    let mut key = [0; 64];
+    key[..32].copy_from_slice(account);
+    key[32..].copy_from_slice(asset);
+    key
 }
 
 #[cfg(test)]
@@ -1456,6 +1562,111 @@ mod tests {
             "the marker holds the tip and its height"
         );
         assert!(marker_of(&[0; 39]).is_err());
+    }
+
+    #[test]
+    fn holdings_are_ordered_and_page_after_the_asset_cursor() {
+        let (_dir, store) = open();
+        let account = [0xa1; 32];
+        let other = [0xa2; 32];
+        let assets = [[0x03; 32], [0x01; 32], [0x02; 32]];
+        assert!(matches!(
+            store.holdings(&account, None),
+            Err(NodeError::Storage(message)) if message == "holdings index not built"
+        ));
+        store
+            .cover_holdings(
+                &[
+                    (account, assets[0]),
+                    (other, assets[1]),
+                    (account, assets[1]),
+                    (account, assets[2]),
+                ],
+                12,
+            )
+            .unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(12));
+        assert_eq!(
+            store.holdings(&account, None).unwrap(),
+            [[0x01; 32], [0x02; 32], [0x03; 32]]
+        );
+        assert_eq!(
+            store.holdings(&account, Some(&[0x01; 32])).unwrap(),
+            [[0x02; 32], [0x03; 32]]
+        );
+        assert!(store
+            .holdings(&account, Some(&[0xff; 32]))
+            .unwrap()
+            .is_empty());
+        store.cover_holdings(&[(other, [0x04; 32])], 10).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(10));
+        assert_eq!(
+            store.holdings(&account, None).unwrap(),
+            [[0x01; 32], [0x02; 32], [0x03; 32]]
+        );
+    }
+
+    #[test]
+    fn forget_holdings_below_only_removes_a_higher_base() {
+        let (_dir, store) = open();
+        store.cover_holdings(&[], 10).unwrap();
+
+        store.forget_holdings_below(12).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), Some(10));
+
+        store.forget_holdings_below(5).unwrap();
+        assert_eq!(store.holdings_base().unwrap(), None);
+    }
+
+    #[test]
+    fn connect_main_writes_credited_holdings_with_the_tip() {
+        let (_dir, store) = open();
+        let block = Block {
+            header: ksana_primitives::BlockHeader {
+                version: ksana_primitives::BLOCK_VERSION,
+                height: 1,
+                parents: vec![TIP],
+                btc_anchor: ksana_primitives::BtcAnchor {
+                    height: 0,
+                    hash: [0; 32],
+                },
+                entries_root: [0; 32],
+                state_root: [0; 32],
+                producer: [0; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            entries: Vec::new(),
+            settlement: None,
+            second_halves: Vec::new(),
+        };
+        let hash = block.header.hash();
+        let entry = MainEntry {
+            hash,
+            settles: false,
+            anchor_height: 0,
+            producer: [0; 32],
+            daa_score: 0,
+            weight: 0,
+            merged: Vec::new(),
+        };
+        let account = [0xa1; 32];
+        let asset = [0xb2; 32];
+        store
+            .connect_main(&block, &entry, &[], &[], &[(account, asset)])
+            .unwrap();
+        assert_eq!(store.tip().unwrap(), Some(hash));
+        assert_eq!(
+            store
+                .db
+                .get_cf(
+                    store.cf(CF_HOLDINGS).unwrap(),
+                    holdings_key(&account, &asset)
+                )
+                .unwrap(),
+            Some(Vec::new())
+        );
     }
 
     #[test]

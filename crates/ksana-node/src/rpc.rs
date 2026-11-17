@@ -498,7 +498,15 @@ impl Backend for NodeRpc {
                 // write lock when a new block is committed)
                 let main = self.chain.main_chain().map_err(node_err)?;
                 let snapshot = self.chain.btc().snapshot().map_err(node_err)?;
-                account_json(state, tip, &main, &snapshot, self.chain.params(), account)
+                account_json(
+                    state,
+                    self.chain.store(),
+                    tip,
+                    &main,
+                    &snapshot,
+                    self.chain.params(),
+                    account,
+                )
             })
             .map_err(node_err)?
     }
@@ -874,16 +882,23 @@ impl Backend for NodeRpc {
                 let mut assets = Vec::new();
                 let mut more = false;
                 if !matches!(after, Some((1, _))) {
-                    for (asset, balance) in builtin_balances(state, &account)? {
-                        if matches!(after, Some((0, after)) if asset <= after) {
-                            continue;
-                        }
-                        if assets.len() >= limit {
-                            more = true;
-                            break;
-                        }
-                        assets.push(AccountAssetJson::Asset { asset, balance });
-                    }
+                    let after_asset = match after {
+                        Some((0, asset)) => Some(asset),
+                        _ => None,
+                    };
+                    let (balances, builtins_more) = builtin_balances(
+                        state,
+                        self.chain.store(),
+                        &account,
+                        after_asset.as_ref(),
+                        limit,
+                    )?;
+                    more = builtins_more;
+                    assets.extend(
+                        balances
+                            .into_iter()
+                            .map(|(asset, balance)| AccountAssetJson::Asset { asset, balance }),
+                    );
                 }
                 let after_contract = match after {
                     Some((1, contract)) => Some(contract),
@@ -1079,33 +1094,40 @@ impl Backend for NodeRpc {
     }
 }
 
-/// The built-in assets `account` holds, by asset ID. Balance keys are 0x02 ‖ asset_id ‖ account (§10.1): this reads the
-/// account's balance in each asset (0x03 ‖ asset_id), one read per asset rather than a scan of every account's
-/// balances (F-29, D-132).
+/// The built-in assets `account` holds, by asset ID (D-155): the local holdings index bounds the scan to assets the
+/// account has had a balance in; each current balance is read from state and absent keys are skipped.
+type BuiltinBalances = (Vec<([u8; 32], u128)>, bool);
+
 fn builtin_balances(
     state: &ksana_state::StateDb,
+    store: &crate::store::ChainStore,
     account: &[u8; 32],
-) -> RpcResult<Vec<([u8; 32], u128)>> {
+    after: Option<&[u8; 32]>,
+    limit: usize,
+) -> RpcResult<BuiltinBalances> {
     let mut balances = Vec::new();
-    for (key, _) in state.scan_prefix(&[keys::PREFIX_ASSET]).map_err(internal)? {
-        let Some(asset) = key.get(1..).and_then(|a| <[u8; 32]>::try_from(a).ok()) else {
-            continue;
-        };
+    let mut more = false;
+    for asset in store.holdings(account, after).map_err(node_err)? {
         let Some(value) = state
             .get(&keys::balance(&asset, account))
             .map_err(internal)?
         else {
             continue;
         };
+        if balances.len() >= limit {
+            more = true;
+            break;
+        }
         let amount: u128 = borsh::from_slice(&value)
             .map_err(|e| internal(format!("state value corrupted: {e}")))?;
         balances.push((asset, amount));
     }
-    Ok(balances)
+    Ok((balances, more))
 }
 
 fn account_json(
     state: &ksana_state::StateDb,
+    store: &crate::store::ChainStore,
     tip: &Tip,
     main: &crate::btc::MainChain,
     snapshot: &BtcSnapshot,
@@ -1118,7 +1140,8 @@ fn account_json(
         None => AccountState::default(),
     };
 
-    let balances = builtin_balances(state, &account)?
+    let balances = builtin_balances(state, store, &account, None, usize::MAX)?
+        .0
         .into_iter()
         .map(|(asset, amount)| BalanceJson { asset, amount })
         .collect();

@@ -156,8 +156,9 @@ state root the nodes committed to.
   D-120; the accounts and the assets but KSA that a receipt's asset changes name join them too, D-122), both written in the batches of `connect_main` / `rewind_main` while `meta`
   `index` names the stored tip, and built again by `rebuild_index` when the store is opened otherwise (also a data directory with D-111's marker `op_index`), the receipts stored as
   `RECEIPTS_MAGIC`, a format byte and Borsh, a value without the magic read as receipts from before D-122 that record no asset changes (`StoredReceipts`, D-122), the RPC backend
-  (`ksana_getAccount` and `ksana_getAccountAssets` read the account's balance in each asset, and `ksana_getAccount` the carriers of the blocks after the unlock cursor from an index
-  of the window, `btc::Carriers`, D-132);
+  (`ksana_getAccount` and `ksana_getAccountAssets` read built-in balances from state using the local holdings index by account, and `ksana_getAccount` the carriers of the blocks after
+  the unlock cursor from an index of the window, `btc::Carriers`, D-132; `store.rs`: the `holdings` column family is a superset of built-in assets whose balance keys an account has had
+  since the `meta` base, credits are written with the connected tip and entries are never removed; startup and a rollback below the base cover it from state, D-155);
   on Linux the binary allocates with jemalloc (D-103); plus `ksana-keytool` (the devnet keytool).
 - `ksana-indexer`: the standalone indexer library and binary (D-048, D-063): connects only to bitcoind, counts the headers in settlement / republish payloads and lands their bodies with the shared BTC
   tracker (`known.rs`: `Known::count` answers the tracker with the block DAG, D-135; bodies decoded with the shared `ksana_btc::bodies`, D-093), builds the block DAG (`ksana_btc::headers`, GHOSTDAG, main-chain selection same as the node, re-selected under the current BTC chain after every finality determination with an alarm on a retreat, D-104), executes the main-chain blocks one by one following the settled closure (first executing the blocks each merges leniently; a main-chain block is executed only once it has

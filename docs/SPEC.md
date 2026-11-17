@@ -17,6 +17,9 @@ contracts, §9); there is an upgrade mechanism activated by DAA score (§6.9).
 
 Version history:
 
+- **2026-11-17, a local holdings index bounds built-in account balance reads (M67, D-155)**: local policy, no consensus change; the answers of `ksana_getAccount` and
+  `ksana_getAccountAssets` do not change. A block-store index by account lists built-in assets whose balance keys have existed since its base; RPCs read current balances from state and skip
+  absent keys. It is covered from state at startup or after a rollback below the base.
 - **2026-11-16, the signatures of a block's path B ops are half-aggregated (M66, D-154)**: a consensus change after the freeze, decided by the project owner before mainnet; devnet
   and the signet restart from genesis. Measured on the fifth stress run, 71% of the bytes the chain landed on BTC were 64-byte signatures. A block now holds each path B op by the
   first half of its signature (32 bytes) and ends with one aggregate entry, 32 bytes that stand for all the second halves (BIP340 half-aggregation); the block is valid when that
