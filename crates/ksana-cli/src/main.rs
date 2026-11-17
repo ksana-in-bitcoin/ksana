@@ -219,6 +219,10 @@ enum NodeCommand {
         /// Exchange contract ID (64 hex digits).
         #[arg(long)]
         exchange: String,
+        /// The SHA-256 of the exchange contract's code as reviewed (64 hex digits): the payment is refused when the
+        /// node gives another hash for `--exchange` (`ksana_getContract`).
+        #[arg(long)]
+        exchange_code_hash: Option<String>,
         /// Lock number.
         #[arg(long)]
         lock: u64,
@@ -714,6 +718,7 @@ async fn node_command(node: &Node, command: NodeCommand) -> Result<Value> {
         }
         NodeCommand::TopUp {
             exchange,
+            exchange_code_hash,
             lock,
             beneficiary,
             sats,
@@ -725,11 +730,15 @@ async fn node_command(node: &Node, command: NodeCommand) -> Result<Value> {
             timeout,
         } => {
             let exchange = parse_id(&exchange, "exchange contract ID")?;
+            let exchange_code_hash = exchange_code_hash
+                .map(|hash| parse_id(&hash, "exchange code hash"))
+                .transpose()?;
             let beneficiary = parse_account(&beneficiary, btc_net)?;
             top_up(
                 node,
                 TopUp {
                     exchange,
+                    exchange_code_hash,
                     lock,
                     beneficiary,
                     sats,
@@ -1044,6 +1053,7 @@ async fn exchange(node: &Node, command: ExchangeCommand) -> Result<Value> {
 /// Arguments of one top-up.
 struct TopUp {
     exchange: [u8; 32],
+    exchange_code_hash: Option<[u8; 32]>,
     lock: u64,
     beneficiary: [u8; 32],
     sats: u64,
@@ -1057,6 +1067,17 @@ struct TopUp {
 /// transaction, funded and broadcast by the bitcoind wallet; with `wait`, waits until the claim op is executed.
 async fn top_up(node: &Node, req: TopUp, btc: &BtcArgs, wait: Option<Duration>) -> Result<Value> {
     let (client, params) = (&node.client, node.params());
+    if let Some(reviewed) = req.exchange_code_hash {
+        let found = client
+            .get_contract(hex::encode(req.exchange))
+            .await?
+            .code_hash;
+        ensure!(
+            found == reviewed,
+            "the exchange contract runs code {}, not the code given by --exchange-code-hash",
+            hex::encode(found)
+        );
+    }
     let lock = read_lock(client, req.exchange, req.lock).await?;
     ensure!(
         lock.beneficiary == req.beneficiary,

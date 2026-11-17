@@ -1707,7 +1707,7 @@ chars, the same as `ksana-keytool`), `account` (with the address) / `asset` / `o
 `transfer` / `deploy` / `call` (`--fee-token <amount>` for path B, or `--native --btc-wallet <wallet>` for path C, funded, signed and broadcast by the bitcoind wallet;
 `--sig bip340|bip322` selects the VmOp signature scheme, default BIP340;
 `--fund [<asset ID>:]<amount>` attaches funds; `--wait` polls until the op is included, continuing to wait on `skipped`), `top-up` (`--exchange --lock --sats --btc-wallet`,
-`--allow-overpay`, `--expiry-margin` default 3; the result gives `pay_by`, the latest BTC height at which the payment should confirm, and a `--btc-fee-rate` above `--max-btc-fee-rate`, default 1 000 sat/vB, is refused by every command that funds a BTC transaction), `exchange deposit / withdraw / lock / release / show / balance`. The nonce defaults to the account's next
+`--allow-overpay`, `--expiry-margin` default 3, `--exchange-code-hash` refuses an exchange contract whose code hash is another; the result gives `pay_by`, the latest BTC height at which the payment should confirm, and a `--btc-fee-rate` above `--max-btc-fee-rate`, default 1 000 sat/vB, is refused by every command that funds a BTC transaction), `exchange deposit / withdraw / lock / release / show / balance`. The nonce defaults to the account's next
 nonce on the node; results are always printed as JSON. There is also `ksana-keytool` (generates a private key and prints the account, the internal key and the funding address: the funding address is the account's address).
 
 ## 12. Tech stack and repository layout
