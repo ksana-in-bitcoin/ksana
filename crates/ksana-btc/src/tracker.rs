@@ -488,6 +488,9 @@ pub struct BtcSnapshot {
     chain: Vec<([u8; 32], [u8; 80])>,
     /// Heights containing native transactions → the native transactions (in block order), each with its leaf hash.
     native: BTreeMap<u32, Vec<Native>>,
+    /// The index of `native` by transaction ID (A2-14): (transaction ID, height) → the first position in that height's
+    /// list holding the ID. Kept with `native` by [`BtcSnapshot::put_native`] and [`BtcSnapshot::forget_native`].
+    native_index: BTreeMap<([u8; 32], u32), u32>,
     /// Fast-lane block hash → where its header counts (D-135).
     counted: BTreeMap<[u8; 32], Counted>,
     /// The reverse index of `counted`: BTC height → the fast-lane headers that count at it, each after its parents, for
@@ -562,21 +565,49 @@ impl BtcSnapshot {
         if heights.start() > heights.end() {
             return None;
         }
-        self.native
-            .range(heights)
-            .flat_map(|(_, txs)| txs)
-            .map(|native| &native.tx)
-            .find(|tx| tx.txid == *txid)
+        self.native_at(txid, (*txid, *heights.start())..=(*txid, *heights.end()))
     }
 
     /// The native transaction with ID `txid` in a block at height ≤ `max_height` on the current best chain (within
     /// the snapshot range).
     pub fn native_tx_at_most(&self, txid: &[u8; 32], max_height: u32) -> Option<&NativeTx> {
+        self.native_at(txid, (*txid, 0)..=(*txid, max_height))
+    }
+
+    /// The first native transaction with ID `txid` at the lowest height of `keys`, a range of `native_index` within
+    /// that ID: what a scan of `native` over those heights finds first.
+    fn native_at(
+        &self,
+        txid: &[u8; 32],
+        keys: std::ops::RangeInclusive<([u8; 32], u32)>,
+    ) -> Option<&NativeTx> {
+        let ((_, height), position) = self.native_index.range(keys).next()?;
         self.native
-            .range(..=max_height)
-            .flat_map(|(_, txs)| txs)
+            .get(height)?
+            .get(usize::try_from(*position).ok()?)
             .map(|native| &native.tx)
-            .find(|tx| tx.txid == *txid)
+            .filter(|tx| tx.txid == *txid)
+    }
+
+    /// Appends native transactions confirmed at `height` to that height's list, in their order, and indexes them.
+    fn put_native(&mut self, height: u32, txs: Vec<Native>) {
+        let list = self.native.entry(height).or_default();
+        for native in txs {
+            let position = u32::try_from(list.len()).unwrap_or(u32::MAX);
+            self.native_index
+                .entry((native.tx.txid, height))
+                .or_insert(position);
+            list.push(native);
+        }
+    }
+
+    /// Takes the heights of `dropped`, which left `native`, out of the index.
+    fn forget_native(&mut self, dropped: &BTreeMap<u32, Vec<Native>>) {
+        for (height, txs) in dropped {
+            for native in txs {
+                self.native_index.remove(&(native.tx.txid, *height));
+            }
+        }
     }
 
     /// The native transactions in the height range, in ascending order of height and index within the block (§7.4).
@@ -700,12 +731,9 @@ impl BtcSnapshot {
             None => 0,
         };
         self.chain.truncate(keep);
-        let removed_native = self
-            .native
-            .split_off(&height.saturating_add(1))
-            .values()
-            .map(Vec::len)
-            .sum();
+        let removed = self.native.split_off(&height.saturating_add(1));
+        self.forget_native(&removed);
+        let removed_native = removed.values().map(Vec::len).sum();
         self.counted.retain(|_, c| c.landing.height <= height);
         self.headers_by_height.split_off(&height.saturating_add(1));
         self.bodies.retain(|_, body| body.landing.height <= height);
@@ -736,7 +764,9 @@ impl BtcSnapshot {
         let drop = usize::try_from(cut.saturating_sub(self.base)).unwrap_or(usize::MAX);
         self.chain.drain(..drop.min(self.chain.len()));
         self.base = cut;
-        self.native = self.native.split_off(&cut);
+        let kept = self.native.split_off(&cut);
+        let dropped = std::mem::replace(&mut self.native, kept);
+        self.forget_native(&dropped);
         self.headers_by_height = self.headers_by_height.split_off(&cut);
         self.ksn1_txs.retain(|_, h| *h >= cut);
         let before = self.counted.len().saturating_add(self.bodies.len());
@@ -812,15 +842,20 @@ impl BtcSnapshot {
                 },
             );
         }
-        Ok(BtcSnapshot {
+        let mut snapshot = BtcSnapshot {
             base: record.base,
             chain: record.chain,
-            native,
+            native: BTreeMap::new(),
+            native_index: BTreeMap::new(),
             counted: record.counted,
             headers_by_height: record.headers_by_height,
             bodies,
             ksn1_txs: record.ksn1_txs,
-        })
+        };
+        for (height, txs) in native {
+            snapshot.put_native(height, txs);
+        }
+        Ok(snapshot)
     }
 }
 
@@ -858,7 +893,7 @@ impl BtcSnapshot {
     /// For tests: a native transaction confirmed at height `height` (after those already there).
     pub(crate) fn push_native(&mut self, height: u32, tx: NativeTx) {
         let native = Native::new(tx).expect("the forced-inclusion entry encodes");
-        self.native.entry(height).or_default().push(native);
+        self.put_native(height, vec![native]);
     }
 
     /// For tests: a fast-lane header counts at BTC height `height` (unless it already counts); the sender is a
@@ -1441,7 +1476,7 @@ impl BtcTracker {
             .collect::<Result<Vec<_>, _>>()
             .map_err(TrackerError::Internal)?;
         if !natives.is_empty() {
-            snap.native.insert(height, natives);
+            snap.put_native(height, natives);
         }
         let mut scanned = Vec::new();
         for (index, tx) in block.txdata.iter().enumerate() {
@@ -3291,5 +3326,95 @@ mod counting_tests {
                 prop_assert_eq!(&*body, &entries(&unlock(h.nonce)));
             }
         }
+    }
+
+    /// A2-14: the lookups by transaction ID answer from the index what a scan of the snapshot's native transactions in
+    /// height order finds first, also for an ID confirmed at more than one height or twice in one block, and after the
+    /// snapshot is truncated and pruned.
+    #[test]
+    fn native_lookups_by_id_answer_as_a_scan_does() {
+        let native = |txid: u8, nonce: u64| NativeTx {
+            txid: [txid; 32],
+            op: native_op(nonce, 0),
+            first_input: OutPoint {
+                txid: [txid ^ 0xff; 32],
+                vout: 0,
+            },
+            outputs: Vec::new(),
+        };
+        let scan =
+            |snapshot: &BtcSnapshot, txid: &[u8; 32], heights: std::ops::RangeInclusive<u32>| {
+                (heights.start() <= heights.end())
+                    .then(|| snapshot.native.range(heights))
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|(_, txs)| txs)
+                    .map(|native| native.tx.clone())
+                    .find(|tx| tx.txid == *txid)
+            };
+        let check = |snapshot: &BtcSnapshot| {
+            for txid in 0..8u8 {
+                let txid = [txid; 32];
+                for low in 0..14u32 {
+                    for high in 0..14u32 {
+                        assert_eq!(
+                            snapshot.native_tx_in(&txid, low..=high).cloned(),
+                            scan(snapshot, &txid, low..=high),
+                            "{low}..={high}"
+                        );
+                    }
+                    assert_eq!(
+                        snapshot.native_tx_at_most(&txid, low).cloned(),
+                        scan(snapshot, &txid, 0..=low)
+                    );
+                }
+            }
+            let listed: usize = snapshot.native.values().map(Vec::len).sum();
+            assert!(snapshot.native_index.len() <= listed);
+        };
+        let mut snapshot = BtcSnapshot::testing(0);
+        for height in 0..12u8 {
+            snapshot.push_block([height; 32], 0);
+        }
+        let mut nonce = 0;
+        for (height, txid) in [
+            (1, 1),
+            (3, 2),
+            (3, 3),
+            (3, 2),
+            (4, 4),
+            (6, 1),
+            (7, 5),
+            (9, 3),
+            (9, 6),
+            (11, 1),
+        ] {
+            nonce += 1;
+            snapshot.push_native(height, native(txid, nonce));
+        }
+        check(&snapshot);
+        // the one of two with the same ID in a block that comes first, and the lowest height of several
+        assert_eq!(
+            snapshot.native_tx_in(&[2; 32], 0..=11).unwrap().op,
+            native_op(2, 0)
+        );
+        assert_eq!(
+            snapshot.native_tx_in(&[1; 32], 2..=11).unwrap().op,
+            native_op(6, 0)
+        );
+        snapshot.truncate(9);
+        check(&snapshot);
+        assert!(snapshot.native_tx_at_most(&[1; 32], 11).is_some());
+        assert_eq!(snapshot.native_tx_in(&[1; 32], 7..=11), None);
+        snapshot.prune(4, &|_| true);
+        check(&snapshot);
+        assert_eq!(snapshot.native_tx_at_most(&[2; 32], 11), None);
+        assert_eq!(
+            snapshot.native_tx_at_most(&[1; 32], 11).unwrap().op,
+            native_op(6, 0)
+        );
+        let restored = BtcSnapshot::from_record(snapshot.record()).unwrap();
+        check(&restored);
+        assert_eq!(restored.native_index, snapshot.native_index);
     }
 }

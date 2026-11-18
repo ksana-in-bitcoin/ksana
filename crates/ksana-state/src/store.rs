@@ -19,6 +19,9 @@ use crate::schema::{
 };
 use crate::{key_hash, schema, tree, StateError, StateRead, StateView, Version, WriteSet};
 
+/// The most versions [`StateDb::prune`] discards in one write batch (A2-18).
+pub const PRUNE_VERSIONS_PER_BATCH: Version = 64;
+
 /// Versioned state database: Jellyfish Merkle Tree + RocksDB. See the crate documentation for the design.
 ///
 /// Write operations ([`commit`](Self::commit), [`rollback_to`](Self::rollback_to), [`prune`](Self::prune)) need
@@ -342,6 +345,11 @@ impl StateDb {
     /// superseded old values: for each key only the latest value among versions `<= keep_from` is kept (none at all
     /// when the latest one is a deletion).
     /// Does nothing when `keep_from <= oldest`; returns an error when `keep_from > latest`.
+    ///
+    /// A jump of many versions is discarded [`PRUNE_VERSIONS_PER_BATCH`] versions at a time, each step in a write batch
+    /// of its own that moves `oldest` with it (A2-18): the batch a step holds in memory is bounded by what that many
+    /// versions changed, and a step that fails or is cut short leaves the store pruned up to the step before it. The
+    /// result is that of one step over the whole jump.
     pub fn prune(&mut self, keep_from: Version) -> Result<(), StateError> {
         let meta = self.meta.ok_or(StateError::Empty)?;
         if keep_from > meta.latest {
@@ -355,6 +363,20 @@ impl StateDb {
             return Ok(());
         }
         self.take_previewed();
+        let mut oldest = meta.oldest;
+        while oldest < keep_from {
+            oldest = oldest
+                .saturating_add(PRUNE_VERSIONS_PER_BATCH)
+                .min(keep_from);
+            self.prune_step(oldest)?;
+        }
+        Ok(())
+    }
+
+    /// One step of [`StateDb::prune`]: discards the versions below `keep_from`, which is above `oldest` and at most
+    /// `latest`, in one write batch.
+    pub(crate) fn prune_step(&mut self, keep_from: Version) -> Result<(), StateError> {
+        let meta = self.meta.ok_or(StateError::Empty)?;
         // The stale records and change records to process all have versions within [oldest, keep_from] (earlier ones
         // were deleted by previous prunings); the iteration starts at oldest, skipping the tombstones left by previous
         // prunings. keep_from <= latest < u64::MAX, cannot overflow.

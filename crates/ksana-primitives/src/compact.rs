@@ -31,6 +31,7 @@
 //! (D-079), and its state root equals the selected parent's: in a run of empty blocks only the first header writes
 //! the state root, each later one is 14 bytes (flags 1, height 1, parents 2, producer 1, timestamp 1, `nonce` 8).
 
+use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Read, Result, Write};
 
 use crate::hash::sha256;
@@ -152,26 +153,26 @@ fn back_reference<T>(items: &[T], index: usize, matches: impl Fn(&T) -> bool) ->
         .and_then(|r| u64::try_from(r).ok())
 }
 
-/// The key of the `r ≥ 1`-th element before `index` in the sequence, checking that it is the element with that key
-/// nearest to `index` (canonical encoding).
-fn reference<T, K: PartialEq>(
-    items: &[T],
+/// The key of the `r ≥ 1`-th element before `index`, the number of elements decoded so far, checking that it is the
+/// element with that key nearest to `index` (canonical encoding): `last` holds, for each key, the position of the last
+/// element with it, so the check is one lookup and not a scan of the elements between (A2-16).
+fn reference(
+    keys: &[[u8; 32]],
+    last: &BTreeMap<[u8; 32], usize>,
     index: usize,
     r: u64,
-    key: impl Fn(&T) -> K,
-) -> Result<K> {
+) -> Result<[u8; 32]> {
     let distance = usize::try_from(r).map_err(|_| invalid("reference out of range"))?;
     let position = index
         .checked_sub(distance)
         .ok_or_else(|| invalid("reference out of range"))?;
-    let target = key(items
+    let target = *keys
         .get(position)
-        .ok_or_else(|| invalid("reference out of range"))?);
-    let closer = position
-        .checked_add(1)
-        .and_then(|from| items.get(from..index))
         .ok_or_else(|| invalid("reference out of range"))?;
-    if closer.iter().any(|item| key(item) == target) {
+    if index != keys.len() || position >= index {
+        return Err(invalid("reference out of range"));
+    }
+    if last.get(&target) != Some(&position) {
         return Err(invalid(
             "reference is not the most recent equal element (non-canonical encoding)",
         ));
@@ -297,6 +298,10 @@ pub fn read_headers<R: Read>(reader: &mut R, max_count: usize) -> Result<Vec<Blo
     let empty = empty_entries_root();
     let mut headers: Vec<BlockHeader> = Vec::with_capacity(count.min(PREALLOCATE));
     let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(count.min(PREALLOCATE));
+    let mut producers: Vec<[u8; 32]> = Vec::with_capacity(count.min(PREALLOCATE));
+    // The position of the last header with each hash and of the last one of each producer (A2-16)
+    let mut last_hash: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let mut last_producer: BTreeMap<[u8; 32], usize> = BTreeMap::new();
     for index in 0..count {
         let previous = headers.last();
         let flags = read_byte(reader)?;
@@ -329,14 +334,14 @@ pub fn read_headers<R: Read>(reader: &mut R, max_count: usize) -> Result<Vec<Blo
             let r = read_varint(reader)?;
             let parent = if r == 0 {
                 let parent = read_array(reader)?;
-                if hashes.contains(&parent) {
+                if last_hash.contains_key(&parent) {
                     return Err(invalid(
                         "a parent within the sequence must be referenced (non-canonical encoding)",
                     ));
                 }
                 parent
             } else {
-                reference(&hashes, index, r, |h| *h)?
+                reference(&hashes, &last_hash, index, r)?
             };
             parents.push(parent);
         }
@@ -377,12 +382,12 @@ pub fn read_headers<R: Read>(reader: &mut R, max_count: usize) -> Result<Vec<Blo
         let r = read_varint(reader)?;
         let producer = if r == 0 {
             let producer = read_array(reader)?;
-            if headers.iter().any(|h| h.producer == producer) {
+            if last_producer.contains_key(&producer) {
                 return Err(invalid("a producer already seen in the sequence must be referenced (non-canonical encoding)"));
             }
             producer
         } else {
-            reference(&headers, index, r, |h| h.producer)?
+            reference(&producers, &last_producer, index, r)?
         };
         let timestamp = match previous {
             None => read_varint(reader)?,
@@ -413,7 +418,11 @@ pub fn read_headers<R: Read>(reader: &mut R, max_count: usize) -> Result<Vec<Blo
             bits,
             nonce,
         };
-        hashes.push(header.hash());
+        let hash = header.hash();
+        last_hash.insert(hash, index);
+        last_producer.insert(header.producer, index);
+        hashes.push(hash);
+        producers.push(header.producer);
         headers.push(header);
     }
     Ok(headers)
@@ -599,6 +608,36 @@ mod tests {
         let bytes = encode(&headers);
         assert_eq!(decode(&bytes).unwrap(), headers);
         assert_eq!(encode(&decode(&bytes).unwrap()), bytes);
+    }
+
+    /// A2-16: with the position of the last element of each key, a reference is taken or refused as a scan of the
+    /// elements between it and the index decides, for every distance, at every length of a sequence with repeats.
+    #[test]
+    fn a_reference_is_canonical_as_a_scan_of_the_elements_between_says() {
+        let keys: Vec<[u8; 32]> = [1u8, 2, 1, 3, 2, 2, 4, 1, 5, 3, 3, 1]
+            .iter()
+            .map(|k| [*k; 32])
+            .collect();
+        let mut last = BTreeMap::new();
+        for index in 0..=keys.len() {
+            let seen = &keys[..index];
+            for r in 0..=index as u64 + 2 {
+                let by_scan = usize::try_from(r)
+                    .ok()
+                    .filter(|r| *r >= 1)
+                    .and_then(|r| index.checked_sub(r))
+                    .filter(|position| !seen[position + 1..].contains(&seen[*position]))
+                    .map(|position| seen[position]);
+                assert_eq!(
+                    reference(seen, &last, index, r).ok(),
+                    by_scan,
+                    "{index} {r}"
+                );
+            }
+            if let Some(key) = keys.get(index) {
+                last.insert(*key, index);
+            }
+        }
     }
 
     #[test]

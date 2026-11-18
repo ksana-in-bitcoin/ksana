@@ -32,7 +32,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { ByteReader, concatBytes, equalBytes, u32le, u64le } from './bytes.js';
+import { ByteReader, concatBytes, equalBytes, toHex, u32le, u64le } from './bytes.js';
 import { CodecError } from './schema.js';
 import type { BlockHeader, BtcAnchor } from './types.js';
 
@@ -120,14 +120,16 @@ function backReference<T>(items: readonly T[], matches: (item: T) => boolean): n
   return undefined;
 }
 
-/** The key of the `r`-th (`r ≥ 1`) element before the next position in the sequence, checking that it is the element with that key closest to the next position (canonical encoding). */
-function reference<T>(items: readonly T[], r: bigint, key: (item: T) => Uint8Array): Uint8Array {
-  if (r > BigInt(items.length)) invalid('reference out of range');
-  const position = items.length - Number(r);
-  const target = key(items[position]!);
-  for (let i = position + 1; i < items.length; i++) {
-    if (equalBytes(key(items[i]!), target)) invalid('reference is not the most recent equal element (non-canonical encoding)');
-  }
+/**
+ * The key of the `r`-th (`r ≥ 1`) element before the next position in the sequence, checking that it is the element with that key
+ * closest to the next position (canonical encoding): `last` holds, for each key in hex, the position of the last element with it,
+ * so the check is one lookup and not a scan of the elements between (A2-16).
+ */
+function reference(keys: readonly Uint8Array[], last: ReadonlyMap<string, number>, r: bigint): Uint8Array {
+  if (r > BigInt(keys.length)) invalid('reference out of range');
+  const position = keys.length - Number(r);
+  const target = keys[position]!;
+  if (last.get(toHex(target)) !== position) invalid('reference is not the most recent equal element (non-canonical encoding)');
   return target;
 }
 
@@ -210,6 +212,10 @@ export function readHeaders(reader: ByteReader, hash: HeaderHasher, maxCount: nu
   if (count > maxCount) invalid('too many headers');
   const headers: BlockHeader[] = [];
   const hashes: Uint8Array[] = [];
+  const producers: Uint8Array[] = [];
+  // the position of the last header with each hash and of the last one of each producer (A2-16)
+  const lastHash = new Map<string, number>();
+  const lastProducer = new Map<string, number>();
   for (let index = 0; index < count; index++) {
     const previous = headers[index - 1];
     const flags = reader.u8();
@@ -232,10 +238,10 @@ export function readHeaders(reader: ByteReader, hash: HeaderHasher, maxCount: nu
       const r = readVarint(reader);
       if (r === 0n) {
         const parent = reader.read(32);
-        if (hashes.some((h) => equalBytes(h, parent))) invalid('a parent within the sequence must be referenced (non-canonical encoding)');
+        if (lastHash.has(toHex(parent))) invalid('a parent within the sequence must be referenced (non-canonical encoding)');
         parents.push(parent);
       } else {
-        parents.push(reference(hashes, r, (h) => h).slice());
+        parents.push(reference(hashes, lastHash, r).slice());
       }
     }
     let btcAnchor: BtcAnchor;
@@ -267,11 +273,11 @@ export function readHeaders(reader: ByteReader, hash: HeaderHasher, maxCount: nu
     let producer: Uint8Array;
     if (r === 0n) {
       producer = reader.read(32);
-      if (headers.some((h) => equalBytes(h.producer, producer))) {
+      if (lastProducer.has(toHex(producer))) {
         invalid('a producer already seen in the sequence must be referenced (non-canonical encoding)');
       }
     } else {
-      producer = reference(headers, r, (h) => h.producer).slice();
+      producer = reference(producers, lastProducer, r).slice();
     }
     const timestamp =
       previous === undefined ? readVarint(reader) : applyDelta(previous.timestamp, readVarint(reader));
@@ -295,7 +301,11 @@ export function readHeaders(reader: ByteReader, hash: HeaderHasher, maxCount: nu
       bits,
       nonce,
     };
-    hashes.push(hash(header));
+    const headerHash = hash(header);
+    lastHash.set(toHex(headerHash), headers.length);
+    lastProducer.set(toHex(header.producer), headers.length);
+    hashes.push(headerHash);
+    producers.push(header.producer);
     headers.push(header);
   }
   return headers;

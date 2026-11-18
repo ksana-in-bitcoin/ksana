@@ -1381,11 +1381,38 @@ fn key_info(path: &Path, network: Network) -> Result<Value> {
 }
 
 fn load_secret(path: &Path) -> Result<SecretKey> {
+    warn_if_readable_by_others(path);
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let bytes = parse_id(text.trim(), "secret key")?;
     SecretKey::from_slice(&bytes).context("invalid secret key")
 }
+
+/// Whether a file of this mode can be read by its group or by everyone.
+fn readable_by_others(mode: u32) -> bool {
+    mode & 0o044 != 0
+}
+
+/// Warns when a key file can be read by other users of the machine (F-30); the key is still used, since a file a
+/// container mounts may have no other mode.
+#[cfg(unix)]
+fn warn_if_readable_by_others(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = meta.permissions().mode();
+    if readable_by_others(mode) {
+        eprintln!(
+            "ksana-cli: warning: the key file {} can be read by other users (mode {:o}); chmod 600 it",
+            path.display(),
+            mode & 0o777
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_readable_by_others(_: &Path) {}
 
 fn load_keypair(path: &Path) -> Result<Keypair> {
     Ok(Keypair::from_secret_key(
@@ -1511,6 +1538,17 @@ fn parse_account(s: &str, network: Network) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-30: a key file its group or everyone can read is warned about; one only its owner reads is not.
+    #[test]
+    fn a_key_file_others_can_read_is_one_with_a_group_or_world_read_bit() {
+        for mode in [0o644, 0o640, 0o604, 0o444, 0o660] {
+            assert!(readable_by_others(mode), "{mode:o}");
+        }
+        for mode in [0o600, 0o400, 0o700, 0o611] {
+            assert!(!readable_by_others(mode), "{mode:o}");
+        }
+    }
 
     /// The SDK's `payBy` (`sdk/ts/src/topUp.ts`): `expiry + RELEASE_DELAY − native_confirmations − 1` (F-22).
     #[test]
