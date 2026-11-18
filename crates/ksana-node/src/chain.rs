@@ -5047,7 +5047,15 @@ impl Chain {
             .oldest_version()
             .is_some_and(|oldest| keep_from > oldest)
         {
-            inner.state.prune(keep_from)?;
+            // The block is connected by now: a pruning that fails is not a failed connect (A2-18). The store stays
+            // pruned up to the step that last went through, and the next block's commit tries again
+            if let Err(e) = inner.state.prune(keep_from) {
+                eprintln!(
+                    "[ksana-node] alert: pruning the state below height {keep_from} failed ({e}); the block at height {} \
+                     is connected, and the next block tries again",
+                    header.height
+                );
+            }
         }
         Ok(new_tip)
     }

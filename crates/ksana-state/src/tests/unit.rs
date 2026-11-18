@@ -312,6 +312,42 @@ fn prune_deletes_superseded_nodes_and_values() {
 
 /// Pruning to k and then rolling back to k: the state, root, `get` / `get_at` / `scan_prefix` are exactly those of
 /// version k before pruning, and a new branch can then be committed from k + 1.
+/// A2-18: a jump of more versions than one batch takes is pruned in steps, and leaves what one step over the whole
+/// jump leaves, in every column family.
+#[test]
+fn a_prune_in_steps_leaves_what_one_step_leaves() {
+    let jump = crate::store::PRUNE_VERSIONS_PER_BATCH * 3 + 5;
+    let build = || {
+        let (dir, mut state) = open();
+        for version in 0..=jump + 3 {
+            let byte = (version % 251) as u8;
+            let mut writes = ws(&[
+                (&[b'k', byte % 7], Some(&[byte])),
+                (&[b'u', byte], Some(b"x")),
+            ]);
+            if version % 5 == 4 {
+                writes.extend(ws(&[(&[b'k', (byte + 3) % 7], None)]));
+            }
+            state.commit(version, &writes).unwrap();
+        }
+        (dir, state)
+    };
+    let (_stepped_dir, mut stepped) = build();
+    let (_single_dir, mut single) = build();
+    stepped.prune(jump).unwrap();
+    single.prune_step(jump).unwrap();
+    assert_eq!(stepped.oldest_version(), Some(jump));
+    assert_eq!(single.oldest_version(), Some(jump));
+    assert_eq!(snapshot_all(&stepped), snapshot_all(&single));
+    consistency::check(&stepped);
+    for version in jump..=jump + 3 {
+        assert_eq!(
+            stepped.root(version).unwrap(),
+            single.root(version).unwrap()
+        );
+    }
+}
+
 #[test]
 fn rollback_to_prune_boundary_restores_exact_state() {
     let (_dir, mut state) = open();
