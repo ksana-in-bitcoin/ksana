@@ -5790,3 +5790,64 @@ D-072 to D-074. Earlier commit messages (from `af2430b` to the M9 commits) still
   `verify_tx_inclusion`; its module example compiles as a doctest), `ksana-cli` (`--max-btc-fee-rate`, `--exchange-code-hash`, `pay_by`; `tests/chain.rs`), the TS SDK
   (`topUp.ts`: `checkExchangeCode`; `compress.ts`), `tests/vectors/compress.json`, the fuzz workspace (`payload_decode`, `differential`, the seeds), the playground's contract
   notes, SPEC §11.
+
+## D-157 The price of a first compilation stays as it is, and of the findings the review of v0.3.0 put second five are closed and three stay as they are (2026-11-18; the first item decided by the project owner; adds to D-148, D-151, D-091, D-093, D-143 and D-156; no consensus change, M69)
+
+- **Problem**: the review of v0.3.0 behind D-156 left the first audit's F-07 for the project owner, and eight findings of the two earlier audits it did not hold a release back for.
+  - **F-07**: a call pays 20 000 gas and 1 per byte of code whether or not the node has the code compiled (D-148 item 4). The review ran the calibration again and read from it 847 s
+    for a block: the time 12 modules of 60 KiB with 1 000 locals took to compile, per unit of gas, as if every call of a block compiled. With D-151 it measured 1.83 s for 100 million
+    gas of calls that go round 260 contracts and 3.21 s over the modules of 1 000 locals. Run once more for this entry (one x86_64 machine, not idle), a compilation of that shape took
+    0.68 to 0.73 s, one over 8 000 locals 0.97 to 1.02 s, and a call of compiled code 0.1 ms.
+  - **A2-14**: a native transaction was looked up by its ID with a scan of every native transaction of the snapshot in the range of heights, once per forced entry.
+  - **A2-16** (the first audit's F-33): the decoder of compact headers checked that a reference names the nearest header with its key by a scan of the headers between, and that a
+    hash or a producer written out was not in the sequence by a scan of it: quadratic in the at most 500 headers of a payload. The SDK's decoder did the same.
+  - **A2-18**: the state store discarded a whole jump of versions in one write batch, and a pruning that failed after a block was connected failed the connect.
+  - **A2-20**: when the heaviest candidate forks deeper than `REORG_WINDOW` the node refuses the switch and does not try the next candidate, and a forced switch that keeps failing
+    pays for its rebuild at every call.
+  - **A2-21**: with a lighter competing chain on BTC every funded node republishes up to its tip at once (D-091).
+  - **F-36**: a block the node already has makes it look for a main-chain switch again.
+  - **F-30**: the CLI takes bitcoind's RPC password as an argument and read a key file whatever its mode.
+  - **F-32**: nothing but the calibration exercised `memory.copy` and `memory.fill`.
+- **Decision**:
+  1. **F-07, decided by the project owner (2026-11-18): no gas value changes, and what remains is accepted.** With D-151 a node compiles a contract's code when it executes the
+     deployment and reads the result from disk afterwards, and a block's data holds one deployment (D-148). What remains: that one compilation, which the table does not price by what
+     it costs and whose time has no proven bound in the size of the code; and a node that keeps no compiled code (`--vm-code-cache-mib 0`), lost its `vm-cache` or is called with more
+     code than the limit holds, which compiles again. The 847 s of the review is not the time of a block a node with the cache executes. A price on deployment by what the code costs
+     to compile, or a limit on a module's shape at deployment, stays possible as a consensus change of its own (§6.9, or before mainnet a restart from genesis).
+  2. **A2-14**: the snapshot keeps an index of its native transactions, (transaction ID, height) → the first position in that height's list, written and deleted with the list
+     (`ksana-btc`, `tracker.rs`). `native_tx_in` and `native_tx_at_most` read the lowest height of the range from it and answer what the scan answered. The index is built from the
+     list when a snapshot is restored; the checkpoint's format is unchanged.
+  3. **A2-16**: the decoder keeps the position of the last header with each hash and of the last one of each producer. A reference is canonical when that position is the one it
+     names, and a key written out is refused when it has a position. `ksana-primitives` (`compact.rs`) and the SDK (`compact.ts`) change together; what is accepted and refused, and
+     with which error, is unchanged.
+  4. **A2-18**: `StateDb::prune` discards at most `PRUNE_VERSIONS_PER_BATCH` (64) versions in one write batch, each step moving `oldest` with it, so a step that fails leaves the
+     store pruned up to the step before. A pruning that fails after the block is connected is reported as an alert; the connect stands and the next block's commit tries again.
+  5. **F-30**: the CLI warns on standard error when a key file can be read by its group or by everyone, and still uses it. `--btc-rpc-pass` stays; `KSANA_BTC_RPC_PASS` gives the
+     password without an argument, as before.
+  6. **F-32**: `ksana-vm/tests/bulk_memory.rs` checks `memory.copy` over overlapping ranges in both directions, `memory.fill` over its range alone, and for both a range that ends at
+     the end of memory (taken) and one byte past it (a trap), with the same result and gas on both engine configurations. The price of an event is a consensus value and is not
+     looked at here.
+  7. **A2-20 stays as it is.** A candidate deeper than `REORG_WINDOW` that is not forced is refused with an alert, and the node keeps its chain. Switching to a lighter candidate
+     instead would put the node on a chain that is neither its own nor the heaviest it knows. The forced switch is the one D-093 describes: it follows BTC finality, and its cost is
+     the rebuild.
+  8. **A2-21 stays as it is.** D-143's turn is skipped on purpose while a competitor is on BTC: the node races the other chain's finality, and waiting up to a minute for another
+     node costs the time the race is about. What D-143 does keep: a republish of another sender in the mempool holds this node's back for the blocks it carries
+     (`REPUBLISH_PATIENCE`).
+  9. **F-36 stays as it is.** The retry is what completes a switch that stopped for a local reason (BTC sync behind). With nothing to switch to it reads the candidates heavier than
+     the tip and returns.
+- **Rationale**: items 2 to 6 remove work or add a check inside one node, library or tool; none changes what a block, a payload or a state root is. For item 1 the measurements of
+  D-148, D-151 and the review agree: with compiled code on disk the cost is one compilation per deployment, about a second for the slowest shape measured. Raising a price for it
+  restarts the signet from genesis, for a cost a block holds once. Items 7 to 9 trade a rare cost for a behaviour chosen earlier (D-091, D-093) and are recorded so that they are
+  not read as overlooked.
+- **Not chosen**:
+  - **A higher gas price per byte of deployed code, or a limit on locals and nesting at deployment** (F-07): both are consensus changes. Either can ride on the next restart from
+    genesis or upgrade if a slower shape is found.
+  - **Refusing a key file others can read** (F-30): a key mounted into a container often has no other mode, and the node does not check the mode of its key files.
+  - **Trying the next candidate inside `best_candidate`** (A2-20): it needs the fork depth of every candidate and changes which chain a node follows in a case that today only
+    raises an alert.
+  - **A flag that says a switch is pending** (F-36): one more piece of state to keep right across restarts for a read that is already short.
+- **Costs and limitations**: the compiler's time has no proven bound (D-148), so a module shape slower than those measured may exist; a node without the cache compiles on calls as
+  before D-151. The figures of item 1 are from x86_64; aarch64 is not measured (SPEC §14). The index of item 2 costs one map entry per native transaction kept. A pruning that keeps
+  failing (item 4) shows only as a repeated alert and a store that grows. With a competitor on BTC several nodes may pay for the same headers (item 8), each up to its fee cap.
+- **Impact**: `ksana-btc` (`tracker.rs`: `native_index`), `ksana-primitives` (`compact.rs`), the TS SDK (`compact.ts`), `ksana-state` (`store.rs`: `PRUNE_VERSIONS_PER_BATCH`),
+  `ksana-node` (`chain.rs`: the pruning at the end of a commit), `ksana-cli` (the warning), `ksana-vm` (`tests/bulk_memory.rs`), SPEC §13.1 and §14.
