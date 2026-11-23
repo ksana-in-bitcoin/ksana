@@ -26,7 +26,7 @@ an instant, and the result is written into Bitcoin for good.
 | Contract playground: edit, compile and deploy example contracts from the browser | <https://playground.ksana.network/> |
 | Documentation | <https://ksana.network/docs/> |
 | Run a node or an indexer on the signet | [`docs/SIGNET.md`](docs/SIGNET.md) |
-| Community | [Discord](https://discord.gg/t7ckfmNMU) |
+| Community | [Discord](https://discord.gg/yTvMJH9mut) |
 
 Everything on the signet is test money, and a consensus change before mainnet restarts it from genesis.
 
